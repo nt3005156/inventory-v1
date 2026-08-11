@@ -1,0 +1,16 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes: [mongo_data:/data/db]
+  api:
+    build: ./server
+    env_file: .env
+    environment: [MONGODB_URI=mongodb://mongo:27017/mittho_ops]
+    depends_on: [mongo]
+    ports: ["4000:4000"]
+  web:
+    build: ./client
+    ports: ["8080:80"]
+    depends_on: [api]
+volumes: {mongo_data: {}}
