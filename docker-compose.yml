@@ -6,7 +6,9 @@ services:
   api:
     build: ./server
     env_file: .env
-    environment: [MONGODB_URI=mongodb://mongo:27017/mittho_ops]
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/mittho_ops
+      CLIENT_URL: http://localhost:5173,http://localhost:8080
     depends_on: [mongo]
     ports: ["4000:4000"]
   web:
