@@ -23,6 +23,14 @@ Open `http://localhost:5173`. API runs at `http://localhost:4000`.
 
 **Demo credentials:** `owner@mittho.com` / `mittho123`
 
+## Windows + Docker Desktop (one-click)
+1. Install and open [Docker Desktop](https://www.docker.com/products/docker-desktop/); wait for the engine to say it is running.
+2. Double-click **`START-WINDOWS.bat`** in the project folder.
+3. The script creates `.env`, builds and starts MongoDB/API/web containers, and asks whether to load the sample Mittho data. Choosing **Y** resets the demo database, so choose **N** after you begin entering real data.
+4. The system opens at `http://localhost:8080`. Demo login: `owner@mittho.com` / `mittho123`.
+
+To stop the system later, open Command Prompt in the project folder and run `docker compose down`. To see errors, run `docker compose logs -f`.
+
 ## Deploy
 Set production `MONGODB_URI`, strong `JWT_SECRET`, and `CLIENT_URL`, then use Docker Compose. On a VPS, put the web app behind TLS (Caddy/Nginx). eSewa and Khalti keys are intentionally environment stubs; no payment credential is hard-coded.
 
