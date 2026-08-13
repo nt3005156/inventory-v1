@@ -11,6 +11,7 @@ import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
+import {publishPurchasingEvent} from '../services/realtime.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -46,12 +47,14 @@ const poStatusSchema = z.object({
 r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, res) => {
   try {
     const body = poStatusSchema.parse(req.body);
-    res.json(await transitionPurchaseOrder({
+    const po = await transitionPurchaseOrder({
       poId: req.params.id,
       status: body.status,
       notes: body.notes,
       user: req.user
-    }));
+    });
+    publishPurchasingEvent(po.branch, {reason: 'po_status', poId: String(po._id), status: po.status});
+    res.json(po);
   } catch (e) {
     fail(res, e);
   }
@@ -84,6 +87,13 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
         idempotencyKey
       });
     });
+    if (!result.duplicate) {
+      publishPurchasingEvent(result.purchaseOrder.branch, {
+        reason: 'receive',
+        poId: String(result.purchaseOrder._id),
+        status: result.purchaseOrder.status
+      });
+    }
     res.status(result.duplicate ? 200 : 201).json(result);
   } catch (e) {
     fail(res, e);
@@ -131,6 +141,12 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
         idempotencyKey
       });
     });
+    if (!result.duplicate) {
+      publishPurchasingEvent(result.purchaseOrder.branch, {
+        reason: 'return',
+        poId: String(result.purchaseOrder._id)
+      });
+    }
     res.status(result.duplicate ? 200 : 201).json(result);
   } catch (e) {
     fail(res, e);
@@ -216,6 +232,12 @@ r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) =
   try {
     const body = invoicePatchSchema.parse(req.body);
     const invoice = await updateSupplierInvoice({invoiceId: req.params.id, user: req.user, patch: body});
+    publishPurchasingEvent(invoice.branch, {
+      reason: invoice.status === 'void' ? 'invoice_void' : 'invoice_update',
+      invoiceId: String(invoice._id),
+      supplierId: invoice.supplier ? String(invoice.supplier) : undefined,
+      status: invoice.status
+    });
     res.json(await SupplierInvoice.findById(invoice._id).populate('supplier purchaseOrder'));
   } catch (e) {
     fail(res, e);

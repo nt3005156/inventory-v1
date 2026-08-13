@@ -122,6 +122,14 @@ export function publishTableEvent(branchId, extra = {}) {
   });
 }
 
+export function publishPurchasingEvent(branchId, extra = {}) {
+  if (!branchId) return;
+  emitKitchenEvent(branchId, 'purchasing:update', {
+    branch: String(branchId),
+    ...extra
+  });
+}
+
 export async function publishKitchenOrder(order, event, extra = {}) {
   try {
     if (!order?._id) return;

@@ -1,4 +1,5 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
+import {connectBranchSocket} from './socket.js';
 
 const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFractionDigits: 2});
 const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
@@ -8,7 +9,7 @@ const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
 const canReceivePo = s => ['approved', 'sent', 'partially_received'].includes(s);
 const poPill = s => ['approved', 'sent', 'partially_received', 'received'].includes(s) ? 'pill ok' : 'pill';
 
-export default function Purchasing({call, branch}) {
+export default function Purchasing({call, branch, token}) {
   const [po, setPo] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [ingredients, setIngredients] = useState([]);
@@ -32,6 +33,8 @@ export default function Purchasing({call, branch}) {
   const [report, setReport] = useState(null);
   const [editId, setEditId] = useState('');
   const [edit, setEdit] = useState({invoiceNo: '', invoiceDate: '', dueDate: '', subtotal: 0, notes: ''});
+  const [live, setLive] = useState('connecting');
+  const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
 
   const load = () => Promise.all([
     call('/purchase-orders' + (branch ? `?branch=${branch._id}` : '')),
@@ -48,6 +51,74 @@ export default function Purchasing({call, branch}) {
   }).catch(e => setError(e.message));
 
   useEffect(() => { load(); }, [branch?._id]);
+
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const openIdRef = useRef(openId);
+  openIdRef.current = openId;
+  const statementIdRef = useRef(statementId);
+  statementIdRef.current = statementId;
+  const payInvoiceIdRef = useRef(payInvoiceId);
+  payInvoiceIdRef.current = payInvoiceId;
+
+  const refreshOpenHistory = async id => {
+    if (!id) return;
+    try {
+      const [r, ret] = await Promise.all([
+        call('/purchase-orders/' + id + '/receipts'),
+        call('/purchase-orders/' + id + '/returns')
+      ]);
+      setReceipts(r);
+      setReturns(ret);
+    } catch {
+      /* list reload still ran */
+    }
+  };
+
+  useEffect(() => {
+    if (live === 'live') return;
+    const tick = setInterval(() => loadRef.current(), 8000);
+    return () => clearInterval(tick);
+  }, [branch?._id, live]);
+
+  useEffect(() => {
+    if (!authToken || !branch?._id) return undefined;
+    const socket = connectBranchSocket(authToken, branch._id);
+    const onUpdate = payload => {
+      if (payload?.branch && String(payload.branch) !== String(branch._id)) return;
+      loadRef.current();
+      if (openIdRef.current && payload.poId && String(payload.poId) === String(openIdRef.current)) {
+        refreshOpenHistory(openIdRef.current);
+      }
+      if (statementIdRef.current && payload.supplierId && String(payload.supplierId) === String(statementIdRef.current)) {
+        call('/suppliers/' + statementIdRef.current + '/statement?branch=' + branch._id)
+          .then(setStatement)
+          .catch(() => {});
+      }
+      if (payInvoiceIdRef.current && payload.invoiceId && String(payload.invoiceId) === String(payInvoiceIdRef.current)) {
+        call('/supplier-invoices/' + payInvoiceIdRef.current + '/payments')
+          .then(setInvoicePays)
+          .catch(() => {});
+      }
+    };
+    socket.on('connect', () => {
+      setLive('live');
+      socket.emit('join:branch', branch._id, ack => {
+        if (ack && ack.ok === false) setError(ack.message || 'Could not join purchasing room');
+      });
+      loadRef.current();
+    });
+    socket.on('disconnect', reason => {
+      setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+    });
+    socket.on('connect_error', () => setLive('reconnecting'));
+    socket.on('purchasing:update', onUpdate);
+    return () => {
+      socket.emit('leave:branch', branch._id);
+      socket.off('purchasing:update', onUpdate);
+      socket.disconnect();
+    };
+  }, [authToken, branch?._id]);
 
   const openReceive = async order => {
     setError('');
@@ -301,8 +372,15 @@ export default function Purchasing({call, branch}) {
 
   return (
     <section className="panel">
-      <h2>Purchasing & goods receiving</h2>
-      <p>POs start as drafts. Submit, then approve, before stock can be received. Accepted qty (received − damaged) posts to the branch ledger in Rs. VAT on supplier invoices is 13%.</p>
+      <div className="title">
+        <div>
+          <h2>Purchasing & goods receiving</h2>
+          <p>POs start as drafts. Submit, then approve, before stock can be received. Live updates follow this branch. VAT on supplier invoices is 13%.</p>
+        </div>
+        <div className="kds-toolbar">
+          <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting'}</span>
+        </div>
+      </div>
       {error && <p className="danger">{error}</p>}
 
       <form className="purchaseform" onSubmit={create}>
