@@ -11,6 +11,7 @@ import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
+import {listLiveInventory} from '../services/inventory.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
 import {publishPurchasingEvent} from '../services/realtime.js';
@@ -275,6 +276,17 @@ r.get('/reports/pnl', auth(['owner', 'manager']), async (req, res) => {
 r.get('/dashboard', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
     res.json(await buildDashboard({
+      branchId: req.query.branch,
+      user: req.user
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/inventory', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    res.json(await listLiveInventory({
       branchId: req.query.branch,
       user: req.user
     }));
