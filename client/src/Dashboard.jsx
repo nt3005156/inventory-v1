@@ -10,8 +10,10 @@ export default function Dashboard({call, branches = [], user}) {
   const owner = user?.role === 'owner';
   const [branchId, setBranchId] = useState(locked ? (assigned || '') : (owner ? '' : (visibleBranches[0]?._id || assigned || '')));
   const [dash, setDash] = useState(null);
+  const [alerts, setAlerts] = useState([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
 
   useEffect(() => {
     if (locked && assigned && branchId !== assigned) setBranchId(assigned);
@@ -22,13 +24,42 @@ export default function Dashboard({call, branches = [], user}) {
     setLoading(true);
     setError('');
     const q = branchId ? '?branch=' + encodeURIComponent(branchId) : '';
-    call('/dashboard' + q)
-      .then(data => setDash(data || {}))
+    Promise.all([call('/dashboard' + q), call('/alerts' + q)])
+      .then(([data, rows]) => {
+        setDash(data || {});
+        setAlerts(Array.isArray(rows) ? rows : []);
+      })
       .catch(e => setError(e.message || 'Could not load dashboard'))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, [branchId]);
+
+  const dismiss = async id => {
+    setBusy(id);
+    setError('');
+    try {
+      await call('/alerts/' + id + '/read', {method: 'PATCH'});
+      setAlerts(curr => curr.filter(a => a._id !== id));
+    } catch (e) {
+      setError(e.message || 'Could not dismiss alert');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const dismissAll = async () => {
+    setBusy('all');
+    setError('');
+    try {
+      await call('/alerts/read' + (branchId ? '?branch=' + encodeURIComponent(branchId) : ''), {method: 'POST'});
+      setAlerts([]);
+    } catch (e) {
+      setError(e.message || 'Could not clear alerts');
+    } finally {
+      setBusy('');
+    }
+  };
 
   const d = dash || {};
   const branchName = branchId ? (visibleBranches.find(b => b._id === branchId)?.name || 'Branch') : 'All branches';
