@@ -12,6 +12,7 @@ import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
+import {buildMenuEngineering} from '../services/menuEngineering.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
 import {publishPurchasingEvent} from '../services/realtime.js';
@@ -289,6 +290,19 @@ r.get('/inventory', auth(['owner', 'manager', 'staff']), async (req, res) => {
     res.json(await listLiveInventory({
       branchId: req.query.branch,
       user: req.user
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/analytics/menu-engineering', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await buildMenuEngineering({
+      branchId: req.query.branch,
+      user: req.user,
+      from: req.query.from,
+      to: req.query.to
     }));
   } catch (e) {
     fail(res, e);

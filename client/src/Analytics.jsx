@@ -11,7 +11,7 @@ export default function Analytics({call, branch}) {
     setError('');
     const q = branch?._id ? `?branch=${branch._id}` : '';
     Promise.all([
-      call('/analytics/menu-engineering'),
+      call('/analytics/menu-engineering' + q),
       call('/reports/pnl' + q)
     ]).then(([m, p]) => {
       setMenu(Array.isArray(m) ? m : []);
@@ -57,14 +57,17 @@ export default function Analytics({call, branch}) {
       </section>
       <section className="panel" style={{marginTop: 18}}>
         <h2>Menu engineering</h2>
-        <p>Kasavan–Smith matrix · popularity versus contribution margin</p>
+        <p>Kasavan–Smith matrix from live orders (cancelled tickets excluded). Popularity is share of plates sold. Margin is menu price minus current recipe cost, NPR.</p>
+        {!menu.length && !error && <p className="empty">No menu items to classify yet.</p>}
+        {!!menu.length && (
         <table>
-          <thead><tr><th>Menu item</th><th>Popularity</th><th>Contribution margin</th><th>Classification</th><th>Recommendation</th></tr></thead>
+          <thead><tr><th>Menu item</th><th>Sold</th><th>Popularity</th><th>Contribution margin</th><th>Classification</th><th>Recommendation</th></tr></thead>
           <tbody>
             {menu.map(x => (
               <tr key={x.id || x.name}>
                 <td><b>{x.name}</b></td>
-                <td>{(x.popularity * 100).toFixed(1)}%</td>
+                <td>{x.soldQty || 0}</td>
+                <td>{(Number(x.popularity || 0) * 100).toFixed(1)}%</td>
                 <td>{rs(x.margin)}</td>
                 <td><label className={'pill ' + String(x.classification || '').toLowerCase()}>{x.classification}</label></td>
                 <td>{x.classification === 'Star' ? 'Protect quality and feature it.' : x.classification === 'Dog' ? 'Review recipe or retire.' : 'Test promotion or pricing.'}</td>
@@ -72,6 +75,7 @@ export default function Analytics({call, branch}) {
             ))}
           </tbody>
         </table>
+        )}
       </section>
     </>
   );

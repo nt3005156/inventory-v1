@@ -1,0 +1,78 @@
+import mongoose from 'mongoose';
+import {MenuItem} from '../models/index.js';
+import {Order} from '../models/operations.js';
+import {assertBranchAccess} from './kitchen.js';
+import {recipeCost} from './engine.js';
+import {money} from './statements.js';
+
+function httpError(message, status) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+function createdAtRange(from, to) {
+  if (!from && !to) return {};
+  const createdAt = {};
+  if (from) createdAt.$gte = new Date(from);
+  if (to) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    createdAt.$lte = end;
+  }
+  return {createdAt};
+}
+
+export function classifyMenuItem(popularity, margin) {
+  if (popularity >= 0.15) return margin >= 100 ? 'Star' : 'Plow-horse';
+  return margin >= 100 ? 'Puzzle' : 'Dog';
+}
+
+export async function buildMenuEngineering({branchId, user, from, to}) {
+  if (branchId) {
+    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
+    assertBranchAccess(user, branchId);
+  }
+
+  const match = {
+    status: {$nin: ['cancelled', 'refunded']},
+    ...(branchId ? {branch: branchId} : {}),
+    ...createdAtRange(from, to)
+  };
+  const [orders, menu] = await Promise.all([
+    Order.find(match).select('items'),
+    MenuItem.find({active: {$ne: false}}).sort({name: 1})
+  ]);
+
+  const sold = {};
+  let totalQty = 0;
+  for (const order of orders) {
+    for (const line of order.items || []) {
+      if (!line.menuItem) continue;
+      const id = String(line.menuItem);
+      const qty = Number(line.qty || 0);
+      sold[id] = (sold[id] || 0) + qty;
+      totalQty += qty;
+    }
+  }
+  const denom = totalQty || 1;
+
+  const rows = [];
+  for (const item of menu) {
+    const soldQty = sold[String(item._id)] || 0;
+    const cost = await recipeCost(item);
+    const margin = money(Number(item.price || 0) - cost);
+    const popularity = soldQty / denom;
+    rows.push({
+      id: item._id,
+      name: item.name,
+      popularity,
+      margin,
+      classification: classifyMenuItem(popularity, margin),
+      soldQty,
+      unitCost: money(cost),
+      source: 'live'
+    });
+  }
+  return rows.sort((a, b) => b.soldQty - a.soldQty || b.margin - a.margin || a.name.localeCompare(b.name));
+}
