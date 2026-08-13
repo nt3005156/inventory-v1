@@ -64,6 +64,7 @@ describe('GET /api/dashboard', () => {
     assert.equal(dash.body.cogs, 11.25);
     assert.equal(dash.body.orders, 1);
     assert.equal(dash.body.expense, 500);
+    assert.equal(dash.body.waste, 0);
     assert.equal(dash.body.profit, -115.75);
     assert.equal(dash.body.inventoryValue, 888.75);
 

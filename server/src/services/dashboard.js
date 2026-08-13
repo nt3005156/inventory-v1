@@ -48,6 +48,7 @@ export async function buildDashboard({branchId, user}) {
     revenue: pnl.revenue,
     cogs: pnl.cogs,
     expense: pnl.expenses,
+    waste: pnl.waste,
     profit: pnl.netProfit,
     orders: pnl.sales.orders,
     inventoryValue,

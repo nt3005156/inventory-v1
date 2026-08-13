@@ -114,8 +114,37 @@ describe('GET /api/reports/pnl', () => {
     assert.equal(pnl.body.purchasing.invoiced, 1130);
     assert.equal(pnl.body.purchasing.vat, 130);
     assert.equal(pnl.body.expenses, 500);
+    assert.equal(pnl.body.waste, 0);
     assert.equal(pnl.body.netProfit, -115.75);
     assert.equal(pnl.body.expenseDetail.scope, 'restaurant');
+  });
+
+  it('subtracts branch waste from net profit and ignores other-branch write-offs', async () => {
+    const sold = await createLiveOrder();
+    assert.equal(sold.status, 201, sold.body?.message);
+    const waste = await request('/api/waste/record', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {branch: String(world.branchA._id), ingredient: String(world.ingredient._id), qty: 1000, reason: 'spoiled'}
+    });
+    assert.equal(waste.status, 201, waste.body?.message);
+    assert.equal(waste.body.totalCost, 45);
+    const other = await request('/api/waste/record', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {branch: String(world.branchB._id), ingredient: String(world.ingredient._id), qty: 2000, reason: 'expired'}
+    });
+    assert.equal(other.status, 201, other.body?.message);
+
+    const pnl = await request('/api/reports/pnl?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(pnl.status, 200, pnl.body?.message);
+    assert.equal(pnl.body.revenue, 395.5);
+    assert.equal(pnl.body.cogs, 11.25);
+    assert.equal(pnl.body.grossProfit, 384.25);
+    assert.equal(pnl.body.waste, 45);
+    assert.equal(pnl.body.wasteDetail.count, 1);
+    assert.equal(pnl.body.expenses, 0);
+    assert.equal(pnl.body.netProfit, 339.25);
   });
 
   it('rejects staff, guests, missing tokens and cross-branch managers', async () => {

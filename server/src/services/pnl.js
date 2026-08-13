@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import {Expense} from '../models/index.js';
-import {Order} from '../models/operations.js';
+import {InventoryTransaction, Order} from '../models/operations.js';
 import {assertBranchAccess} from './kitchen.js';
 import {buildPurchasingReport} from './purchasingReport.js';
 import {money} from './statements.js';
@@ -37,7 +37,13 @@ export async function buildPnl({branchId, user, from, to}) {
     status: {$nin: ['cancelled', 'refunded']}
   };
 
-  const [salesAgg, expenseRows] = await Promise.all([
+  const wasteMatch = {
+    type: 'WASTE',
+    ...(branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {}),
+    ...dates
+  };
+
+  const [salesAgg, expenseRows, wasteRows] = await Promise.all([
     Order.aggregate([
       {$match: orderMatch},
       {$group: {
@@ -49,7 +55,8 @@ export async function buildPnl({branchId, user, from, to}) {
         cogs: {$sum: {$sum: '$items.foodCost'}}
       }}
     ]),
-    Expense.find(Object.keys(dates.createdAt || {}).length ? {date: dates.createdAt} : {})
+    Expense.find(Object.keys(dates.createdAt || {}).length ? {date: dates.createdAt} : {}),
+    InventoryTransaction.find(wasteMatch)
   ]);
 
   const raw = salesAgg[0] || {revenue: 0, orders: 0, discounts: 0, vat: 0, cogs: 0};
@@ -60,8 +67,9 @@ export async function buildPnl({branchId, user, from, to}) {
   const grossProfit = money(revenue - cogs);
   const expenseAmount = money(expenseRows.reduce((s, e) => s + Number(e.amount || 0), 0));
   const expenseVat = money(expenseRows.reduce((s, e) => s + Number(e.vat || 0), 0));
+  const wasteAmount = money(wasteRows.reduce((s, t) => s + Number(t.totalCost || 0), 0));
   const purchases = purchasing.ledger.netStockValue;
-  const netProfit = money(grossProfit - expenseAmount);
+  const netProfit = money(grossProfit - expenseAmount - wasteAmount);
 
   return {
     source: 'live',
@@ -74,6 +82,7 @@ export async function buildPnl({branchId, user, from, to}) {
     cogs,
     grossProfit,
     purchases,
+    waste: wasteAmount,
     expenses: expenseAmount,
     netProfit,
     sales: {
@@ -98,6 +107,11 @@ export async function buildPnl({branchId, user, from, to}) {
       vat: expenseVat,
       count: expenseRows.length,
       scope: 'restaurant'
+    },
+    wasteDetail: {
+      amount: wasteAmount,
+      count: wasteRows.length,
+      scope: 'ledger'
     }
   };
 }

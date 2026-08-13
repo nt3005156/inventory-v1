@@ -9,7 +9,12 @@ const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
 const canReceivePo = s => ['approved', 'sent', 'partially_received'].includes(s);
 const poPill = s => ['approved', 'sent', 'partially_received', 'received'].includes(s) ? 'pill ok' : 'pill';
 
-export default function Purchasing({call, branch, token}) {
+export default function Purchasing({call, branches = [], user, token}) {
+  const assigned = user?.branch || null;
+  const locked = user?.role === 'staff' && assigned;
+  const visibleBranches = locked ? branches.filter(b => b._id === assigned) : branches;
+  const [branchId, setBranchId] = useState(visibleBranches[0]?._id || assigned || '');
+  const branch = visibleBranches.find(b => b._id === branchId) || (branchId ? {_id: branchId} : null);
   const [po, setPo] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [ingredients, setIngredients] = useState([]);
@@ -50,7 +55,23 @@ export default function Purchasing({call, branch, token}) {
     setReport(e);
   }).catch(e => setError(e.message));
 
+  useEffect(() => {
+    if (locked && assigned && branchId !== assigned) setBranchId(assigned);
+    else if (!branchId && visibleBranches[0]) setBranchId(visibleBranches[0]._id);
+  }, [assigned, locked, visibleBranches, branchId]);
+
   useEffect(() => { load(); }, [branch?._id]);
+
+  useEffect(() => {
+    setOpenId('');
+    setReceipts([]);
+    setReturns([]);
+    setStatement(null);
+    setStatementId('');
+    setPayInvoiceId('');
+    setInvoicePays([]);
+    setEditId('');
+  }, [branchId]);
 
   const loadRef = useRef(load);
   loadRef.current = load;

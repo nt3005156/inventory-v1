@@ -1,13 +1,146 @@
-import React,{useEffect,useState}from'react';import{createRoot}from'react-dom/client';import{LayoutDashboard,Package,ShoppingCart,ChefHat,UtensilsCrossed,Armchair,BarChart3,LogOut,Plus,AlertTriangle}from'lucide-react';import Purchasing from './Purchasing.jsx';import StockOps from './StockOps.jsx';import SupplierCatalog from './SupplierCatalog.jsx';import Kds from './Kds.jsx';import Tables from './Tables.jsx';import Analytics from './Analytics.jsx';import Inventory from './Inventory.jsx';import'./style.css';
-const API=import.meta.env.VITE_API_URL||'http://localhost:4000/api';const rs=n=>'Rs. '+Number(n||0).toLocaleString('en-NP',{maximumFractionDigits:0});
-function App(){const [token,setToken]=useState(localStorage.token),[user,setUser]=useState(JSON.parse(localStorage.user||'null')),[page,setPage]=useState('Dashboard'),[data,setData]=useState({}),[loading,setLoading]=useState(false);const call=async(path,opts={})=>{const r=await fetch(API+path,{...opts,headers:{'Content-Type':'application/json',Authorization:'Bearer '+token,...opts.headers}});if(!r.ok)throw new Error((await r.json()).message);return r.status===204?null:r.json()};const load=async()=>{if(!token)return;setLoading(true);try{const [dash,inv,menu,purchases,sales,branches]=await Promise.all(['/dashboard','/inventory','/menu-items','/purchases','/sales','/branches'].map(call));setData({dash,inv,menu,purchases,sales,branches})}catch(e){if(e.message==='Authentication required')logout()}finally{setLoading(false)}};useEffect(()=>{load()},[token]);const logout=()=>{localStorage.clear();setToken(null)};if(!token)return <Login onLogin={(x)=>{localStorage.token=x.token;localStorage.user=JSON.stringify(x.user);setToken(x.token);setUser(x.user)}}/>;return <div className="shell"><aside><div className="brand"><span>mittho</span><small>OPS · Nepal</small></div>{[['Dashboard',LayoutDashboard],['Inventory',Package],['Stock Ops',Package],['Purchases',ShoppingCart],['Supplier Catalog',ShoppingCart],['Tables',Armchair],['POS',ChefHat],['KDS',UtensilsCrossed],['Analytics',BarChart3]].map(([x,I])=><button className={page===x?'active':''} onClick={()=>setPage(x)}><I size={18}/>{x}</button>)}<div className="asidebottom"><small>{user?.name} · {user?.role}</small><button onClick={logout}><LogOut size={17}/> Sign out</button></div></aside><main><header><div><p className="eyebrow">MITTHO BIRYANI HOUSE</p><h1>{page}</h1></div><div className="date">Aaja · {new Date().toLocaleDateString('en-NP',{dateStyle:'full'})}</div></header>{loading?<p>Updating live data…</p>:<Page page={page} data={data} call={call} reload={load} user={user} token={token}/>}</main></div>}
-function Login({onLogin}){const[email,setEmail]=useState('owner@mittho.com'),[password,setPassword]=useState('mittho123'),[error,setError]=useState('');return <div className="login"><form onSubmit={async e=>{e.preventDefault();try{const r=await fetch(API+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});if(!r.ok)throw Error('Incorrect credentials');onLogin(await r.json())}catch(e){setError(e.message)}}}><div className="loginbrand">mittho <span>OPS</span></div><h1>Restaurant, in control.</h1><p>Inventory · costing · sales · profit</p><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email"/><input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password"/>{error&&<p className="danger">{error}</p>}<button>Sign in to workspace</button><small>Demo: owner@mittho.com / mittho123</small></form></div>}
-function Page({page,data,call,reload,user,token}){const d=data.dash||{};if(page==='Dashboard')return <><div className="kpis">{[['Today’s Revenue',d.revenue],['Gross Profit',d.revenue-d.cogs],['Inventory Value',d.inventoryValue],['Orders Today',d.orders]].map(([a,b])=><article><small>{a}</small><strong>{typeof b==='number'?a.includes('Orders')?b:rs(b):'—'}</strong><em>{a==='Gross Profit'?`${d.revenue?((d.revenue-d.cogs)/d.revenue*100).toFixed(1):0}% margin`:a.includes('Orders')?'Live tickets today':'Live branch ledger'}</em></article>)}</div><section className="grid"><div className="panel"><h2>Stock attention</h2>{d.lowStock?.length?<>{d.lowStock.map(i=><div className="row warn"><AlertTriangle size={17}/><b>{i.name}</b><span>{(i.stockQty/1000).toFixed(1)} kg left</span></div>)}</>:<p className="empty">All ingredient levels are healthy.</p>}</div><div className="panel"><h2>Operations pulse</h2><div className="metric"><span>Food cost</span><b>{d.revenue?(d.cogs/d.revenue*100).toFixed(1):0}%</b></div><div className="metric"><span>Operating expenses</span><b>{rs(d.expense)}</b></div><div className="metric"><span>Net profit today</span><b>{rs(d.profit)}</b></div></div></section></>;
-if(page==='Stock Ops')return <StockOps call={call} branches={data.branches||[]} user={user}/>;if(page==='Inventory')return <Inventory call={call} branches={data.branches||[]} user={user}/>;
-if(page==='Tables')return <Tables call={call} branches={data.branches||[]} user={user} token={token}/>;
-if(page==='POS')return <POS menu={data.menu||[]} branch={data.branches?.[0]} call={call} reload={reload}/>;
-if(page==='KDS')return <Kds call={call} branches={data.branches||[]} user={user} token={token}/>;
-if(page==='Purchases')return <Purchasing call={call} branch={data.branches?.[0]} token={token}/>;if(page==='Supplier Catalog')return <SupplierCatalog call={call}/>;
-return <Analytics call={call} branch={data.branches?.[0]}/>}
-function POS({menu,branch,call,reload}){const[cart,setCart]=useState([]),[type,setType]=useState('dine-in'),[payment,setPayment]=useState('cash'),[tableId,setTableId]=useState(''),[tables,setTables]=useState([]),[posError,setPosError]=useState('');useEffect(()=>{if(!branch)return;call('/tables?branch='+branch._id).then(setTables).catch(e=>setPosError(e.message))},[branch?._id]);const add=m=>setCart(c=>{const x=c.find(i=>i._id===m._id);return x?c.map(i=>i._id===m._id?{...i,qty:i.qty+1}:i):[...c,{...m,qty:1}]});const total=cart.reduce((s,x)=>s+x.price*x.qty,0);const seatable=tables.filter(t=>t.active!==false&&['available','reserved'].includes(t.status));return <div className="pos"><section className="panel"><h2>Menu · tap to add</h2><div className="menu">{menu.map(m=><button onClick={()=>add(m)}><small>{m.category}</small><b>{m.name}</b><strong>{rs(m.price)}</strong></button>)}</div></section><section className="panel order"><h2>Current order</h2>{cart.length?cart.map(x=><div className="cart"><b>{x.name}</b><span><button onClick={()=>setCart(c=>c.map(y=>y._id===x._id?{...y,qty:Math.max(1,y.qty-1)}:y))}>−</button> {x.qty} <button onClick={()=>add(x)}>+</button> · {rs(x.price*x.qty)}</span></div>):<p className="empty">Add menu items to begin.</p>}{posError&&<p className="danger">{posError}</p>}<select value={type} onChange={e=>{setType(e.target.value);if(e.target.value!=='dine-in')setTableId('')}}><option value="dine-in">Dine-in</option><option value="takeaway">Takeaway</option><option value="delivery">Delivery</option></select>{type==='dine-in'&&<select value={tableId} onChange={e=>setTableId(e.target.value)}><option value="">No table</option>{seatable.map(t=><option value={t._id}>{t.name} · {t.area||'Floor'} · {t.seats} seats</option>)}</select>}<select value={payment} onChange={e=>setPayment(e.target.value)}><option>cash</option><option>eSewa</option><option>Khalti</option><option>card</option></select><div className="total"><span>Total</span><b>{rs(total)}</b></div><button className="checkout" disabled={!cart.length} onClick={async()=>{if(!branch)return alert('No branch is configured. Run the updated demo seed.');setPosError('');try{const order=await call('/orders',{method:'POST',body:JSON.stringify({branch:branch._id,items:cart.map(x=>({menuItem:x._id,qty:x.qty})),type,table:tableId||undefined,vatRate:13})});await call(`/orders/${order._id}/payments`,{method:'POST',body:JSON.stringify({amount:order.total,method:payment==='eSewa'?'esewa':payment.toLowerCase()})});setCart([]);setTableId('');reload();call('/tables?branch='+branch._id).then(setTables)}catch(e){setPosError(e.message)}}}>Complete order</button></section></div>}
+import React, {useEffect, useState} from 'react';
+import {createRoot} from 'react-dom/client';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, LogOut} from 'lucide-react';
+import Purchasing from './Purchasing.jsx';
+import StockOps from './StockOps.jsx';
+import SupplierCatalog from './SupplierCatalog.jsx';
+import Kds from './Kds.jsx';
+import Tables from './Tables.jsx';
+import Analytics from './Analytics.jsx';
+import Inventory from './Inventory.jsx';
+import Dashboard from './Dashboard.jsx';
+import POS from './Pos.jsx';
+import './style.css';
+
+const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+
+function App() {
+  const [token, setToken] = useState(localStorage.token);
+  const [user, setUser] = useState(JSON.parse(localStorage.user || 'null'));
+  const [page, setPage] = useState('Dashboard');
+  const [data, setData] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const call = async (path, opts = {}) => {
+    const r = await fetch(API + path, {
+      ...opts,
+      headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...opts.headers}
+    });
+    if (!r.ok) throw new Error((await r.json()).message);
+    return r.status === 204 ? null : r.json();
+  };
+
+  const load = async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const [menu, branches] = await Promise.all(['/menu-items', '/branches'].map(call));
+      setData({menu, branches});
+    } catch (e) {
+      if (e.message === 'Authentication required') logout();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, [token]);
+
+  const logout = () => {
+    localStorage.clear();
+    setToken(null);
+  };
+
+  if (!token) {
+    return <Login onLogin={x => {
+      localStorage.token = x.token;
+      localStorage.user = JSON.stringify(x.user);
+      setToken(x.token);
+      setUser(x.user);
+    }}/>;
+  }
+
+  const nav = [
+    ['Dashboard', LayoutDashboard],
+    ['Inventory', Package],
+    ['Stock Ops', Package],
+    ['Purchases', ShoppingCart],
+    ['Supplier Catalog', ShoppingCart],
+    ['Tables', Armchair],
+    ['POS', ChefHat],
+    ['KDS', UtensilsCrossed],
+    ['Analytics', BarChart3]
+  ];
+
+  return (
+    <div className="shell">
+      <aside>
+        <div className="brand"><span>mittho</span><small>OPS · Nepal</small></div>
+        {nav.map(([x, I]) => (
+          <button key={x} className={page === x ? 'active' : ''} onClick={() => setPage(x)}><I size={18}/>{x}</button>
+        ))}
+        <div className="asidebottom">
+          <small>{user?.name} · {user?.role}</small>
+          <button onClick={logout}><LogOut size={17}/> Sign out</button>
+        </div>
+      </aside>
+      <main>
+        <header>
+          <div>
+            <p className="eyebrow">MITTHO BIRYANI HOUSE</p>
+            <h1>{page}</h1>
+          </div>
+          <div className="date">Aaja · {new Date().toLocaleDateString('en-NP', {dateStyle: 'full'})}</div>
+        </header>
+        {loading ? <p>Updating live data…</p> : <Page page={page} data={data} call={call} user={user} token={token}/>}
+      </main>
+    </div>
+  );
+}
+
+function Login({onLogin}) {
+  const [email, setEmail] = useState('owner@mittho.com');
+  const [password, setPassword] = useState('mittho123');
+  const [error, setError] = useState('');
+  return (
+    <div className="login">
+      <form onSubmit={async e => {
+        e.preventDefault();
+        try {
+          const r = await fetch(API + '/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email, password})
+          });
+          if (!r.ok) throw Error('Incorrect credentials');
+          onLogin(await r.json());
+        } catch (e) {
+          setError(e.message);
+        }
+      }}>
+        <div className="loginbrand">mittho <span>OPS</span></div>
+        <h1>Restaurant, in control.</h1>
+        <p>Inventory · costing · sales · profit</p>
+        <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email"/>
+        <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password"/>
+        {error && <p className="danger">{error}</p>}
+        <button>Sign in to workspace</button>
+        <small>Demo: owner@mittho.com / mittho123</small>
+      </form>
+    </div>
+  );
+}
+
+function Page({page, data, call, user, token}) {
+  const branches = data.branches || [];
+  if (page === 'Dashboard') return <Dashboard call={call} branches={branches} user={user}/>;
+  if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user}/>;
+  if (page === 'Inventory') return <Inventory call={call} branches={branches} user={user}/>;
+  if (page === 'Tables') return <Tables call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
+  if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;
+  return <Analytics call={call} branches={branches} user={user}/>;
+}
+
 createRoot(document.getElementById('root')).render(<App/>);
