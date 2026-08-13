@@ -317,3 +317,67 @@ describe('supplier invoice VAT', () => {
     assert.equal(inv.body.status, 'unpaid');
   });
 });
+
+describe('GET /api/reports/purchasing', () => {
+  it('summarizes POs, receipts, returns, invoices and ledger for one branch', async () => {
+    const po = await createPo(1000);
+    const line = po.body.items[0];
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 400, damagedQty: 50, unitPrice: 0.05}], {key: 'rep-gr'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    const ret = await postReturn(po.body._id, [{itemId: String(line._id), qty: 100}], {key: 'rep-pr'});
+    assert.equal(ret.status, 201, ret.body?.message);
+    const inv = await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {branch: String(world.branchA._id), supplier: String(supplier._id), invoiceNo: 'INV-REP', subtotal: 1000, vat: 130, total: 1130}
+    });
+    assert.equal(inv.status, 201, inv.body?.message);
+    await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 130, method: 'cash'}
+    });
+
+    const other = await Supplier.create({name: 'Other Mill'});
+    await request('/api/purchase-orders', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {
+        branch: String(world.branchB._id),
+        supplier: String(other._id),
+        items: [{ingredient: String(world.ingredient._id), orderedQty: 50, unit: 'g', unitPrice: 1}],
+        total: 50
+      }
+    });
+
+    const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(report.status, 200, report.body?.message);
+    assert.equal(report.body.purchaseOrders.count, 1);
+    assert.equal(report.body.purchaseOrders.orderedValue, 50);
+    assert.equal(report.body.purchaseOrders.receivedQty, 400);
+    assert.equal(report.body.purchaseOrders.damagedQty, 50);
+    assert.equal(report.body.purchaseOrders.acceptedQty, 350);
+    assert.equal(report.body.purchaseOrders.returnedQty, 100);
+    assert.equal(report.body.receipts.acceptedValue, 17.5);
+    assert.equal(report.body.receipts.damagedValue, 2.5);
+    assert.equal(report.body.returns.value, 5);
+    assert.equal(report.body.invoices.invoiced, 1130);
+    assert.equal(report.body.invoices.vat, 130);
+    assert.equal(report.body.invoices.paid, 130);
+    assert.equal(report.body.invoices.due, 1000);
+    assert.equal(report.body.ledger.purchaseValue, 17.5);
+    assert.equal(report.body.ledger.returnValue, 5);
+    assert.equal(report.body.ledger.netStockValue, 12.5);
+    assert.equal(report.body.bySupplier.length, 1);
+    assert.equal(report.body.bySupplier[0].name, 'Kathmandu Food Suppliers');
+    assert.equal(report.body.bySupplier[0].due, 1000);
+  });
+
+  it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
+    assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
+    assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id)).status, 401);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: guest})).status, 403);
+    assert.equal((await request('/api/reports/purchasing?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
+  });
+});

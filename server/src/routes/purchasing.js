@@ -8,6 +8,7 @@ import {assertBranchAccess} from '../services/kitchen.js';
 import {receivePurchaseOrder} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
+import {buildPurchasingReport} from '../services/purchasingReport.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -161,6 +162,19 @@ r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req,
     if (!invoice) return res.status(404).json({message: 'Invoice not found'});
     if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
     res.json(await SupplierPayment.find({invoice: invoice._id}).sort({paidAt: 1, createdAt: 1}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/reports/purchasing', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await buildPurchasingReport({
+      branchId: req.query.branch,
+      user: req.user,
+      from: req.query.from,
+      to: req.query.to
+    }));
   } catch (e) {
     fail(res, e);
   }

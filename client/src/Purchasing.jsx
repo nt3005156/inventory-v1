@@ -22,17 +22,24 @@ export default function Purchasing({call, branch}) {
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState({supplier: '', ingredient: '', qty: 1, price: 0});
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
+  const [statementId, setStatementId] = useState('');
+  const [statement, setStatement] = useState(null);
+  const [invoicePays, setInvoicePays] = useState([]);
+  const [payInvoiceId, setPayInvoiceId] = useState('');
+  const [report, setReport] = useState(null);
 
   const load = () => Promise.all([
     call('/purchase-orders' + (branch ? `?branch=${branch._id}` : '')),
     call('/suppliers'),
     call('/ingredients'),
-    call('/supplier-invoices' + (branch ? `?branch=${branch._id}` : ''))
-  ]).then(([a, b, c, d]) => {
+    call('/supplier-invoices' + (branch ? `?branch=${branch._id}` : '')),
+    call('/reports/purchasing' + (branch ? `?branch=${branch._id}` : ''))
+  ]).then(([a, b, c, d, e]) => {
     setPo(a);
     setSuppliers(b);
     setIngredients(c);
     setInvoices(d);
+    setReport(e);
   }).catch(e => setError(e.message));
 
   useEffect(() => { load(); }, [branch?._id]);
@@ -379,6 +386,109 @@ export default function Purchasing({call, branch}) {
           ))}
         </tbody>
       </table>
+      {payInvoiceId && (
+        <div className="receive-box">
+          <h3>Invoice payment history</h3>
+          {!invoicePays.length && <p className="empty">No payments on this invoice yet.</p>}
+          {!!invoicePays.length && (
+            <table>
+              <thead><tr><th>When</th><th>Method</th><th>Amount</th><th>Reference</th></tr></thead>
+              <tbody>
+                {invoicePays.map(p => (
+                  <tr key={p._id}>
+                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP')}</td>
+                    <td>{p.method}</td>
+                    <td>{rs(p.amount)}</td>
+                    <td>{p.reference || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      <h3>Supplier statement</h3>
+      <p>Invoices increase what we owe. Payments reduce it. Amounts are NPR including 13% VAT.</p>
+      <select className="kds-branch" value={statementId} onChange={e => { setStatementId(e.target.value); loadStatement(e.target.value); }}>
+        <option value="">Choose supplier</option>
+        {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
+      </select>
+      {statement && (
+        <div className="receive-box">
+          <div className="kpis" style={{marginTop: 12}}>
+            <article><small>Invoiced</small><strong>{rs(statement.invoiced)}</strong></article>
+            <article><small>Paid</small><strong>{rs(statement.paid)}</strong></article>
+            <article><small>Balance due</small><strong>{rs(statement.balance)}</strong></article>
+          </div>
+          <h3>Statement</h3>
+          {!statement.lines?.length && <p className="empty">No invoices or payments for this supplier.</p>}
+          {!!statement.lines?.length && (
+            <table>
+              <thead><tr><th>Date</th><th>Type</th><th>Ref</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+              <tbody>
+                {statement.lines.map((line, i) => (
+                  <tr key={i}>
+                    <td>{line.date ? new Date(line.date).toLocaleDateString('en-NP') : ''}</td>
+                    <td>{line.type}</td>
+                    <td>{line.ref}{line.method ? ` · ${line.method}` : ''}</td>
+                    <td>{line.debit ? rs(line.debit) : '—'}</td>
+                    <td>{line.credit ? rs(line.credit) : '—'}</td>
+                    <td>{rs(line.balance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <h3>Payment history</h3>
+          {!statement.payments?.length && <p className="empty">No supplier payments recorded.</p>}
+          {!!statement.payments?.length && (
+            <table>
+              <thead><tr><th>When</th><th>Invoice</th><th>Method</th><th>Amount</th></tr></thead>
+              <tbody>
+                {statement.payments.map(p => (
+                  <tr key={p._id}>
+                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP')}</td>
+                    <td>{p.invoice?.invoiceNo || '—'}</td>
+                    <td>{p.method}</td>
+                    <td>{rs(p.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      <h3>Purchasing report</h3>
+      <p>Live branch totals from purchase orders, receipts, returns, invoices and the inventory ledger.</p>
+      {!report && <p className="empty">Report loads with the branch.</p>}
+      {report && (
+        <div className="receive-box">
+          <div className="kpis">
+            <article><small>PO value</small><strong>{rs(report.purchaseOrders?.orderedValue)}</strong><em>{report.purchaseOrders?.count || 0} open/received POs</em></article>
+            <article><small>Accepted stock value</small><strong>{rs(report.receipts?.acceptedValue)}</strong><em>Damaged {rs(report.receipts?.damagedValue)}</em></article>
+            <article><small>Returned value</small><strong>{rs(report.returns?.value)}</strong><em>{report.returns?.count || 0} returns</em></article>
+            <article><small>Invoice due</small><strong>{rs(report.invoices?.due)}</strong><em>VAT {rs(report.invoices?.vat)}</em></article>
+          </div>
+          <table>
+            <thead><tr><th>Supplier</th><th>POs</th><th>Ordered</th><th>Invoiced</th><th>Paid</th><th>Due</th></tr></thead>
+            <tbody>
+              {(report.bySupplier || []).map(row => (
+                <tr key={row.supplierId || row.name}>
+                  <td>{row.name}</td>
+                  <td>{row.poCount}</td>
+                  <td>{rs(row.orderedValue)}</td>
+                  <td>{rs(row.invoiced)}</td>
+                  <td>{rs(row.paid)}</td>
+                  <td>{rs(row.due)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p>Ledger net stock value {rs(report.ledger?.netStockValue)} · purchases {rs(report.ledger?.purchaseValue)} · returns {rs(report.ledger?.returnValue)}</p>
+        </div>
+      )}
     </section>
   );
 }
