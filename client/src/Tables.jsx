@@ -35,6 +35,7 @@ export default function Tables({call, branches = [], user}) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState({name: '', area: 'Main Hall', seats: 4});
+  const [ops, setOps] = useState({});
   const canManage = ['owner', 'manager'].includes(user?.role);
   const canOperate = ['owner', 'manager', 'staff'].includes(user?.role);
 
@@ -87,6 +88,38 @@ export default function Tables({call, branches = [], user}) {
     }
   };
 
+  const move = async table => {
+    const toTable = ops[table._id]?.moveTo;
+    if (!toTable) return;
+    setBusy(table._id + 'move');
+    setError('');
+    try {
+      await call('/tables/' + table._id + '/move', {method: 'POST', body: JSON.stringify({toTable})});
+      setOps(x => ({...x, [table._id]: {}}));
+      load();
+    } catch (e) {
+      setError(e.message || 'Move failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const merge = async table => {
+    const intoTable = ops[table._id]?.mergeTo;
+    if (!intoTable) return;
+    setBusy(table._id + 'merge');
+    setError('');
+    try {
+      await call('/tables/' + table._id + '/merge', {method: 'POST', body: JSON.stringify({intoTable})});
+      setOps(x => ({...x, [table._id]: {}}));
+      load();
+    } catch (e) {
+      setError(e.message || 'Merge failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const create = async e => {
     e.preventDefault();
     if (!branchId) return;
@@ -111,7 +144,7 @@ export default function Tables({call, branches = [], user}) {
       <div className="title">
         <div>
           <h2>Floor tables</h2>
-          <p>Branch seating · linked to open dine-in orders · NPR checkout stays on the order</p>
+          <p>Branch seating · move or merge open checks · stock is never deducted twice</p>
         </div>
         <select className="kds-branch" value={branchId} disabled={!!locked} onChange={e => setBranchId(e.target.value)}>
           {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
@@ -165,6 +198,34 @@ export default function Tables({call, branches = [], user}) {
                       </button>
                     )}
                   </div>
+                  {canOperate && order && (
+                    <div className="table-ops">
+                      <select
+                        value={ops[table._id]?.moveTo || ''}
+                        onChange={e => setOps(x => ({...x, [table._id]: {...x[table._id], moveTo: e.target.value}}))}
+                      >
+                        <option value="">Move to…</option>
+                        {rows.filter(t => t._id !== table._id && t.active !== false && (['available', 'reserved'].includes(t.status) || (t.status === 'occupied' && !t.currentOrder))).map(t => (
+                          <option key={t._id} value={t._id}>{t.name}</option>
+                        ))}
+                      </select>
+                      <button className="kds-go" disabled={!!busy || !ops[table._id]?.moveTo} onClick={() => move(table)}>
+                        {busy === table._id + 'move' ? 'Updating…' : 'Move'}
+                      </button>
+                      <select
+                        value={ops[table._id]?.mergeTo || ''}
+                        onChange={e => setOps(x => ({...x, [table._id]: {...x[table._id], mergeTo: e.target.value}}))}
+                      >
+                        <option value="">Merge into…</option>
+                        {rows.filter(t => t._id !== table._id && t.currentOrder).map(t => (
+                          <option key={t._id} value={t._id}>{t.name} · {t.currentOrder.orderNo}</option>
+                        ))}
+                      </select>
+                      <button className="kds-go" disabled={!!busy || !ops[table._id]?.mergeTo} onClick={() => merge(table)}>
+                        {busy === table._id + 'merge' ? 'Updating…' : 'Merge'}
+                      </button>
+                    </div>
+                  )}
                 </article>
               );
             })}

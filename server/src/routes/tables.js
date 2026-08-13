@@ -5,8 +5,9 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {OPEN_ORDER_STATUSES, applyTableStatus} from '../services/tables.js';
+import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders} from '../services/tables.js';
 import {Order} from '../models/operations.js';
+import {publishKitchenOrder} from '../services/realtime.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -73,6 +74,41 @@ r.post('/tables', auth(['owner', 'manager']), async (req, res) => {
     res.status(201).json({...table.toJSON(), currentOrder: null});
   } catch (e) {
     fail(res, e);
+  }
+});
+
+r.post('/tables/:id/move', auth(roles), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const toTable = z.object({toTable: z.string().min(1)}).parse(req.body).toTable;
+    let result;
+    await session.withTransaction(async () => {
+      result = await moveOrderToTable({fromTableId: req.params.id, toTableId: toTable, user: req.user, session});
+    });
+    await publishKitchenOrder(result.order, 'kitchen:status');
+    res.json(result);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+r.post('/tables/:id/merge', auth(roles), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const intoTable = z.object({intoTable: z.string().min(1)}).parse(req.body).intoTable;
+    let result;
+    await session.withTransaction(async () => {
+      result = await mergeTableOrders({fromTableId: req.params.id, intoTableId: intoTable, user: req.user, session});
+    });
+    await publishKitchenOrder(result.mergedOrder, 'kitchen:status');
+    await publishKitchenOrder(result.order, 'kitchen:status');
+    res.json(result);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 
