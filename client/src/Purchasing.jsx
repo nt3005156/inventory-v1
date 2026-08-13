@@ -2,6 +2,8 @@ import React, {useEffect, useState} from 'react';
 
 const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFractionDigits: 2});
 const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
+const accepted = line => Math.max(0, Number(line.receivedQty || 0) - Number(line.damagedQty || 0));
+const returnable = line => Math.max(0, accepted(line) - Number(line.returnedQty || 0));
 
 export default function Purchasing({call, branch}) {
   const [po, setPo] = useState([]);
@@ -9,10 +11,14 @@ export default function Purchasing({call, branch}) {
   const [ingredients, setIngredients] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [receipts, setReceipts] = useState([]);
+  const [returns, setReturns] = useState([]);
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState('');
   const [lines, setLines] = useState({});
+  const [retLines, setRetLines] = useState({});
   const [notes, setNotes] = useState('');
+  const [returnNotes, setReturnNotes] = useState('');
+  const [reason, setReason] = useState('quality');
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState({supplier: '', ingredient: '', qty: 1, price: 0});
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
@@ -41,10 +47,19 @@ export default function Purchasing({call, branch}) {
       batchNumber: '',
       expiryDate: ''
     }])));
+    setReturnNotes('');
+    setReason('quality');
+    setRetLines(Object.fromEntries((order.items || []).map(i => [i._id, {qty: 0, batchNumber: ''}])));
     try {
-      setReceipts(await call('/purchase-orders/' + order._id + '/receipts'));
+      const [r, ret] = await Promise.all([
+        call('/purchase-orders/' + order._id + '/receipts'),
+        call('/purchase-orders/' + order._id + '/returns')
+      ]);
+      setReceipts(r);
+      setReturns(ret);
     } catch (e) {
       setReceipts([]);
+      setReturns([]);
       setError(e.message);
     }
   };
@@ -95,6 +110,31 @@ export default function Purchasing({call, branch}) {
       await openReceive(fresh);
     } catch (e) {
       setError(e.message || 'Receiving failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const postReturn = async order => {
+    const items = (order.items || []).map(i => {
+      const row = retLines[i._id] || {};
+      return {itemId: i._id, qty: Number(row.qty || 0), unitPrice: i.unitPrice, batchNumber: row.batchNumber || undefined};
+    }).filter(x => x.qty > 0);
+    if (!items.length) return;
+    setBusy('ret-' + order._id);
+    setError('');
+    try {
+      await call('/purchase-orders/' + order._id + '/returns', {
+        method: 'POST',
+        headers: {'Idempotency-Key': 'ret-' + order._id + '-' + Date.now()},
+        body: JSON.stringify({items, reason, notes: returnNotes})
+      });
+      setReturnNotes('');
+      await load();
+      const fresh = await call('/purchase-orders/' + order._id);
+      await openReceive(fresh);
+    } catch (e) {
+      setError(e.message || 'Return failed');
     } finally {
       setBusy('');
     }
@@ -168,7 +208,7 @@ export default function Purchasing({call, branch}) {
               <td>{x.items?.map(i => remaining(i)).join(', ')}</td>
               <td><label className="pill ok">{x.status}</label></td>
               <td>{rs(x.total)}</td>
-              <td>{!['received', 'cancelled'].includes(x.status) && <button className="receive" onClick={() => openReceive(x)}>Receive</button>}</td>
+              <td><button className="receive" onClick={() => openReceive(x)}>{['received', 'cancelled'].includes(x.status) ? 'Open' : 'Receive / return'}</button></td>
             </tr>
           ))}
         </tbody>
@@ -203,6 +243,55 @@ export default function Purchasing({call, branch}) {
           </table>
           <input className="receive-notes" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes"/>
           <button className="receive" disabled={!!busy} onClick={() => receive(open)}>{busy ? 'Posting…' : 'Post receipt'}</button>
+
+          {(open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
+            <div>
+              <h3>Return to supplier</h3>
+              <p>Returnable is accepted stock still on this PO (received − damaged − already returned). This deducts usable inventory.</p>
+              <table>
+                <thead><tr><th>Ingredient</th><th>Accepted</th><th>Already returned</th><th>Returnable</th><th>Return now</th><th>Batch</th></tr></thead>
+                <tbody>
+                  {(open.items || []).map(i => {
+                    const row = retLines[i._id] || {qty: 0};
+                    return (
+                      <tr key={'ret-' + i._id}>
+                        <td>{i.ingredient?.name || 'Ingredient'}</td>
+                        <td>{accepted(i)}</td>
+                        <td>{i.returnedQty || 0}</td>
+                        <td>{returnable(i)}</td>
+                        <td><input type="number" min="0" max={returnable(i)} value={row.qty} onChange={e => setRetLines(s => ({...s, [i._id]: {...row, qty: e.target.value}}))}/></td>
+                        <td><input value={row.batchNumber || ''} onChange={e => setRetLines(s => ({...s, [i._id]: {...row, batchNumber: e.target.value}}))} placeholder="Batch"/></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <select className="receive-notes" value={reason} onChange={e => setReason(e.target.value)}>
+                {['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'].map(x => <option key={x} value={x}>{x.replace('_', ' ')}</option>)}
+              </select>
+              <input className="receive-notes" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} placeholder="Return notes"/>
+              <button className="receive" disabled={!!busy} onClick={() => postReturn(open)}>{String(busy).startsWith('ret-') ? 'Posting…' : 'Post return'}</button>
+            </div>
+          )}
+
+          <h3>Return history</h3>
+          {!returns.length && <p className="empty">No returns posted yet.</p>}
+          {!!returns.length && (
+            <table>
+              <thead><tr><th>Return</th><th>Qty</th><th>Reason</th><th>Notes</th><th>When</th></tr></thead>
+              <tbody>
+                {returns.map(r => (
+                  <tr key={r._id}>
+                    <td>{r.returnNo}</td>
+                    <td>{r.items?.map(i => i.qty).join(', ')}</td>
+                    <td>{r.reason}</td>
+                    <td>{r.notes || '—'}</td>
+                    <td>{r.createdAt ? new Date(r.createdAt).toLocaleString('en-NP') : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           <h3>Receipt history</h3>
           {!receipts.length && <p className="empty">No receipts posted yet.</p>}

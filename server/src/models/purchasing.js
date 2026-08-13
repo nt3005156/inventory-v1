@@ -23,3 +23,22 @@ export const GoodsReceipt = model('GoodsReceipt', new Schema({
     expiryDate: Date
   }]
 }, {timestamps: true}));
+
+export const PurchaseReturn = model('PurchaseReturn', new Schema({
+  returnNo: {type: String, index: true},
+  purchaseOrder: {...oid, ref: 'PurchaseOrder', required: true, index: true},
+  branch: {...oid, ref: 'Branch', index: true},
+  supplier: {...oid, ref: 'Supplier'},
+  reason: {type: String, enum: ['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'], default: 'quality'},
+  notes: String,
+  idempotencyKey: {type: String, sparse: true, unique: true},
+  returnedBy: {...oid, ref: 'User'},
+  items: [{
+    poItem: oid,
+    ingredient: {...oid, ref: 'Ingredient'},
+    qty: n,
+    unit: String,
+    unitCost: n,
+    batchNumber: String
+  }]
+}, {timestamps: true}));

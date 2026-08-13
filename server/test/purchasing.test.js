@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
 import {Supplier} from '../src/models/index.js';
 import {InventoryBalance, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
-import {GoodsReceipt} from '../src/models/purchasing.js';
+import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {acceptedQty, remainingQty} from '../src/services/receiving.js';
+import {returnableQty} from '../src/services/returns.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
 let world;
@@ -47,10 +48,20 @@ function receive(poId, items, extras = {}) {
   });
 }
 
+function postReturn(poId, items, extras = {}) {
+  return request('/api/purchase-orders/' + poId + '/returns', {
+    method: 'POST',
+    token: tokenFor(extras.user || world.manager),
+    headers: extras.key ? {'Idempotency-Key': extras.key} : {},
+    body: {items, reason: extras.reason || 'quality', notes: extras.notes}
+  });
+}
+
 describe('receiving helpers', () => {
-  it('computes remaining and accepted quantities', () => {
+  it('computes remaining, accepted and returnable quantities', () => {
     assert.equal(remainingQty({orderedQty: 1000, receivedQty: 400}), 600);
     assert.equal(acceptedQty(100, 15), 85);
+    assert.equal(returnableQty({receivedQty: 400, damagedQty: 50, returnedQty: 100}), 250);
   });
 });
 
@@ -123,6 +134,83 @@ describe('POST /api/purchase-orders/:id/receive', () => {
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/receive', {method: 'POST', body})).status, 401);
     const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/receive', {method: 'POST', token: guest, body})).status, 403);
+  });
+});
+
+describe('POST /api/purchase-orders/:id/returns', () => {
+  it('returns accepted stock and posts a RETURN ledger row', async () => {
+    const po = await createPo(1000);
+    const line = po.body.items[0];
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 400, damagedQty: 50}], {key: 'ret-gr'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    const before = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
+    const res = await postReturn(po.body._id, [{itemId: String(line._id), qty: 100}], {reason: 'quality', notes: 'Off smell', key: 'pr-1'});
+    assert.equal(res.status, 201, res.body?.message);
+    assert.equal(res.body.purchaseReturn.items[0].qty, 100);
+    assert.equal(res.body.purchaseOrder.items[0].returnedQty, 100);
+    const after = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
+    assert.equal(after.quantity, before.quantity - 100);
+    const txs = await InventoryTransaction.find({type: 'RETURN', referenceType: 'purchase_return'});
+    assert.equal(txs.length, 1);
+    assert.equal(txs[0].changeQty, -100);
+    const history = await request('/api/purchase-orders/' + po.body._id + '/returns', {token: tokenFor(world.owner)});
+    assert.equal(history.status, 200);
+    assert.equal(history.body.length, 1);
+    assert.equal(history.body[0].reason, 'quality');
+  });
+
+  it('rejects returning more than accepted and a second over-return', async () => {
+    const po = await createPo(200);
+    const line = po.body.items[0];
+    assert.equal((await postReturn(po.body._id, [{itemId: String(line._id), qty: 10}])).status, 409);
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 80, damagedQty: 20}], {key: 'ret-gr2'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    assert.equal((await postReturn(po.body._id, [{itemId: String(line._id), qty: 70}])).status, 409);
+    const ok = await postReturn(po.body._id, [{itemId: String(line._id), qty: 40}], {key: 'pr-ok'});
+    assert.equal(ok.status, 201, ok.body?.message);
+    assert.equal((await postReturn(po.body._id, [{itemId: String(line._id), qty: 30}])).status, 409);
+  });
+
+  it('does not double-post a replayed return idempotency key', async () => {
+    const po = await createPo(300);
+    const line = po.body.items[0];
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 200, damagedQty: 0}], {key: 'ret-gr3'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    const first = await postReturn(po.body._id, [{itemId: String(line._id), qty: 50}], {key: 'same-ret'});
+    assert.equal(first.status, 201, first.body?.message);
+    const before = await InventoryTransaction.countDocuments({type: 'RETURN'});
+    const again = await postReturn(po.body._id, [{itemId: String(line._id), qty: 50}], {key: 'same-ret'});
+    assert.equal(again.status, 200, again.body?.message);
+    assert.equal(again.body.duplicate, true);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'RETURN'}), before);
+    assert.equal(await PurchaseReturn.countDocuments({purchaseOrder: po.body._id}), 1);
+  });
+
+  it('rejects cancelled POs, staff, and missing tokens', async () => {
+    const po = await createPo(100);
+    const line = po.body.items[0];
+    await receive(po.body._id, [{itemId: String(line._id), receivedQty: 80, damagedQty: 0}], {key: 'ret-gr4'});
+    await PurchaseOrder.findByIdAndUpdate(po.body._id, {status: 'cancelled'});
+    assert.equal((await postReturn(po.body._id, [{itemId: String(line._id), qty: 10}])).status, 409);
+    const open = await createPo(100);
+    const openLine = open.body.items[0];
+    await receive(open.body._id, [{itemId: String(openLine._id), receivedQty: 50, damagedQty: 0}], {key: 'ret-gr5'});
+    assert.equal((await postReturn(open.body._id, [{itemId: String(openLine._id), qty: 10}], {user: world.staffA})).status, 403);
+    assert.equal((await request('/api/purchase-orders/' + open.body._id + '/returns', {method: 'POST', body: {items: [{itemId: String(openLine._id), qty: 10}]}})).status, 401);
+  });
+
+  it('rejects a return when usable stock is insufficient', async () => {
+    const po = await createPo(100);
+    const line = po.body.items[0];
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 80, damagedQty: 0}], {key: 'ret-gr6'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    await request('/api/inventory/adjustments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {branch: String(world.branchA._id), ingredient: String(world.ingredient._id), qty: -20080, reason: 'Clear stock for return test'}
+    });
+    const res = await postReturn(po.body._id, [{itemId: String(line._id), qty: 80}]);
+    assert.equal(res.status, 409);
   });
 });
 
