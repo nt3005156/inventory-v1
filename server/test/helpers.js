@@ -1,0 +1,115 @@
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
+import {MongoMemoryReplSet} from 'mongodb-memory-server';
+import operations from '../src/routes/operations.js';
+import {User} from '../src/models/index.js';
+import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
+import {Ingredient, MenuItem} from '../src/models/index.js';
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'kds-core-test-secret';
+
+let replset;
+let server;
+let baseUrl;
+
+export function tokenFor(user, extras = {}) {
+  return jwt.sign(
+    {id: user._id, name: user.name, role: user.role, branch: user.branch || null, ...extras},
+    process.env.JWT_SECRET,
+    {expiresIn: '2h'}
+  );
+}
+
+export async function startTestApp() {
+  if (!replset) {
+    replset = await MongoMemoryReplSet.create({replSet: {count: 1, storageEngine: 'wiredTiger'}});
+    await mongoose.connect(replset.getUri());
+  }
+  if (!server) {
+    const app = express();
+    app.use(express.json());
+    app.use('/api', operations);
+    app.use((err, req, res, next) => res.status(err.status || 500).json({message: err.message || 'Server error'}));
+    await new Promise(resolve => {
+      server = app.listen(0, '127.0.0.1', resolve);
+    });
+    const {port} = server.address();
+    baseUrl = `http://127.0.0.1:${port}`;
+  }
+  return {baseUrl};
+}
+
+export async function stopTestApp() {
+  if (server) {
+    await new Promise(resolve => server.close(resolve));
+    server = null;
+  }
+  if (mongoose.connection.readyState) await mongoose.disconnect();
+  if (replset) {
+    await replset.stop();
+    replset = null;
+  }
+}
+
+export async function clearDb() {
+  const collections = await mongoose.connection.db.collections();
+  for (const collection of collections) await collection.deleteMany({});
+}
+
+export async function request(path, {method = 'GET', token, body, headers = {}} = {}) {
+  const res = await fetch(baseUrl + path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? {Authorization: `Bearer ${token}`} : {}),
+      ...headers
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  return {status: res.status, body: data};
+}
+
+export async function seedWorld() {
+  const restaurant = await Restaurant.create({name: 'Mittho Test', currency: 'NPR', vatRate: 13});
+  const branchA = await Branch.create({restaurant: restaurant._id, name: 'Kathmandu Branch', code: 'KTM', address: 'Kalanki'});
+  const branchB = await Branch.create({restaurant: restaurant._id, name: 'Lalitpur Branch', code: 'LTP', address: 'Patan'});
+  const owner = await User.create({name: 'Owner', email: 'owner@test.com', password: 'hashed', role: 'owner', restaurant: 'Mittho Test'});
+  const manager = await User.create({name: 'Manager', email: 'manager@test.com', password: 'hashed', role: 'manager', restaurant: 'Mittho Test', branch: branchA._id});
+  const staffA = await User.create({name: 'Staff A', email: 'staffa@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', branch: branchA._id});
+  const staffB = await User.create({name: 'Staff B', email: 'staffb@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', branch: branchB._id});
+  const ingredient = await Ingredient.create({code: 'ING-T1', name: 'Basmati Rice', unit: 'g', averageCost: 0.045, stockQty: 20000, minimumStock: 2000});
+  const menu = await MenuItem.create({
+    name: 'Chicken Biryani',
+    price: 350,
+    vatInclusive: true,
+    recipe: [{ingredient: ingredient._id, qty: 250, unit: 'g'}]
+  });
+  await InventoryBalance.create({branch: branchA._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
+  await InventoryBalance.create({branch: branchB._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
+  const table = await RestaurantTable.create({branch: branchA._id, name: 'T1', area: 'Main Hall', seats: 4});
+  return {restaurant, branchA, branchB, owner, manager, staffA, staffB, ingredient, menu, table};
+}
+
+export function makeOrder(world, overrides = {}) {
+  return Order.create({
+    orderNo: 'ORD-' + Math.random().toString(36).slice(2, 9).toUpperCase(),
+    branch: world.branchA._id,
+    table: world.table._id,
+    type: 'dine-in',
+    status: 'pending',
+    items: [{menuItem: world.menu._id, name: world.menu.name, qty: 1, unitPrice: 350, foodCost: 11.25, notes: 'less spicy'}],
+    subtotal: 350,
+    vatRate: 13,
+    vat: 45.5,
+    total: 395.5,
+    dueAmount: 395.5,
+    inventoryDeducted: true,
+    inventoryReversed: false,
+    createdBy: world.owner._id,
+    ...overrides
+  });
+}

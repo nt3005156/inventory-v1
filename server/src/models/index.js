@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 const {Schema,model}=mongoose; const money={type:Number,default:0};
 const auditSchema=new Schema({entity:String,entityId:Schema.Types.ObjectId,action:String,before:Schema.Types.Mixed,after:Schema.Types.Mixed,user:{type:Schema.Types.ObjectId,ref:'User'},at:{type:Date,default:Date.now}});
-export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff'],default:'staff'},restaurant:String},{timestamps:true}));
+export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff'],default:'staff'},restaurant:String,branch:{type:Schema.Types.ObjectId,ref:'Branch'}},{timestamps:true}));
 export const Supplier=model('Supplier',new Schema({name:{type:String,required:true},contact:String,address:String,paymentTerms:String,ingredients:[{type:Schema.Types.ObjectId,ref:'Ingredient'}]},{timestamps:true}));
 export const Ingredient=model('Ingredient',new Schema({code:{type:String,unique:true},name:{type:String,required:true},nameNp:String,category:String,unit:{type:String,default:'g'},minimumStock:money,reorderQty:money,stockQty:money,averageCost:money,lastPurchasePrice:money,supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},expiryDate:Date},{timestamps:true}));
 export const PriceHistory=model('PriceHistory',new Schema({ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},price:money,qty:money,unit:String,effectiveAt:{type:Date,default:Date.now},purchase:{type:Schema.Types.ObjectId,ref:'Purchase'},user:{type:Schema.Types.ObjectId,ref:'User'}}));
