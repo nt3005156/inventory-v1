@@ -95,7 +95,8 @@ export async function seedWorld() {
   await InventoryBalance.create({branch: branchA._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
   await InventoryBalance.create({branch: branchB._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
   const table = await RestaurantTable.create({branch: branchA._id, name: 'T1', area: 'Main Hall', seats: 4});
-  return {restaurant, branchA, branchB, owner, manager, staffA, staffB, ingredient, menu, table};
+  const tableB = await RestaurantTable.create({branch: branchB._id, name: 'L1', area: 'Patio', seats: 4});
+  return {restaurant, branchA, branchB, owner, manager, staffA, staffB, ingredient, menu, table, tableB};
 }
 
 export function makeOrder(world, overrides = {}) {
