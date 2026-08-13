@@ -9,6 +9,7 @@ import {receivePurchaseOrder} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
+import {updateSupplierInvoice} from '../services/invoices.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -162,6 +163,40 @@ r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req,
     if (!invoice) return res.status(404).json({message: 'Invoice not found'});
     if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
     res.json(await SupplierPayment.find({invoice: invoice._id}).sort({paidAt: 1, createdAt: 1}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+const invoicePatchSchema = z.object({
+  invoiceNo: z.string().min(1).optional(),
+  invoiceDate: z.string().optional(),
+  dueDate: z.string().nullable().optional(),
+  subtotal: z.number().nonnegative().optional(),
+  vat: z.number().nonnegative().optional(),
+  total: z.number().positive().optional(),
+  notes: z.string().optional(),
+  purchaseOrder: z.string().nullable().optional(),
+  attachmentUrl: z.string().optional(),
+  status: z.enum(['void']).optional()
+});
+
+r.get('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const invoice = await SupplierInvoice.findById(req.params.id).populate('supplier purchaseOrder');
+    if (!invoice) return res.status(404).json({message: 'Invoice not found'});
+    if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
+    res.json(invoice);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const body = invoicePatchSchema.parse(req.body);
+    const invoice = await updateSupplierInvoice({invoiceId: req.params.id, user: req.user, patch: body});
+    res.json(await SupplierInvoice.findById(invoice._id).populate('supplier purchaseOrder'));
   } catch (e) {
     fail(res, e);
   }

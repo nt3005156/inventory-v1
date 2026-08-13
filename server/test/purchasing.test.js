@@ -381,3 +381,227 @@ describe('GET /api/reports/purchasing', () => {
     assert.equal((await request('/api/reports/purchasing?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });
 });
+
+function createInvoice(body = {}) {
+  return request('/api/supplier-invoices', {
+    method: 'POST',
+    token: tokenFor(world.manager),
+    body: {
+      branch: String(world.branchA._id),
+      supplier: String(supplier._id),
+      invoiceNo: 'INV-EDIT',
+      subtotal: 1000,
+      vat: 130,
+      total: 1130,
+      ...body
+    }
+  });
+}
+
+function patchInvoice(id, body, extras = {}) {
+  return request('/api/supplier-invoices/' + id, {
+    method: 'PATCH',
+    token: tokenFor(extras.user || world.manager),
+    body
+  });
+}
+
+describe('PATCH /api/supplier-invoices/:id', () => {
+  it('edits unpaid invoice number, dates, notes and recomputes 13% VAT', async () => {
+    const po = await createPo(200);
+    const inv = await createInvoice({purchaseOrder: String(po.body._id), notes: 'draft'});
+    assert.equal(inv.status, 201, inv.body?.message);
+
+    const patched = await patchInvoice(inv.body._id, {
+      invoiceNo: 'INV-FIXED',
+      invoiceDate: '2026-08-01',
+      dueDate: '2026-08-31',
+      subtotal: 2000,
+      notes: 'Corrected bill'
+    });
+    assert.equal(patched.status, 200, patched.body?.message);
+    assert.equal(patched.body.invoiceNo, 'INV-FIXED');
+    assert.equal(patched.body.subtotal, 2000);
+    assert.equal(patched.body.vat, 260);
+    assert.equal(patched.body.total, 2260);
+    assert.equal(patched.body.notes, 'Corrected bill');
+    assert.equal(patched.body.status, 'unpaid');
+    assert.ok(String(patched.body.invoiceDate).startsWith('2026-08-01'));
+
+    const got = await request('/api/supplier-invoices/' + inv.body._id, {token: tokenFor(world.owner)});
+    assert.equal(got.status, 200);
+    assert.equal(got.body.invoiceNo, 'INV-FIXED');
+    assert.equal(got.body.total, 2260);
+  });
+
+  it('locks amounts after a payment but still allows notes and invoice number', async () => {
+    const inv = await createInvoice();
+    const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 130, method: 'cash'}
+    });
+    assert.equal(paid.status, 201, paid.body?.message);
+
+    const blocked = await patchInvoice(inv.body._id, {subtotal: 500, vat: 65, total: 565});
+    assert.equal(blocked.status, 409, blocked.body?.message);
+
+    const ok = await patchInvoice(inv.body._id, {invoiceNo: 'INV-PAID-NOTE', notes: 'typo fix'});
+    assert.equal(ok.status, 200, ok.body?.message);
+    assert.equal(ok.body.invoiceNo, 'INV-PAID-NOTE');
+    assert.equal(ok.body.notes, 'typo fix');
+    assert.equal(ok.body.total, 1130);
+    assert.equal(ok.body.paidAmount, 130);
+    assert.equal(ok.body.status, 'partial');
+  });
+
+  it('voids an unpaid invoice and drops it from the statement', async () => {
+    const inv = await createInvoice({invoiceNo: 'INV-VOID'});
+    const voided = await patchInvoice(inv.body._id, {status: 'void'});
+    assert.equal(voided.status, 200, voided.body?.message);
+    assert.equal(voided.body.status, 'void');
+
+    const pay = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 100, method: 'cash'}
+    });
+    assert.equal(pay.status, 409);
+
+    const again = await patchInvoice(inv.body._id, {notes: 'nope'});
+    assert.equal(again.status, 409);
+
+    const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(stmt.status, 200);
+    assert.equal(stmt.body.invoiced, 0);
+    assert.equal(stmt.body.lines.length, 0);
+  });
+
+  it('cannot void an invoice that already has payments', async () => {
+    const inv = await createInvoice({invoiceNo: 'INV-NOP'});
+    const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 130, method: 'cash'}
+    });
+    assert.equal(paid.status, 201, paid.body?.message);
+    const voided = await patchInvoice(inv.body._id, {status: 'void'});
+    assert.equal(voided.status, 409);
+  });
+
+  it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
+    const inv = await createInvoice({invoiceNo: 'INV-ACL'});
+    assert.equal((await patchInvoice(inv.body._id, {notes: 'x'}, {user: world.staffA})).status, 403);
+    assert.equal((await request('/api/supplier-invoices/' + inv.body._id, {method: 'PATCH', body: {notes: 'x'}})).status, 401);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    assert.equal((await request('/api/supplier-invoices/' + inv.body._id, {method: 'PATCH', token: guest, body: {notes: 'x'}})).status, 403);
+
+    const other = await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {branch: String(world.branchB._id), supplier: String(supplier._id), invoiceNo: 'INV-B', subtotal: 100, vat: 13, total: 113}
+    });
+    assert.equal(other.status, 201, other.body?.message);
+    assert.equal((await patchInvoice(other.body._id, {notes: 'cross'})).status, 403);
+    assert.equal((await request('/api/supplier-invoices/' + other.body._id, {token: tokenFor(world.manager)})).status, 403);
+  });
+});
+
+describe('purchasing E2E workflow', () => {
+  it('walks PO → receive → return → invoice → edit → pay → statement → report', async () => {
+    const po = await createPo(1000);
+    assert.equal(po.status, 201, po.body?.message);
+    const line = po.body.items[0];
+
+    const rec = await receive(po.body._id, [{
+      itemId: String(line._id),
+      receivedQty: 400,
+      damagedQty: 50,
+      unitPrice: 0.05,
+      batchNumber: 'LOT-E2E',
+      expiryDate: '2026-12-31'
+    }], {notes: 'First truck', key: 'e2e-gr'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    assert.equal(rec.body.purchaseOrder.status, 'partially_received');
+    assert.equal(rec.body.receipt.items[0].acceptedQty, 350);
+
+    const ret = await postReturn(po.body._id, [{itemId: String(line._id), qty: 100}], {reason: 'quality', notes: 'Off smell', key: 'e2e-pr'});
+    assert.equal(ret.status, 201, ret.body?.message);
+    assert.equal(ret.body.purchaseOrder.items[0].returnedQty, 100);
+
+    const inv = await createInvoice({
+      purchaseOrder: String(po.body._id),
+      invoiceNo: 'INV-E2E-DRAFT',
+      subtotal: 1000,
+      vat: 130,
+      total: 1130
+    });
+    assert.equal(inv.status, 201, inv.body?.message);
+
+    const edited = await patchInvoice(inv.body._id, {
+      invoiceNo: 'INV-E2E',
+      subtotal: 2000,
+      notes: 'Corrected after receiving'
+    });
+    assert.equal(edited.status, 200, edited.body?.message);
+    assert.equal(edited.body.invoiceNo, 'INV-E2E');
+    assert.equal(edited.body.vat, 260);
+    assert.equal(edited.body.total, 2260);
+
+    const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 260, method: 'bank', reference: 'E2E-PAY'}
+    });
+    assert.equal(paid.status, 201, paid.body?.message);
+    assert.equal(paid.body.invoice.status, 'partial');
+    assert.equal(paid.body.invoice.paidAmount, 260);
+
+    const amountLock = await patchInvoice(inv.body._id, {subtotal: 100});
+    assert.equal(amountLock.status, 409);
+
+    const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(stmt.status, 200, stmt.body?.message);
+    assert.equal(stmt.body.invoiced, 2260);
+    assert.equal(stmt.body.paid, 260);
+    assert.equal(stmt.body.balance, 2000);
+    assert.equal(stmt.body.lines.length, 2);
+    assert.equal(stmt.body.lines[0].type, 'invoice');
+    assert.equal(stmt.body.lines[0].ref, 'INV-E2E');
+    assert.equal(stmt.body.lines[0].debit, 2260);
+    assert.equal(stmt.body.lines[0].balance, 2260);
+    assert.equal(stmt.body.lines[1].type, 'payment');
+    assert.equal(stmt.body.lines[1].credit, 260);
+    assert.equal(stmt.body.lines[1].balance, 2000);
+
+    const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(report.status, 200, report.body?.message);
+    assert.equal(report.body.purchaseOrders.count, 1);
+    assert.equal(report.body.purchaseOrders.orderedValue, 50);
+    assert.equal(report.body.purchaseOrders.receivedQty, 400);
+    assert.equal(report.body.purchaseOrders.damagedQty, 50);
+    assert.equal(report.body.purchaseOrders.acceptedQty, 350);
+    assert.equal(report.body.purchaseOrders.returnedQty, 100);
+    assert.equal(report.body.receipts.acceptedValue, 17.5);
+    assert.equal(report.body.receipts.damagedValue, 2.5);
+    assert.equal(report.body.returns.value, 5);
+    assert.equal(report.body.invoices.invoiced, 2260);
+    assert.equal(report.body.invoices.vat, 260);
+    assert.equal(report.body.invoices.paid, 260);
+    assert.equal(report.body.invoices.due, 2000);
+    assert.equal(report.body.ledger.purchaseValue, 17.5);
+    assert.equal(report.body.ledger.returnValue, 5);
+    assert.equal(report.body.ledger.netStockValue, 12.5);
+    assert.equal(report.body.bySupplier[0].name, 'Kathmandu Food Suppliers');
+    assert.equal(report.body.bySupplier[0].due, 2000);
+
+    const stock = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
+    assert.equal(stock.quantity, 20000 + 350 - 100);
+    const purchaseTx = await InventoryTransaction.find({type: 'PURCHASE', referenceType: 'goods_receipt'});
+    const returnTx = await InventoryTransaction.find({type: 'RETURN', referenceType: 'purchase_return'});
+    assert.equal(purchaseTx.length, 1);
+    assert.equal(purchaseTx[0].changeQty, 350);
+    assert.equal(returnTx.length, 1);
+    assert.equal(returnTx[0].changeQty, -100);
+  });
+});

@@ -4,6 +4,7 @@ const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFraction
 const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
 const accepted = line => Math.max(0, Number(line.receivedQty || 0) - Number(line.damagedQty || 0));
 const returnable = line => Math.max(0, accepted(line) - Number(line.returnedQty || 0));
+const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
 
 export default function Purchasing({call, branch}) {
   const [po, setPo] = useState([]);
@@ -27,6 +28,8 @@ export default function Purchasing({call, branch}) {
   const [invoicePays, setInvoicePays] = useState([]);
   const [payInvoiceId, setPayInvoiceId] = useState('');
   const [report, setReport] = useState(null);
+  const [editId, setEditId] = useState('');
+  const [edit, setEdit] = useState({invoiceNo: '', invoiceDate: '', dueDate: '', subtotal: 0, notes: ''});
 
   const load = () => Promise.all([
     call('/purchase-orders' + (branch ? `?branch=${branch._id}` : '')),
@@ -209,6 +212,66 @@ export default function Purchasing({call, branch}) {
     }
   };
 
+  const openEdit = inv => {
+    setError('');
+    setEditId(inv._id);
+    setEdit({
+      invoiceNo: inv.invoiceNo || '',
+      invoiceDate: ymd(inv.invoiceDate),
+      dueDate: ymd(inv.dueDate),
+      subtotal: inv.subtotal || 0,
+      notes: inv.notes || ''
+    });
+  };
+
+  const saveEdit = async e => {
+    e.preventDefault();
+    const current = invoices.find(x => x._id === editId);
+    if (!current || current.status === 'void') return;
+    const locked = Number(current.paidAmount || 0) > 0;
+    const subtotal = Number(edit.subtotal || 0);
+    const vat = Math.round(subtotal * 0.13 * 100) / 100;
+    const body = {
+      invoiceNo: edit.invoiceNo,
+      invoiceDate: edit.invoiceDate || undefined,
+      dueDate: edit.dueDate || null,
+      notes: edit.notes
+    };
+    if (!locked) {
+      body.subtotal = subtotal;
+      body.vat = vat;
+      body.total = Math.round((subtotal + vat) * 100) / 100;
+    }
+    setBusy('edit-' + editId);
+    setError('');
+    try {
+      await call('/supplier-invoices/' + editId, {method: 'PATCH', body: JSON.stringify(body)});
+      await load();
+      if (statementId === (current.supplier?._id || current.supplier)) await loadStatement(statementId);
+    } catch (err) {
+      setError(err.message || 'Invoice update failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const voidInvoice = async inv => {
+    if (Number(inv.paidAmount || 0) > 0) return;
+    if (!window.confirm('Void invoice ' + inv.invoiceNo + '? It will drop off the supplier statement.')) return;
+    setBusy('void-' + inv._id);
+    setError('');
+    try {
+      await call('/supplier-invoices/' + inv._id, {method: 'PATCH', body: JSON.stringify({status: 'void'})});
+      if (editId === inv._id) setEditId('');
+      await load();
+      if (statementId === (inv.supplier?._id || inv.supplier)) await loadStatement(statementId);
+    } catch (err) {
+      setError(err.message || 'Void failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const open = po.find(x => x._id === openId);
 
   return (
@@ -376,16 +439,38 @@ export default function Purchasing({call, branch}) {
               <td>{x.supplier?.name}</td>
               <td>{rs(x.total)}</td>
               <td>{rs(x.paidAmount)}</td>
-              <td>{rs(x.total - x.paidAmount)}</td>
-              <td><label className="pill ok">{x.status}</label></td>
+              <td>{rs(x.status === 'void' ? 0 : x.total - x.paidAmount)}</td>
+              <td><label className={x.status === 'void' ? 'pill' : 'pill ok'}>{x.status}</label></td>
               <td>
-                {x.status !== 'paid' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}
+                {x.status !== 'paid' && x.status !== 'void' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}
+                {x.status !== 'void' && <button className="receive" onClick={() => openEdit(x)}>Edit</button>}
+                {x.status === 'unpaid' && Number(x.paidAmount || 0) === 0 && <button className="kds-cancel" onClick={() => voidInvoice(x)}>Void</button>}
                 <button className="receive" onClick={() => showInvoicePays(x)}>Payments</button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+      {editId && (() => {
+        const current = invoices.find(x => x._id === editId);
+        const locked = Number(current?.paidAmount || 0) > 0;
+        const vat = Math.round(Number(edit.subtotal || 0) * 0.13 * 100) / 100;
+        return (
+          <div className="receive-box">
+            <h3>Edit invoice {current?.invoiceNo || ''}</h3>
+            <p>{locked ? 'Payments exist — amounts stay locked. You can still correct the number, dates and notes.' : 'Unpaid invoice — number, dates, notes and amounts (13% VAT) can be changed.'}</p>
+            <form className="purchaseform" onSubmit={saveEdit}>
+              <input required value={edit.invoiceNo} onChange={e => setEdit({...edit, invoiceNo: e.target.value})} placeholder="Invoice no"/>
+              <input type="date" value={edit.invoiceDate} onChange={e => setEdit({...edit, invoiceDate: e.target.value})}/>
+              <input type="date" value={edit.dueDate} onChange={e => setEdit({...edit, dueDate: e.target.value})}/>
+              <input required min="0" type="number" disabled={locked} value={edit.subtotal} onChange={e => setEdit({...edit, subtotal: e.target.value})} placeholder="Subtotal Rs."/>
+              <button disabled={!!busy}>{String(busy).startsWith('edit-') ? 'Saving…' : 'Save invoice'}</button>
+            </form>
+            <input className="receive-notes" value={edit.notes} onChange={e => setEdit({...edit, notes: e.target.value})} placeholder="Invoice notes"/>
+            <p>VAT 13% = {rs(locked ? current?.vat : vat)} · Total {rs(locked ? current?.total : Number(edit.subtotal || 0) + vat)}</p>
+          </div>
+        );
+      })()}
       {payInvoiceId && (
         <div className="receive-box">
           <h3>Invoice payment history</h3>
