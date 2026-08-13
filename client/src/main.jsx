@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, LogOut} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -10,6 +10,7 @@ import Analytics from './Analytics.jsx';
 import Inventory from './Inventory.jsx';
 import Dashboard from './Dashboard.jsx';
 import POS from './Pos.jsx';
+import Expenses from './Expenses.jsx';
 import './style.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
@@ -64,6 +65,7 @@ function App() {
     ['Inventory', Package],
     ['Stock Ops', Package],
     ['Purchases', ShoppingCart],
+    ['Expenses', Receipt],
     ['Supplier Catalog', ShoppingCart],
     ['Tables', Armchair],
     ['POS', ChefHat],
@@ -139,6 +141,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'Expenses') return <Expenses call={call} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;
   return <Analytics call={call} branches={branches} user={user}/>;
 }

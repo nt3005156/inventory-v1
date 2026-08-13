@@ -16,6 +16,7 @@ import {buildMenuEngineering} from '../services/menuEngineering.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
 import {publishPurchasingEvent} from '../services/realtime.js';
+import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -304,6 +305,57 @@ r.get('/analytics/menu-engineering', auth(['owner', 'manager']), async (req, res
       from: req.query.from,
       to: req.query.to
     }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+const expenseSchema = z.object({
+  category: z.string().min(1),
+  description: z.string().optional(),
+  amount: z.number().positive(),
+  vat: z.number().nonnegative().optional(),
+  date: z.string().optional()
+});
+
+const expensePatchSchema = z.object({
+  category: z.string().min(1).optional(),
+  description: z.string().optional(),
+  amount: z.number().positive().optional(),
+  vat: z.number().nonnegative().optional(),
+  date: z.string().optional()
+});
+
+r.get('/expenses', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await listExpenses({from: req.query.from, to: req.query.to}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.post('/expenses', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const body = expenseSchema.parse(req.body);
+    res.status(201).json(await createExpense({...body, user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.patch('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const body = expensePatchSchema.parse(req.body);
+    res.json(await updateExpense({expenseId: req.params.id, patch: body, user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.delete('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    await deleteExpense({expenseId: req.params.id, user: req.user});
+    res.status(204).end();
   } catch (e) {
     fail(res, e);
   }
