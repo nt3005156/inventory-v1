@@ -1,4 +1,5 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
+import {io} from 'socket.io-client';
 
 const COLUMNS = [
   {key: 'new', title: 'New', statuses: ['pending', 'confirmed']},
@@ -6,6 +7,14 @@ const COLUMNS = [
   {key: 'preparing', title: 'Preparing', statuses: ['preparing']},
   {key: 'ready', title: 'Ready', statuses: ['ready']}
 ];
+
+const QUEUE = ['pending', 'confirmed', 'accepted', 'preparing', 'ready'];
+
+function socketUrl() {
+  const api = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+  if (String(api).startsWith('http')) return String(api).replace(/\/api\/?$/, '');
+  return window.location.origin;
+}
 
 function nextAction(status) {
   if (status === 'pending' || status === 'confirmed') return {next: 'accepted', label: 'Accept'};
@@ -34,7 +43,19 @@ function clock(from) {
   }
 }
 
-export default function Kds({call, branches = [], user}) {
+function sameBranch(order, branchId) {
+  const id = order?.branch?._id || order?.branch;
+  return id && String(id) === String(branchId);
+}
+
+function upsertOrder(list, order) {
+  const next = list.filter(o => String(o._id) !== String(order._id));
+  next.push(order);
+  next.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  return next;
+}
+
+export default function Kds({call, branches = [], user, token}) {
   const assigned = user?.branch || null;
   const locked = user?.role === 'staff' && assigned;
   const visibleBranches = locked ? branches.filter(b => b._id === assigned) : branches;
@@ -43,6 +64,8 @@ export default function Kds({call, branches = [], user}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [live, setLive] = useState('connecting');
+  const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
 
   const canAdvance = ['owner', 'manager', 'staff'].includes(user?.role);
   const canCancel = ['owner', 'manager'].includes(user?.role);
@@ -69,12 +92,62 @@ export default function Kds({call, branches = [], user}) {
     }
   };
 
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
   useEffect(() => {
     setLoading(true);
     load();
-    const tick = setInterval(load, 5000);
-    return () => clearInterval(tick);
   }, [branchId]);
+
+  useEffect(() => {
+    if (live === 'live') return;
+    const tick = setInterval(() => loadRef.current(), 5000);
+    return () => clearInterval(tick);
+  }, [branchId, live]);
+
+  useEffect(() => {
+    if (!authToken || !branchId) return undefined;
+    const socket = io(socketUrl(), {
+      auth: {token: authToken, branch: branchId},
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 4000
+    });
+
+    const applyNew = payload => {
+      const order = payload?.order;
+      if (!sameBranch(order, branchId) || !QUEUE.includes(order.status)) return;
+      setOrders(curr => upsertOrder(curr, order));
+    };
+    const applyStatus = payload => {
+      const order = payload?.order;
+      if (!sameBranch(order, branchId)) return;
+      setOrders(curr => QUEUE.includes(order.status) ? upsertOrder(curr, order) : curr.filter(o => String(o._id) !== String(order._id)));
+    };
+
+    socket.on('connect', () => {
+      setLive('live');
+      socket.emit('join:branch', branchId, ack => {
+        if (ack && ack.ok === false) setError(ack.message || 'Could not join kitchen room');
+      });
+      loadRef.current();
+    });
+    socket.on('disconnect', reason => {
+      setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+    });
+    socket.on('connect_error', () => setLive('reconnecting'));
+    socket.on('kitchen:new-order', applyNew);
+    socket.on('kitchen:status', applyStatus);
+
+    return () => {
+      socket.off('kitchen:new-order', applyNew);
+      socket.off('kitchen:status', applyStatus);
+      socket.disconnect();
+    };
+  }, [authToken, branchId]);
 
   const act = async (order, status) => {
     setBusy(order._id + status);
@@ -98,6 +171,8 @@ export default function Kds({call, branches = [], user}) {
     );
   }
 
+  const liveLabel = live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting';
+
   return (
     <section className="panel kds-panel">
       <div className="title">
@@ -105,14 +180,17 @@ export default function Kds({call, branches = [], user}) {
           <h2>Kitchen display</h2>
           <p>Live branch queue · status changes do not deduct stock again</p>
         </div>
-        <select
-          className="kds-branch"
-          value={branchId}
-          disabled={!!locked}
-          onChange={e => setBranchId(e.target.value)}
-        >
-          {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
-        </select>
+        <div className="kds-toolbar">
+          <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{liveLabel}</span>
+          <select
+            className="kds-branch"
+            value={branchId}
+            disabled={!!locked}
+            onChange={e => setBranchId(e.target.value)}
+          >
+            {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+          </select>
+        </div>
       </div>
       {error && <p className="danger">{error}</p>}
       {loading && <p>Loading kitchen queue…</p>}

@@ -1,8 +1,10 @@
 import express from 'express';
+import http from 'http';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import operations from '../src/routes/operations.js';
+import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
 import {Ingredient, MenuItem} from '../src/models/index.js';
@@ -31,8 +33,10 @@ export async function startTestApp() {
     app.use(express.json());
     app.use('/api', operations);
     app.use((err, req, res, next) => res.status(err.status || 500).json({message: err.message || 'Server error'}));
+    server = http.createServer(app);
+    attachRealtime(server);
     await new Promise(resolve => {
-      server = app.listen(0, '127.0.0.1', resolve);
+      server.listen(0, '127.0.0.1', resolve);
     });
     const {port} = server.address();
     baseUrl = `http://127.0.0.1:${port}`;
