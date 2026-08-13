@@ -43,12 +43,13 @@ describe('expenseVat', () => {
 
 describe('POST /api/expenses', () => {
   it('records a restaurant-wide expense with 13% VAT and feeds live P&L', async () => {
-    const created = await createExpense();
+    const created = await createExpense({}, tokenFor(world.owner));
     assert.equal(created.status, 201, created.body?.message);
     assert.equal(created.body.category, 'rent');
     assert.equal(created.body.amount, 500);
     assert.equal(created.body.vat, 65);
     assert.equal(created.body.description, 'Kalanki shop');
+    assert.ok(!created.body.branch);
 
     const pnl = await request('/api/reports/pnl?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(pnl.status, 200, pnl.body?.message);
@@ -118,6 +119,45 @@ describe('PATCH /api/expenses/:id', () => {
     const pnl = await request('/api/reports/pnl', {token: tokenFor(world.owner)});
     assert.equal(pnl.body.expenses, 800);
     assert.equal(pnl.body.expenseDetail.vat, 104);
+  });
+});
+
+describe('branch-scoped expenses', () => {
+  it('keeps restaurant-wide costs on every branch and hides other-branch rows', async () => {
+    const shared = await request('/api/expenses', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {category: 'rent', description: 'Head office', amount: 100}
+    });
+    assert.equal(shared.status, 201, shared.body?.message);
+    assert.ok(!shared.body.branch);
+
+    const atA = await createExpense({amount: 300, description: 'KTM power'});
+    assert.equal(atA.status, 201, atA.body?.message);
+    assert.equal(String(atA.body.branch?._id || atA.body.branch), String(world.branchA._id));
+
+    const atB = await request('/api/expenses', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {category: 'utilities', description: 'LTP power', amount: 200, branch: String(world.branchB._id)}
+    });
+    assert.equal(atB.status, 201, atB.body?.message);
+
+    const pnlA = await request('/api/reports/pnl?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(pnlA.body.expenses, 400);
+    assert.equal(pnlA.body.expenseDetail.scope, 'branch');
+    const pnlB = await request('/api/reports/pnl?branch=' + world.branchB._id, {token: tokenFor(world.owner)});
+    assert.equal(pnlB.body.expenses, 300);
+    const pnlAll = await request('/api/reports/pnl', {token: tokenFor(world.owner)});
+    assert.equal(pnlAll.body.expenses, 600);
+    assert.equal(pnlAll.body.expenseDetail.scope, 'restaurant');
+
+    const listed = await request('/api/expenses?branch=' + world.branchA._id, {token: tokenFor(world.manager)});
+    assert.equal(listed.status, 200, listed.body?.message);
+    assert.equal(listed.body.count, 2);
+    assert.equal(listed.body.amount, 400);
+    assert.equal((await request('/api/expenses?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
+    assert.equal((await createExpense({branch: String(world.branchB._id)}, tokenFor(world.manager))).status, 403);
   });
 });
 

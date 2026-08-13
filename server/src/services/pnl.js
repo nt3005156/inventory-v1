@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import {Expense} from '../models/index.js';
 import {InventoryTransaction, Order} from '../models/operations.js';
 import {assertBranchAccess} from './kitchen.js';
+import {expenseQuery, expenseScope} from './expenses.js';
 import {buildPurchasingReport} from './purchasingReport.js';
 import {money} from './statements.js';
 
@@ -55,7 +56,7 @@ export async function buildPnl({branchId, user, from, to}) {
         cogs: {$sum: {$sum: '$items.foodCost'}}
       }}
     ]),
-    Expense.find(Object.keys(dates.createdAt || {}).length ? {date: dates.createdAt} : {}),
+    Expense.find(expenseQuery({branchId, from, to})),
     InventoryTransaction.find(wasteMatch)
   ]);
 
@@ -106,7 +107,7 @@ export async function buildPnl({branchId, user, from, to}) {
       amount: expenseAmount,
       vat: expenseVat,
       count: expenseRows.length,
-      scope: 'restaurant'
+      scope: expenseScope(expenseRows, branchId)
     },
     wasteDetail: {
       amount: wasteAmount,

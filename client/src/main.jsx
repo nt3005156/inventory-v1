@@ -141,7 +141,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
-  if (page === 'Expenses') return <Expenses call={call} user={user}/>;
+  if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;
   return <Analytics call={call} branches={branches} user={user}/>;
 }

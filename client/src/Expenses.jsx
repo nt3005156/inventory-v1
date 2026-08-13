@@ -4,8 +4,14 @@ const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFraction
 const CATEGORIES = ['rent', 'utilities', 'salary', 'marketing', 'maintenance', 'transport', 'packaging', 'insurance', 'other'];
 const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
 
-export default function Expenses({call, user}) {
+export default function Expenses({call, branches = [], user}) {
+  const assigned = user?.branch || null;
+  const locked = user?.role !== 'owner' && assigned;
+  const owner = user?.role === 'owner';
   const canManage = ['owner', 'manager'].includes(user?.role);
+  const visibleBranches = locked ? branches.filter(b => b._id === assigned) : branches;
+  const [branchId, setBranchId] = useState(locked ? (assigned || '') : '');
+  const [formBranch, setFormBranch] = useState(locked ? (assigned || '') : '');
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState({amount: 0, vat: 0, count: 0});
   const [error, setError] = useState('');
@@ -13,12 +19,20 @@ export default function Expenses({call, user}) {
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState({category: 'rent', description: '', amount: '', date: ymd(new Date())});
   const [editId, setEditId] = useState('');
-  const [edit, setEdit] = useState({category: 'rent', description: '', amount: '', date: ''});
+  const [edit, setEdit] = useState({category: 'rent', description: '', amount: '', date: '', branch: ''});
+
+  useEffect(() => {
+    if (locked && assigned) {
+      if (branchId !== assigned) setBranchId(assigned);
+      if (formBranch !== assigned) setFormBranch(assigned);
+    }
+  }, [assigned, locked, branchId, formBranch]);
 
   const load = () => {
     setLoading(true);
     setError('');
-    call('/expenses')
+    const q = branchId ? '?branch=' + encodeURIComponent(branchId) : '';
+    call('/expenses' + q)
       .then(data => {
         setRows(Array.isArray(data?.expenses) ? data.expenses : []);
         setSummary({amount: data?.amount || 0, vat: data?.vat || 0, count: data?.count || 0});
@@ -27,7 +41,7 @@ export default function Expenses({call, user}) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [branchId]);
 
   const save = async e => {
     e.preventDefault();
@@ -41,7 +55,8 @@ export default function Expenses({call, user}) {
           category: form.category,
           description: form.description,
           amount: Number(form.amount),
-          date: form.date || undefined
+          date: form.date || undefined,
+          branch: formBranch || null
         })
       });
       setForm({category: form.category, description: '', amount: '', date: ymd(new Date())});
@@ -59,7 +74,8 @@ export default function Expenses({call, user}) {
       category: row.category || 'other',
       description: row.description || '',
       amount: row.amount || 0,
-      date: ymd(row.date)
+      date: ymd(row.date),
+      branch: row.branch?._id || row.branch || ''
     });
   };
 
@@ -74,7 +90,8 @@ export default function Expenses({call, user}) {
           category: edit.category,
           description: edit.description,
           amount: Number(edit.amount),
-          date: edit.date || undefined
+          date: edit.date || undefined,
+          ...(owner ? {branch: edit.branch || null} : {})
         })
       });
       setEditId('');
@@ -102,14 +119,19 @@ export default function Expenses({call, user}) {
   };
 
   const previewVat = amount => Math.round(Number(amount || 0) * 0.13 * 100) / 100;
+  const branchName = row => row.branch?.name || 'Restaurant';
 
   return (
     <section className="panel">
       <div className="title">
         <div>
           <h2>Operating expenses</h2>
-          <p>Restaurant-wide costs in NPR. Amount hits live P&L. VAT 13% is recorded separately and is not branch-scoped.</p>
+          <p>Amount hits live P&L in NPR. VAT 13% is recorded separately. Untagged costs stay restaurant-wide and still appear on every branch.</p>
         </div>
+        <select className="kds-branch" value={branchId} disabled={!!locked} onChange={e => setBranchId(e.target.value)}>
+          {owner && <option value="">All + restaurant-wide</option>}
+          {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+        </select>
       </div>
       {error && <p className="danger">{error}</p>}
       <div className="kpis">
@@ -128,6 +150,12 @@ export default function Expenses({call, user}) {
           <button disabled={!!busy}>{busy === 'create' ? 'Saving…' : 'Record expense'}</button>
         </form>
       )}
+      {canManage && (
+        <select className="kds-branch" value={formBranch} disabled={!!locked} onChange={e => setFormBranch(e.target.value)}>
+          {owner && <option value="">Restaurant-wide</option>}
+          {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+        </select>
+      )}
       {canManage && <p>VAT 13% = {rs(previewVat(form.amount))} · P&L amount {rs(form.amount)}</p>}
       {loading && <p>Loading expenses…</p>}
       {!loading && !rows.length && !error && <p className="empty">No operating expenses recorded yet.</p>}
@@ -136,6 +164,7 @@ export default function Expenses({call, user}) {
           <thead>
             <tr>
               <th>Date</th>
+              <th>Branch</th>
               <th>Category</th>
               <th>Description</th>
               <th>Amount</th>
@@ -148,6 +177,7 @@ export default function Expenses({call, user}) {
             {rows.map(row => (
               <tr key={row._id}>
                 <td>{row.date ? new Date(row.date).toLocaleDateString('en-NP') : ''}</td>
+                <td>{branchName(row)}</td>
                 <td><label className="pill">{row.category}</label></td>
                 <td>{row.description || '—'}</td>
                 <td>{rs(row.amount)}</td>
@@ -174,6 +204,12 @@ export default function Expenses({call, user}) {
             <input type="date" value={edit.date} onChange={e => setEdit({...edit, date: e.target.value})}/>
             <button disabled={!!busy}>{String(busy).startsWith('edit-') ? 'Saving…' : 'Save expense'}</button>
           </form>
+          {owner && (
+            <select className="kds-branch" value={edit.branch} onChange={e => setEdit({...edit, branch: e.target.value})}>
+              <option value="">Restaurant-wide</option>
+              {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
+            </select>
+          )}
           <p>VAT 13% = {rs(previewVat(edit.amount))} · P&L amount {rs(edit.amount)}</p>
         </div>
       )}

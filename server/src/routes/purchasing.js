@@ -315,7 +315,8 @@ const expenseSchema = z.object({
   description: z.string().optional(),
   amount: z.number().positive(),
   vat: z.number().nonnegative().optional(),
-  date: z.string().optional()
+  date: z.string().optional(),
+  branch: z.string().nullable().optional()
 });
 
 const expensePatchSchema = z.object({
@@ -323,12 +324,18 @@ const expensePatchSchema = z.object({
   description: z.string().optional(),
   amount: z.number().positive().optional(),
   vat: z.number().nonnegative().optional(),
-  date: z.string().optional()
+  date: z.string().optional(),
+  branch: z.string().nullable().optional()
 });
 
 r.get('/expenses', auth(['owner', 'manager']), async (req, res) => {
   try {
-    res.json(await listExpenses({from: req.query.from, to: req.query.to}));
+    res.json(await listExpenses({
+      branchId: req.query.branch,
+      user: req.user,
+      from: req.query.from,
+      to: req.query.to
+    }));
   } catch (e) {
     fail(res, e);
   }

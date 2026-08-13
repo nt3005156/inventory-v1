@@ -51,7 +51,9 @@ export async function buildMenuEngineering({branchId, user, from, to}) {
       if (!line.menuItem) continue;
       const id = String(line.menuItem);
       const qty = Number(line.qty || 0);
-      sold[id] = (sold[id] || 0) + qty;
+      if (!sold[id]) sold[id] = {qty: 0, cost: 0};
+      sold[id].qty += qty;
+      sold[id].cost += Number(line.foodCost || 0) * qty;
       totalQty += qty;
     }
   }
@@ -59,8 +61,9 @@ export async function buildMenuEngineering({branchId, user, from, to}) {
 
   const rows = [];
   for (const item of menu) {
-    const soldQty = sold[String(item._id)] || 0;
-    const cost = await recipeCost(item);
+    const stats = sold[String(item._id)];
+    const soldQty = stats?.qty || 0;
+    const cost = soldQty > 0 ? money(stats.cost / soldQty) : money(await recipeCost(item));
     const margin = money(Number(item.price || 0) - cost);
     const popularity = soldQty / denom;
     rows.push({
@@ -71,6 +74,7 @@ export async function buildMenuEngineering({branchId, user, from, to}) {
       classification: classifyMenuItem(popularity, margin),
       soldQty,
       unitCost: money(cost),
+      costSource: soldQty > 0 ? 'sold' : 'recipe',
       source: 'live'
     });
   }

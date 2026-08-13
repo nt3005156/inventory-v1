@@ -80,6 +80,24 @@ describe('GET /api/analytics/menu-engineering', () => {
     assert.equal(unused.soldQty, 0);
     assert.equal(unused.popularity, 0);
     assert.equal(unused.classification, 'Puzzle');
+    assert.equal(biryani.costSource, 'sold');
+    assert.equal(unused.costSource, 'recipe');
+  });
+
+  it('keeps sold-line food cost after the live recipe cost changes', async () => {
+    const sold = await createLiveOrder(world.branchA, 1);
+    assert.equal(sold.status, 201, sold.body?.message);
+    assert.equal(sold.body.items[0].foodCost, 11.25);
+    await world.ingredient.updateOne({averageCost: 2});
+
+    const rows = await request('/api/analytics/menu-engineering?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(rows.status, 200, rows.body?.message);
+    const biryani = rows.body.find(x => x.name === 'Chicken Biryani');
+    assert.equal(biryani.soldQty, 1);
+    assert.equal(biryani.unitCost, 11.25);
+    assert.equal(biryani.margin, 338.75);
+    assert.equal(biryani.costSource, 'sold');
+    assert.equal(biryani.classification, 'Star');
   });
 
   it('rejects staff, guests, missing tokens and cross-branch managers', async () => {

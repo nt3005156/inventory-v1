@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 import {Audit, Expense} from '../models/index.js';
+import {Branch} from '../models/operations.js';
+import {assertBranchAccess} from './kitchen.js';
 import {vatOf} from './invoices.js';
 import {money} from './statements.js';
 
@@ -26,9 +28,53 @@ export function expenseVat(amount, vat) {
   return vatOf(amount);
 }
 
-export async function listExpenses({from, to} = {}) {
-  const rows = await Expense.find(dateRange(from, to))
+export function expenseQuery({branchId, from, to} = {}) {
+  const match = dateRange(from, to);
+  if (!branchId) return match;
+  match.$or = [
+    {branch: branchId},
+    {branch: null},
+    {branch: {$exists: false}}
+  ];
+  return match;
+}
+
+export function expenseScope(rows, branchId) {
+  if (!branchId) return 'restaurant';
+  return (rows || []).some(e => e.branch) ? 'branch' : 'restaurant';
+}
+
+function populateExpense(doc) {
+  return Expense.findById(doc._id).populate('createdBy', 'name role').populate('branch', 'name code');
+}
+
+function resolveExpenseBranch(user, branchId) {
+  if (branchId) return String(branchId);
+  if (user?.role !== 'owner' && user?.branch) return String(user.branch);
+  return null;
+}
+
+async function resolveBranchId(user, branchId) {
+  const branch = resolveExpenseBranch(user, branchId || null);
+  if (branch) {
+    if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
+    assertBranchAccess(user, branch);
+    if (!await Branch.findById(branch)) throw httpError('Branch not found', 404);
+  }
+  return branch;
+}
+
+function assertCanMutate(user, expense) {
+  if (user?.role === 'owner') return;
+  if (!expense.branch) throw httpError('Cannot change a restaurant-wide expense', 403);
+  assertBranchAccess(user, expense.branch);
+}
+
+export async function listExpenses({branchId, user, from, to} = {}) {
+  const branch = await resolveBranchId(user, branchId);
+  const rows = await Expense.find(expenseQuery({branchId: branch, from, to}))
     .populate('createdBy', 'name role')
+    .populate('branch', 'name code')
     .sort({date: -1, createdAt: -1});
   const amount = money(rows.reduce((s, e) => s + Number(e.amount || 0), 0));
   const vat = money(rows.reduce((s, e) => s + Number(e.vat || 0), 0));
@@ -36,7 +82,8 @@ export async function listExpenses({from, to} = {}) {
     source: 'live',
     currency: 'NPR',
     vatRate: 13,
-    scope: 'restaurant',
+    scope: expenseScope(rows, branch),
+    branch: branch || null,
     from: from || null,
     to: to || null,
     count: rows.length,
@@ -46,7 +93,7 @@ export async function listExpenses({from, to} = {}) {
   };
 }
 
-export async function createExpense({category, description, amount, vat, date, user}) {
+export async function createExpense({category, description, amount, vat, date, branch, user}) {
   const label = String(category || '').trim();
   if (!label) throw httpError('Category is required', 400);
   const amt = money(amount);
@@ -54,35 +101,47 @@ export async function createExpense({category, description, amount, vat, date, u
   const vatAmt = expenseVat(amt, vat);
   if (vatAmt < 0) throw httpError('VAT cannot be negative', 400);
 
+  let branchId = branch || null;
+  if (branchId === '') branchId = null;
+  if (!branchId && user?.role !== 'owner' && user?.branch) branchId = String(user.branch);
+  if (branchId) {
+    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
+    assertBranchAccess(user, branchId);
+    if (!await Branch.findById(branchId)) throw httpError('Branch not found', 404);
+  }
+
   const saved = await Expense.create({
     category: label,
     description: description || '',
     amount: amt,
     vat: vatAmt,
     date: date ? new Date(date) : new Date(),
+    branch: branchId || undefined,
     createdBy: user.id
   });
   await Audit.create([{
     entity: 'expense',
     entityId: saved._id,
     action: 'create',
-    after: {category: saved.category, amount: saved.amount, vat: saved.vat, date: saved.date},
+    after: {category: saved.category, amount: saved.amount, vat: saved.vat, date: saved.date, branch: saved.branch},
     user: user.id
   }]);
-  return Expense.findById(saved._id).populate('createdBy', 'name role');
+  return populateExpense(saved);
 }
 
 export async function updateExpense({expenseId, patch = {}, user}) {
   if (!mongoose.isValidObjectId(expenseId)) throw httpError('Invalid expense', 400);
   const expense = await Expense.findById(expenseId);
   if (!expense) throw httpError('Expense not found', 404);
+  assertCanMutate(user, expense);
 
   const before = {
     category: expense.category,
     description: expense.description,
     amount: expense.amount,
     vat: expense.vat,
-    date: expense.date
+    date: expense.date,
+    branch: expense.branch
   };
 
   if (patch.category !== undefined) {
@@ -102,6 +161,16 @@ export async function updateExpense({expenseId, patch = {}, user}) {
     if (vatAmt < 0) throw httpError('VAT cannot be negative', 400);
     expense.vat = vatAmt;
   }
+  if (patch.branch !== undefined) {
+    if (user?.role !== 'owner') throw httpError('Only the owner can move expense scope', 403);
+    if (!patch.branch) {
+      expense.branch = undefined;
+    } else {
+      if (!mongoose.isValidObjectId(patch.branch)) throw httpError('Invalid branch', 400);
+      if (!await Branch.findById(patch.branch)) throw httpError('Branch not found', 404);
+      expense.branch = patch.branch;
+    }
+  }
 
   await expense.save();
   await Audit.create([{
@@ -114,23 +183,25 @@ export async function updateExpense({expenseId, patch = {}, user}) {
       description: expense.description,
       amount: expense.amount,
       vat: expense.vat,
-      date: expense.date
+      date: expense.date,
+      branch: expense.branch
     },
     user: user.id
   }]);
-  return Expense.findById(expense._id).populate('createdBy', 'name role');
+  return populateExpense(expense);
 }
 
 export async function deleteExpense({expenseId, user}) {
   if (!mongoose.isValidObjectId(expenseId)) throw httpError('Invalid expense', 400);
   const expense = await Expense.findById(expenseId);
   if (!expense) throw httpError('Expense not found', 404);
+  assertCanMutate(user, expense);
   await expense.deleteOne();
   await Audit.create([{
     entity: 'expense',
     entityId: expense._id,
     action: 'delete',
-    before: {category: expense.category, amount: expense.amount, vat: expense.vat, date: expense.date},
+    before: {category: expense.category, amount: expense.amount, vat: expense.vat, date: expense.date, branch: expense.branch},
     user: user.id
   }]);
   return expense;

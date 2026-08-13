@@ -38,7 +38,7 @@ export default function Analytics({call, branches = [], user}) {
         <div className="title">
           <div>
             <h2>Live P&L</h2>
-            <p>Revenue and food cost from branch orders. Purchases are accepted stock minus returns from the inventory ledger. Waste is written-off stock. Operating expenses are restaurant-wide. Amounts in NPR, VAT 13%.</p>
+            <p>Revenue and food cost from branch orders. Purchases are accepted stock minus returns from the inventory ledger. Waste is written-off stock. Expenses are that branch plus restaurant-wide costs. Amounts in NPR, VAT 13%.</p>
           </div>
           <select className="kds-branch" value={branchId} disabled={!!locked} onChange={e => setBranchId(e.target.value)}>
             {owner && <option value="">All branches</option>}
