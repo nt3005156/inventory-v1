@@ -214,6 +214,86 @@ describe('POST /api/purchase-orders/:id/returns', () => {
   });
 });
 
+describe('supplier statement', () => {
+  it('builds a running balance from invoices and payments', async () => {
+    const po = await createPo(200);
+    const inv = await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {
+        branch: String(world.branchA._id),
+        supplier: String(supplier._id),
+        purchaseOrder: String(po.body._id),
+        invoiceNo: 'INV-STMT',
+        subtotal: 1000,
+        vat: 130,
+        total: 1130
+      }
+    });
+    assert.equal(inv.status, 201, inv.body?.message);
+    const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {amount: 130, method: 'cash', reference: 'PART-1'}
+    });
+    assert.equal(paid.status, 201, paid.body?.message);
+
+    const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(stmt.status, 200, stmt.body?.message);
+    assert.equal(stmt.body.invoiced, 1130);
+    assert.equal(stmt.body.paid, 130);
+    assert.equal(stmt.body.balance, 1000);
+    assert.equal(stmt.body.lines.length, 2);
+    assert.equal(stmt.body.lines[0].type, 'invoice');
+    assert.equal(stmt.body.lines[0].debit, 1130);
+    assert.equal(stmt.body.lines[0].balance, 1130);
+    assert.equal(stmt.body.lines[1].type, 'payment');
+    assert.equal(stmt.body.lines[1].credit, 130);
+    assert.equal(stmt.body.lines[1].balance, 1000);
+
+    const pays = await request('/api/suppliers/' + supplier._id + '/payments?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(pays.status, 200);
+    assert.equal(pays.body.length, 1);
+    const invPays = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {token: tokenFor(world.manager)});
+    assert.equal(invPays.status, 200);
+    assert.equal(invPays.body.length, 1);
+    assert.equal(invPays.body[0].amount, 130);
+    const bal = await request('/api/suppliers/' + supplier._id + '/balance?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(bal.body.balance, 1000);
+  });
+
+  it('does not mix another supplier or another branch onto the statement', async () => {
+    const other = await Supplier.create({name: 'Other Supplier'});
+    await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {branch: String(world.branchA._id), supplier: String(supplier._id), invoiceNo: 'A1', subtotal: 100, vat: 13, total: 113}
+    });
+    await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {branch: String(world.branchA._id), supplier: String(other._id), invoiceNo: 'B1', subtotal: 500, vat: 65, total: 565}
+    });
+    await request('/api/supplier-invoices', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {branch: String(world.branchB._id), supplier: String(supplier._id), invoiceNo: 'A-BKT', subtotal: 200, vat: 26, total: 226}
+    });
+    const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(stmt.status, 200);
+    assert.equal(stmt.body.invoiced, 113);
+    assert.equal(stmt.body.lines.every(l => l.ref !== 'B1' && l.ref !== 'A-BKT'), true);
+  });
+
+  it('rejects staff, guests, and missing tokens', async () => {
+    assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
+    assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id)).status, 401);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: guest})).status, 403);
+    assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
+  });
+});
+
 describe('supplier invoice VAT', () => {
   it('stores a 13% VAT invoice against a purchase order', async () => {
     const po = await createPo(200);

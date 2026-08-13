@@ -2,11 +2,12 @@ import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
-import {PurchaseOrder} from '../models/operations.js';
+import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {receivePurchaseOrder} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
+import {buildSupplierStatement} from '../services/statements.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -113,6 +114,55 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
     fail(res, e);
   } finally {
     session.endSession();
+  }
+});
+
+r.get('/suppliers/:id/statement', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await buildSupplierStatement({
+      supplierId: req.params.id,
+      branchId: req.query.branch,
+      user: req.user
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/suppliers/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const statement = await buildSupplierStatement({
+      supplierId: req.params.id,
+      branchId: req.query.branch,
+      user: req.user
+    });
+    res.json(statement.payments);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/suppliers/:id/balance', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const statement = await buildSupplierStatement({
+      supplierId: req.params.id,
+      branchId: req.query.branch,
+      user: req.user
+    });
+    res.json({invoiced: statement.invoiced, paid: statement.paid, balance: statement.balance});
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const invoice = await SupplierInvoice.findById(req.params.id);
+    if (!invoice) return res.status(404).json({message: 'Invoice not found'});
+    if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
+    res.json(await SupplierPayment.find({invoice: invoice._id}).sort({paidAt: 1, createdAt: 1}));
+  } catch (e) {
+    fail(res, e);
   }
 });
 

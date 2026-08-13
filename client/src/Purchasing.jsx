@@ -158,6 +158,7 @@ export default function Purchasing({call, branch}) {
       })});
       setInvoice({supplier: invoice.supplier, purchaseOrder: '', invoiceNo: '', subtotal: 0});
       load();
+      if (statementId === invoice.supplier) await loadStatement(invoice.supplier);
     } catch (e) {
       setError(e.message);
     }
@@ -169,7 +170,34 @@ export default function Purchasing({call, branch}) {
     try {
       await call('/supplier-invoices/' + inv._id + '/payments', {method: 'POST', body: JSON.stringify({amount, method: 'cash'})});
       load();
+      if (statementId === (inv.supplier?._id || inv.supplier)) await loadStatement(statementId);
     } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const loadStatement = async id => {
+    if (!id) {
+      setStatement(null);
+      return;
+    }
+    setError('');
+    try {
+      const data = await call('/suppliers/' + id + '/statement' + (branch ? `?branch=${branch._id}` : ''));
+      setStatement(data);
+    } catch (e) {
+      setStatement(null);
+      setError(e.message);
+    }
+  };
+
+  const showInvoicePays = async inv => {
+    setError('');
+    setPayInvoiceId(inv._id);
+    try {
+      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
+    } catch (e) {
+      setInvoicePays([]);
       setError(e.message);
     }
   };
@@ -343,7 +371,10 @@ export default function Purchasing({call, branch}) {
               <td>{rs(x.paidAmount)}</td>
               <td>{rs(x.total - x.paidAmount)}</td>
               <td><label className="pill ok">{x.status}</label></td>
-              <td>{x.status !== 'paid' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}</td>
+              <td>
+                {x.status !== 'paid' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}
+                <button className="receive" onClick={() => showInvoicePays(x)}>Payments</button>
+              </td>
             </tr>
           ))}
         </tbody>
