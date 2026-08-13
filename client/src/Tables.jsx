@@ -1,4 +1,5 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
+import {connectBranchSocket} from './socket.js';
 
 const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFractionDigits: 0});
 
@@ -25,7 +26,7 @@ const ACTIONS = {
   ]
 };
 
-export default function Tables({call, branches = [], user}) {
+export default function Tables({call, branches = [], user, token}) {
   const assigned = user?.branch || null;
   const locked = user?.role === 'staff' && assigned;
   const visibleBranches = locked ? branches.filter(b => b._id === assigned) : branches;
@@ -36,6 +37,8 @@ export default function Tables({call, branches = [], user}) {
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState({name: '', area: 'Main Hall', seats: 4});
   const [ops, setOps] = useState({});
+  const [live, setLive] = useState('connecting');
+  const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
   const canManage = ['owner', 'manager'].includes(user?.role);
   const canOperate = ['owner', 'manager', 'staff'].includes(user?.role);
 
@@ -59,6 +62,41 @@ export default function Tables({call, branches = [], user}) {
   };
 
   useEffect(() => { load(); }, [branchId]);
+
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
+  useEffect(() => {
+    if (live === 'live') return;
+    const tick = setInterval(() => loadRef.current(), 5000);
+    return () => clearInterval(tick);
+  }, [branchId, live]);
+
+  useEffect(() => {
+    if (!authToken || !branchId) return undefined;
+    const socket = connectBranchSocket(authToken, branchId);
+    const onUpdate = payload => {
+      if (payload?.branch && String(payload.branch) !== String(branchId)) return;
+      loadRef.current();
+    };
+    socket.on('connect', () => {
+      setLive('live');
+      socket.emit('join:branch', branchId, ack => {
+        if (ack && ack.ok === false) setError(ack.message || 'Could not join floor room');
+      });
+      loadRef.current();
+    });
+    socket.on('disconnect', reason => {
+      setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+    });
+    socket.on('connect_error', () => setLive('reconnecting'));
+    socket.on('table:update', onUpdate);
+    return () => {
+      socket.emit('leave:branch', branchId);
+      socket.off('table:update', onUpdate);
+      socket.disconnect();
+    };
+  }, [authToken, branchId]);
 
   const setStatus = async (table, status) => {
     setBusy(table._id + status);
@@ -165,11 +203,14 @@ export default function Tables({call, branches = [], user}) {
       <div className="title">
         <div>
           <h2>Floor tables</h2>
-          <p>Branch seating · move or merge open checks · stock is never deducted twice</p>
+          <p>Live branch seating · occupy, pay, move and merge update every host on this floor</p>
         </div>
+        <div className="kds-toolbar">
+          <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting'}</span>
         <select className="kds-branch" value={branchId} disabled={!!locked} onChange={e => setBranchId(e.target.value)}>
           {visibleBranches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}
         </select>
+        </div>
       </div>
       {error && <p className="danger">{error}</p>}
       {canManage && (

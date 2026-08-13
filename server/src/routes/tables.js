@@ -7,7 +7,7 @@ import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders} from '../services/tables.js';
 import {Order} from '../models/operations.js';
-import {publishKitchenOrder} from '../services/realtime.js';
+import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -79,6 +79,7 @@ r.post('/tables', auth(['owner', 'manager']), async (req, res) => {
     if (dup) throw Object.assign(new Error('Table name already exists at this branch'), {status: 409});
     const table = await RestaurantTable.create({...x, status: x.status || 'available', active: true});
     await Audit.create({entity: 'table', entityId: table._id, action: 'create', after: table, user: req.user.id});
+    publishTableEvent(table.branch, {reason: 'create', tableIds: [String(table._id)]});
     res.status(201).json({...table.toJSON(), currentOrder: null});
   } catch (e) {
     fail(res, e);
@@ -94,6 +95,7 @@ r.post('/tables/:id/move', auth(roles), async (req, res) => {
       result = await moveOrderToTable({fromTableId: req.params.id, toTableId: toTable, user: req.user, session});
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    publishTableEvent(result.order.branch, {reason: 'move', tableIds: [String(result.fromTable._id), String(result.toTable._id)]});
     res.json(result);
   } catch (e) {
     fail(res, e);
@@ -112,6 +114,7 @@ r.post('/tables/:id/merge', auth(roles), async (req, res) => {
     });
     await publishKitchenOrder(result.mergedOrder, 'kitchen:status');
     await publishKitchenOrder(result.order, 'kitchen:status');
+    publishTableEvent(result.order.branch, {reason: 'merge', tableIds: [String(result.fromTable._id), String(result.intoTable._id)]});
     res.json(result);
   } catch (e) {
     fail(res, e);
@@ -124,6 +127,7 @@ r.patch('/tables/:id/status', auth(roles), async (req, res) => {
   try {
     const table = await loadBranchTable(req);
     await applyTableStatus(table, req.body.status, req.user);
+    publishTableEvent(table.branch, {reason: 'status', tableIds: [String(table._id)]});
     res.json(table);
   } catch (e) {
     fail(res, e);

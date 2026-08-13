@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder} from '../services/billing.js';
-import {publishKitchenOrder} from '../services/realtime.js';
+import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -62,6 +62,7 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'payment', tableIds: [String(result.order.table)]});
     res.status(201).json(result);
   } catch (e) {
     fail(res, e);
@@ -80,6 +81,7 @@ r.post('/orders/:id/split', auth(roles), async (req, res) => {
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
     await publishKitchenOrder(result.splitOrder, 'kitchen:new-order');
+    if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'split', tableIds: [String(result.order.table)]});
     res.status(201).json(result);
   } catch (e) {
     fail(res, e);

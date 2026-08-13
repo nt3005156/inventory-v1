@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {io} from 'socket.io-client';
+import {connectBranchSocket} from './socket.js';
 
 const COLUMNS = [
   {key: 'new', title: 'New', statuses: ['pending', 'confirmed']},
@@ -9,12 +9,6 @@ const COLUMNS = [
 ];
 
 const QUEUE = ['pending', 'confirmed', 'accepted', 'preparing', 'ready'];
-
-function socketUrl() {
-  const api = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
-  if (String(api).startsWith('http')) return String(api).replace(/\/api\/?$/, '');
-  return window.location.origin;
-}
 
 function nextAction(status) {
   if (status === 'pending' || status === 'confirmed') return {next: 'accepted', label: 'Accept'};
@@ -108,14 +102,7 @@ export default function Kds({call, branches = [], user, token}) {
 
   useEffect(() => {
     if (!authToken || !branchId) return undefined;
-    const socket = io(socketUrl(), {
-      auth: {token: authToken, branch: branchId},
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 4000
-    });
+    const socket = connectBranchSocket(authToken, branchId);
 
     const applyNew = payload => {
       const order = payload?.order;

@@ -44,6 +44,18 @@ export async function joinBranch(socket, branchId) {
   return String(branchId);
 }
 
+export function leaveBranch(socket, branchId) {
+  const current = branchId || socket.data?.branchId;
+  if (!current) {
+    const err = new Error('Branch is required');
+    err.status = 400;
+    throw err;
+  }
+  socket.leave(branchRoom(current));
+  if (socket.data.branchId && String(socket.data.branchId) === String(current)) socket.data.branchId = null;
+  return String(current);
+}
+
 export function attachRealtime(httpServer, {corsOrigin} = {}) {
   io = new Server(httpServer, {
     cors: {
@@ -84,6 +96,14 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
         cb?.({ok: false, status: e.status || 400, message: e.message});
       }
     });
+    socket.on('leave:branch', (branchId, cb) => {
+      try {
+        const left = leaveBranch(socket, branchId);
+        cb?.({ok: true, branch: left});
+      } catch (e) {
+        cb?.({ok: false, status: e.status || 400, message: e.message});
+      }
+    });
   });
 
   return io;
@@ -92,6 +112,14 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
 export function emitKitchenEvent(branchId, event, payload) {
   if (!io || !branchId) return;
   io.to(branchRoom(branchId)).emit(event, payload);
+}
+
+export function publishTableEvent(branchId, extra = {}) {
+  if (!branchId) return;
+  emitKitchenEvent(branchId, 'table:update', {
+    branch: String(branchId),
+    ...extra
+  });
 }
 
 export async function publishKitchenOrder(order, event, extra = {}) {
