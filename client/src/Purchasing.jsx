@@ -5,6 +5,8 @@ const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line
 const accepted = line => Math.max(0, Number(line.receivedQty || 0) - Number(line.damagedQty || 0));
 const returnable = line => Math.max(0, accepted(line) - Number(line.returnedQty || 0));
 const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
+const canReceivePo = s => ['approved', 'sent', 'partially_received'].includes(s);
+const poPill = s => ['approved', 'sent', 'partially_received', 'received'].includes(s) ? 'pill ok' : 'pill';
 
 export default function Purchasing({call, branch}) {
   const [po, setPo] = useState([]);
@@ -255,6 +257,29 @@ export default function Purchasing({call, branch}) {
     }
   };
 
+  const setPoStatus = async (order, status) => {
+    let notes;
+    if (status === 'rejected') {
+      notes = window.prompt('Rejection note (optional)') || undefined;
+    } else if (status === 'cancelled' && !window.confirm('Cancel ' + order.poNo + '?')) {
+      return;
+    }
+    setBusy('st-' + order._id);
+    setError('');
+    try {
+      const updated = await call('/purchase-orders/' + order._id + '/status', {
+        method: 'PATCH',
+        body: JSON.stringify({status, notes})
+      });
+      await load();
+      if (openId === order._id) await openReceive(updated);
+    } catch (e) {
+      setError(e.message || 'Status update failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const voidInvoice = async inv => {
     if (Number(inv.paidAmount || 0) > 0) return;
     if (!window.confirm('Void invoice ' + inv.invoiceNo + '? It will drop off the supplier statement.')) return;
@@ -277,7 +302,7 @@ export default function Purchasing({call, branch}) {
   return (
     <section className="panel">
       <h2>Purchasing & goods receiving</h2>
-      <p>Partial receipts post accepted stock (received − damaged) to the branch ledger in Rs. VAT on supplier invoices is 13%.</p>
+      <p>POs start as drafts. Submit, then approve, before stock can be received. Accepted qty (received − damaged) posts to the branch ledger in Rs. VAT on supplier invoices is 13%.</p>
       {error && <p className="danger">{error}</p>}
 
       <form className="purchaseform" onSubmit={create}>
@@ -304,9 +329,16 @@ export default function Purchasing({call, branch}) {
               <td>{x.supplier?.name}</td>
               <td>{x.items?.map(i => `${i.receivedQty}/${i.orderedQty} ${i.unit || ''}`).join(', ')}</td>
               <td>{x.items?.map(i => remaining(i)).join(', ')}</td>
-              <td><label className="pill ok">{x.status}</label></td>
+              <td><label className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</label></td>
               <td>{rs(x.total)}</td>
-              <td><button className="receive" onClick={() => openReceive(x)}>{['received', 'cancelled'].includes(x.status) ? 'Open' : 'Receive / return'}</button></td>
+              <td>
+                {['draft', 'rejected'].includes(x.status) && <button className="receive" onClick={() => setPoStatus(x, 'pending')}>Submit</button>}
+                {x.status === 'pending' && <button className="receive" onClick={() => setPoStatus(x, 'approved')}>Approve</button>}
+                {x.status === 'pending' && <button className="kds-cancel" onClick={() => setPoStatus(x, 'rejected')}>Reject</button>}
+                {x.status === 'approved' && <button className="receive" onClick={() => setPoStatus(x, 'sent')}>Mark sent</button>}
+                {['draft', 'pending', 'approved', 'rejected', 'sent'].includes(x.status) && <button className="kds-cancel" onClick={() => setPoStatus(x, 'cancelled')}>Cancel</button>}
+                <button className="receive" onClick={() => openReceive(x)}>{canReceivePo(x.status) ? 'Receive / return' : 'Open'}</button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -314,8 +346,13 @@ export default function Purchasing({call, branch}) {
 
       {open && (
         <div className="receive-box">
-          <h3>Receive {open.poNo}</h3>
-          <p>Accepted quantity = received − damaged. Remaining is ordered − already received.</p>
+          <h3>{open.poNo} · {String(open.status || '').replace('_', ' ')}</h3>
+          {open.approvalNote && <p>Note: {open.approvalNote}</p>}
+          {!canReceivePo(open.status) && open.status !== 'received' && (
+            <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : 'This purchase order is not open for receiving.'}</p>
+          )}
+          {canReceivePo(open.status) && <p>Accepted quantity = received − damaged. Remaining is ordered − already received.</p>}
+          {canReceivePo(open.status) && <>
           <table>
             <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Accepted</th><th>Batch</th><th>Expiry</th></tr></thead>
             <tbody>
@@ -341,6 +378,7 @@ export default function Purchasing({call, branch}) {
           </table>
           <input className="receive-notes" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes"/>
           <button className="receive" disabled={!!busy} onClick={() => receive(open)}>{busy ? 'Posting…' : 'Post receipt'}</button>
+          </>}
 
           {(open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
             <div>

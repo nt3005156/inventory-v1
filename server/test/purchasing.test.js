@@ -5,6 +5,7 @@ import {Supplier} from '../src/models/index.js';
 import {InventoryBalance, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {acceptedQty, remainingQty} from '../src/services/receiving.js';
+import {canReceivePo, canTransitionPo} from '../src/services/purchaseOrders.js';
 import {returnableQty} from '../src/services/returns.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
@@ -25,18 +26,33 @@ beforeEach(async () => {
   supplier = await Supplier.create({name: 'Kathmandu Food Suppliers', contact: '9800000000'});
 });
 
-function createPo(orderedQty = 1000, extras = {}) {
-  return request('/api/purchase-orders', {
+function patchPoStatus(poId, status, extras = {}) {
+  return request('/api/purchase-orders/' + poId + '/status', {
+    method: 'PATCH',
+    token: tokenFor(extras.user || world.manager),
+    body: {status, notes: extras.notes}
+  });
+}
+
+async function createPo(orderedQty = 1000, extras = {}) {
+  const {draft, user, ...body} = extras;
+  const created = await request('/api/purchase-orders', {
     method: 'POST',
-    token: tokenFor(world.manager),
+    token: tokenFor(user || world.manager),
     body: {
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
       items: [{ingredient: String(world.ingredient._id), orderedQty, unit: 'g', unitPrice: 0.05}],
       total: orderedQty * 0.05,
-      ...extras
+      ...body
     }
   });
+  if (created.status !== 201 || draft) return created;
+  const pending = await patchPoStatus(created.body._id, 'pending', {user: user || world.manager});
+  if (pending.status !== 200) return pending;
+  const approved = await patchPoStatus(created.body._id, 'approved', {user: world.owner});
+  if (approved.status !== 200) return approved;
+  return {status: 201, body: approved.body};
 }
 
 function receive(poId, items, extras = {}) {
@@ -507,10 +523,112 @@ describe('PATCH /api/supplier-invoices/:id', () => {
   });
 });
 
-describe('purchasing E2E workflow', () => {
-  it('walks PO → receive → return → invoice → edit → pay → statement → report', async () => {
-    const po = await createPo(1000);
+describe('PATCH /api/purchase-orders/:id/status', () => {
+  it('submits a draft, approves it, and then allows receiving', async () => {
+    const po = await createPo(400, {draft: true});
     assert.equal(po.status, 201, po.body?.message);
+    assert.equal(po.body.status, 'draft');
+    const line = po.body.items[0];
+    assert.equal((await receive(po.body._id, [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}])).status, 409);
+
+    const forced = await request('/api/purchase-orders', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {
+        branch: String(world.branchA._id),
+        supplier: String(supplier._id),
+        status: 'approved',
+        items: [{ingredient: String(world.ingredient._id), orderedQty: 10, unit: 'g', unitPrice: 1}],
+        total: 10
+      }
+    });
+    assert.equal(forced.status, 201);
+    assert.equal(forced.body.status, 'draft');
+
+    const pending = await patchPoStatus(po.body._id, 'pending');
+    assert.equal(pending.status, 200, pending.body?.message);
+    assert.equal(pending.body.status, 'pending');
+    assert.equal((await receive(po.body._id, [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}])).status, 409);
+
+    const approved = await patchPoStatus(po.body._id, 'approved', {user: world.owner, notes: 'OK to buy'});
+    assert.equal(approved.status, 200, approved.body?.message);
+    assert.equal(approved.body.status, 'approved');
+    assert.equal(approved.body.approvalNote, 'OK to buy');
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 100, damagedQty: 0}], {key: 'appr-gr'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    assert.equal(rec.body.purchaseOrder.status, 'partially_received');
+  });
+
+  it('rejects a pending PO, keeps it off the report, and blocks receive', async () => {
+    const po = await createPo(200, {draft: true});
+    await patchPoStatus(po.body._id, 'pending');
+    const rejected = await patchPoStatus(po.body._id, 'rejected', {notes: 'Too expensive'});
+    assert.equal(rejected.status, 200, rejected.body?.message);
+    assert.equal(rejected.body.status, 'rejected');
+    assert.equal(rejected.body.approvalNote, 'Too expensive');
+    const line = po.body.items[0];
+    assert.equal((await receive(po.body._id, [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}])).status, 409);
+    const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
+    assert.equal(report.body.purchaseOrders.count, 0);
+
+    const again = await patchPoStatus(po.body._id, 'pending');
+    assert.equal(again.status, 200, again.body?.message);
+    assert.equal(again.body.status, 'pending');
+  });
+
+  it('cannot skip pending or cancel after a receipt', async () => {
+    const po = await createPo(100, {draft: true});
+    assert.equal((await patchPoStatus(po.body._id, 'approved')).status, 409);
+    await patchPoStatus(po.body._id, 'pending');
+    await patchPoStatus(po.body._id, 'approved');
+    const line = po.body.items[0];
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 40, damagedQty: 0}], {key: 'appr-gr2'});
+    assert.equal(rec.status, 201, rec.body?.message);
+    assert.equal((await patchPoStatus(po.body._id, 'cancelled')).status, 409);
+  });
+
+  it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
+    const po = await createPo(50, {draft: true});
+    assert.equal((await patchPoStatus(po.body._id, 'pending', {user: world.staffA})).status, 403);
+    assert.equal((await request('/api/purchase-orders/' + po.body._id + '/status', {method: 'PATCH', body: {status: 'pending'}})).status, 401);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    assert.equal((await request('/api/purchase-orders/' + po.body._id + '/status', {method: 'PATCH', token: guest, body: {status: 'pending'}})).status, 403);
+
+    const other = await request('/api/purchase-orders', {
+      method: 'POST',
+      token: tokenFor(world.owner),
+      body: {
+        branch: String(world.branchB._id),
+        supplier: String(supplier._id),
+        items: [{ingredient: String(world.ingredient._id), orderedQty: 10, unit: 'g', unitPrice: 1}],
+        total: 10
+      }
+    });
+    assert.equal(other.status, 201, other.body?.message);
+    assert.equal((await patchPoStatus(other.body._id, 'pending')).status, 403);
+    assert.equal((await request('/api/purchase-orders', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {
+        branch: String(world.branchB._id),
+        supplier: String(supplier._id),
+        items: [{ingredient: String(world.ingredient._id), orderedQty: 5, unit: 'g', unitPrice: 1}],
+        total: 5
+      }
+    })).status, 403);
+  });
+});
+
+describe('purchasing E2E workflow', () => {
+  it('walks PO → submit → approve → receive → return → invoice → edit → pay → statement → report', async () => {
+    const draft = await createPo(1000, {draft: true});
+    assert.equal(draft.status, 201, draft.body?.message);
+    assert.equal(draft.body.status, 'draft');
+    const submitted = await patchPoStatus(draft.body._id, 'pending');
+    assert.equal(submitted.body.status, 'pending');
+    const po = await patchPoStatus(draft.body._id, 'approved', {user: world.owner});
+    assert.equal(po.status, 200, po.body?.message);
+    assert.equal(po.body.status, 'approved');
     const line = po.body.items[0];
 
     const rec = await receive(po.body._id, [{

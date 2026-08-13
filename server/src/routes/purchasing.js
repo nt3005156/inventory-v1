@@ -10,6 +10,7 @@ import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
+import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
@@ -32,6 +33,25 @@ r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, r
     if (!po) return res.status(404).json({message: 'Purchase order not found'});
     assertBranchAccess(req.user, po.branch);
     res.json(po);
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+const poStatusSchema = z.object({
+  status: z.enum(['pending', 'approved', 'rejected', 'sent', 'cancelled']),
+  notes: z.string().optional()
+});
+
+r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const body = poStatusSchema.parse(req.body);
+    res.json(await transitionPurchaseOrder({
+      poId: req.params.id,
+      status: body.status,
+      notes: body.notes,
+      user: req.user
+    }));
   } catch (e) {
     fail(res, e);
   }

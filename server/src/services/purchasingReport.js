@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import {PurchaseOrder, SupplierInvoice, SupplierPayment, InventoryTransaction} from '../models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
 import {assertBranchAccess} from './kitchen.js';
+import {REPORTABLE_PO_STATUSES} from './purchaseOrders.js';
 import {money} from './statements.js';
 
 function httpError(message, status) {
@@ -59,7 +60,7 @@ export async function buildPurchasingReport({branchId, user, from, to}) {
   const match = {...branchMatch, ...dates};
 
   const [orders, receipts, returns, invoices, payments, purchaseTx, returnTx] = await Promise.all([
-    PurchaseOrder.find({...match, status: {$ne: 'cancelled'}}).populate('supplier', 'name'),
+    PurchaseOrder.find({...match, status: {$in: REPORTABLE_PO_STATUSES}}).populate('supplier', 'name'),
     GoodsReceipt.find(match),
     PurchaseReturn.find(match),
     SupplierInvoice.find({...match, status: {$ne: 'void'}}).populate('supplier', 'name'),

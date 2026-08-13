@@ -2,6 +2,7 @@ import {Audit} from '../models/index.js';
 import {InventoryBalance, PurchaseOrder} from '../models/operations.js';
 import {GoodsReceipt} from '../models/purchasing.js';
 import {assertBranchAccess} from './kitchen.js';
+import {canReceivePo} from './purchaseOrders.js';
 import {moveStock} from './inventoryLedger.js';
 
 function httpError(message, status) {
@@ -42,6 +43,7 @@ export async function receivePurchaseOrder({poId, items, notes, user, session, i
   if (!po) throw httpError('Purchase order not found', 404);
   assertBranchAccess(user, po.branch);
   if (po.status === 'cancelled') throw httpError('Cannot receive a cancelled purchase order', 409);
+  if (!canReceivePo(po.status)) throw httpError('Purchase order must be approved before receiving', 409);
 
   const prepared = [];
   for (const row of items || []) {
