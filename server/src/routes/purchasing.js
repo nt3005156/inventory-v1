@@ -9,6 +9,7 @@ import {receivePurchaseOrder} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
+import {buildPnl} from '../services/pnl.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
 import {publishPurchasingEvent} from '../services/realtime.js';
@@ -247,6 +248,19 @@ r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) =
 r.get('/reports/purchasing', auth(['owner', 'manager']), async (req, res) => {
   try {
     res.json(await buildPurchasingReport({
+      branchId: req.query.branch,
+      user: req.user,
+      from: req.query.from,
+      to: req.query.to
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/reports/pnl', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await buildPnl({
       branchId: req.query.branch,
       user: req.user,
       from: req.query.from,
