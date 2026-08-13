@@ -73,16 +73,37 @@ export default function Tables({call, branches = [], user}) {
     }
   };
 
-  const pay = async table => {
-    const order = table.currentOrder;
-    if (!order?.dueAmount) return;
-    setBusy(table._id + 'pay');
+  const checks = table => {
+    if (Array.isArray(table.currentOrders) && table.currentOrders.length) return table.currentOrders;
+    return table.currentOrder ? [table.currentOrder] : [];
+  };
+
+  const pay = async (order, amount) => {
+    const value = Number(amount);
+    if (!(value > 0)) return;
+    setBusy(order._id + 'pay');
     setError('');
     try {
-      await call('/orders/' + order._id + '/payments', {method: 'POST', body: JSON.stringify({amount: order.dueAmount, method: 'cash'})});
+      await call('/orders/' + order._id + '/payments', {method: 'POST', body: JSON.stringify({amount: value, method: 'cash'})});
       load();
     } catch (e) {
       setError(e.message || 'Payment failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const split = async order => {
+    const picks = (order.items || []).map(item => ({itemId: item._id, qty: Number(ops[order._id]?.split?.[item._id] || 0)})).filter(x => x.qty > 0);
+    if (!picks.length) return;
+    setBusy(order._id + 'split');
+    setError('');
+    try {
+      await call('/orders/' + order._id + '/split', {method: 'POST', body: JSON.stringify({items: picks})});
+      setOps(x => ({...x, [order._id]: {}}));
+      load();
+    } catch (e) {
+      setError(e.message || 'Split failed');
     } finally {
       setBusy('');
     }
@@ -166,37 +187,69 @@ export default function Tables({call, branches = [], user}) {
           <h3>{area}</h3>
           <div className="table-floor">
             {rows.filter(t => (t.area || 'Floor') === area).map(table => {
-              const order = table.currentOrder;
+              const orders = checks(table);
+              const order = orders[0];
               return (
                 <article key={table._id} className={'table-card table-' + table.status + (table.active === false ? ' table-inactive' : '')}>
                   <div className="table-cardhead">
                     <b>{table.name}</b>
                     <label className={'pill tablepill-' + table.status}>{table.status === 'disabled' ? 'out of service' : table.status}</label>
                   </div>
-                  <p className="table-meta">{table.seats || 0} seats{order ? ` · ${order.orderNo}` : ''}</p>
-                  {order && (
-                    <div className="table-order">
-                      <span>{order.type} · {order.status}</span>
-                      <strong>{rs(order.dueAmount > 0 ? order.dueAmount : order.total)}</strong>
-                      {(order.items || []).slice(0, 3).map((item, i) => <small key={i}>{item.qty}× {item.name}</small>)}
+                  <p className="table-meta">{table.seats || 0} seats{orders.length ? ` · ${orders.length} check${orders.length > 1 ? 's' : ''}` : ''}</p>
+                  {orders.map(check => (
+                    <div className="table-order" key={check._id}>
+                      <span>{check.orderNo} · {check.status}</span>
+                      <strong>Due {rs(check.dueAmount)} / {rs(check.total)}</strong>
+                      {(check.items || []).map(item => (
+                        <small key={item._id || item.name}>{item.qty}× {item.name} · {rs((item.unitPrice || 0) * item.qty)}</small>
+                      ))}
+                      {canOperate && check.dueAmount > 0 && (
+                        <div className="table-ops">
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.01"
+                            value={ops[check._id]?.payAmount ?? check.dueAmount}
+                            onChange={e => setOps(x => ({...x, [check._id]: {...x[check._id], payAmount: e.target.value}}))}
+                          />
+                          <button className="kds-go" disabled={!!busy} onClick={() => pay(check, ops[check._id]?.payAmount ?? check.dueAmount)}>
+                            {busy === check._id + 'pay' ? 'Updating…' : 'Pay'}
+                          </button>
+                        </div>
+                      )}
+                      {canOperate && ((check.items || []).length > 1 || (check.items || []).some(i => i.qty > 1)) ? (
+                        <div className="table-split">
+                          {(check.items || []).map(item => (
+                            <label key={item._id}>
+                              Split {item.name}
+                              <input
+                                type="number"
+                                min="0"
+                                max={item.qty}
+                                step="1"
+                                value={ops[check._id]?.split?.[item._id] || 0}
+                                onChange={e => setOps(x => ({...x, [check._id]: {...x[check._id], split: {...(x[check._id]?.split || {}), [item._id]: e.target.value}}}))}
+                              />
+                            </label>
+                          ))}
+                          <button className="kds-go" disabled={!!busy} onClick={() => split(check)}>
+                            {busy === check._id + 'split' ? 'Updating…' : 'Split check'}
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
-                  )}
+                  ))}
                   <div className="kds-actions">
                     {canOperate && (ACTIONS[table.status] || []).filter(a => !a.manager || canManage).map(a => (
                       <button
                         key={a.status}
                         className={a.status === 'disabled' ? 'kds-cancel' : 'kds-go'}
-                        disabled={!!busy || !!order}
+                        disabled={!!busy || !!orders.length}
                         onClick={() => setStatus(table, a.status)}
                       >
                         {busy === table._id + a.status ? 'Updating…' : a.label}
                       </button>
                     ))}
-                    {canOperate && order?.dueAmount > 0 && (
-                      <button className="kds-go" disabled={!!busy} onClick={() => pay(table)}>
-                        {busy === table._id + 'pay' ? 'Updating…' : 'Take payment'}
-                      </button>
-                    )}
                   </div>
                   {canOperate && order && (
                     <div className="table-ops">
@@ -205,7 +258,7 @@ export default function Tables({call, branches = [], user}) {
                         onChange={e => setOps(x => ({...x, [table._id]: {...x[table._id], moveTo: e.target.value}}))}
                       >
                         <option value="">Move to…</option>
-                        {rows.filter(t => t._id !== table._id && t.active !== false && (['available', 'reserved'].includes(t.status) || (t.status === 'occupied' && !t.currentOrder))).map(t => (
+                        {rows.filter(t => t._id !== table._id && t.active !== false && (['available', 'reserved'].includes(t.status) || (t.status === 'occupied' && !checks(t).length))).map(t => (
                           <option key={t._id} value={t._id}>{t.name}</option>
                         ))}
                       </select>
@@ -217,8 +270,8 @@ export default function Tables({call, branches = [], user}) {
                         onChange={e => setOps(x => ({...x, [table._id]: {...x[table._id], mergeTo: e.target.value}}))}
                       >
                         <option value="">Merge into…</option>
-                        {rows.filter(t => t._id !== table._id && t.currentOrder).map(t => (
-                          <option key={t._id} value={t._id}>{t.name} · {t.currentOrder.orderNo}</option>
+                        {rows.filter(t => t._id !== table._id && checks(t).length).map(t => (
+                          <option key={t._id} value={t._id}>{t.name} · {checks(t)[0]?.orderNo}</option>
                         ))}
                       </select>
                       <button className="kds-go" disabled={!!busy || !ops[table._id]?.mergeTo} onClick={() => merge(table)}>

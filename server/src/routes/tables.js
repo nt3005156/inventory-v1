@@ -52,9 +52,17 @@ r.get('/tables', auth(roles), async (req, res) => {
       branch: branchId,
       table: {$in: tables.map(t => t._id)},
       status: {$in: OPEN_ORDER_STATUSES}
-    }).select('orderNo status type total paidAmount dueAmount table createdAt items.name items.qty');
-    const byTable = new Map(open.map(o => [String(o.table), o]));
-    res.json(tables.map(t => ({...t.toJSON(), currentOrder: byTable.get(String(t._id)) || null})));
+    }).select('orderNo status type total paidAmount dueAmount table createdAt items._id items.name items.qty items.unitPrice items.notes').sort({createdAt: 1});
+    const byTable = new Map();
+    for (const o of open) {
+      const key = String(o.table);
+      if (!byTable.has(key)) byTable.set(key, []);
+      byTable.get(key).push(o);
+    }
+    res.json(tables.map(t => {
+      const currentOrders = byTable.get(String(t._id)) || [];
+      return {...t.toJSON(), currentOrders, currentOrder: currentOrders[0] || null};
+    }));
   } catch (e) {
     fail(res, e);
   }
