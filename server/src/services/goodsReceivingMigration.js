@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import {Branch, PurchaseOrder} from '../models/operations.js';
 import {GoodsReceipt, GoodsReceiptCounter} from '../models/purchasing.js';
-import {receiptRequestFingerprint} from './receiving.js';
+import {DAMAGE_DISPOSITION, LEGACY_DAMAGE_REASON, receiptRequestFingerprint} from './receiving.js';
 
 const RECEIPT_INDEXES = [
   {
@@ -19,6 +19,38 @@ const RECEIPT_INDEXES = [
 ];
 
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+const knownDamageReasons = new Set([
+  'transport_damage',
+  'packaging_damage',
+  'temperature_abuse',
+  'spoiled',
+  'expired',
+  'quality',
+  'wrong_item',
+  'other',
+  LEGACY_DAMAGE_REASON
+]);
+
+function normalizedReceiptItems(items) {
+  return (items || []).map(item => {
+    const damagedQty = Number(item.damagedQty || 0);
+    const receivedQty = Number(item.receivedQty || 0);
+    const acceptedQty = receivedQty - damagedQty;
+    const normalized = {...item, receivedQty, damagedQty, acceptedQty};
+    if (damagedQty > 0) {
+      normalized.damageReason = knownDamageReasons.has(item.damageReason) ? item.damageReason : LEGACY_DAMAGE_REASON;
+      normalized.damageDisposition = DAMAGE_DISPOSITION;
+      if (normalized.damageReason === 'other' && String(item.damageNotes || '').trim().length < 3) {
+        normalized.damageNotes = 'Legacy damage details unavailable';
+      }
+    } else {
+      delete normalized.damageReason;
+      delete normalized.damageDisposition;
+      delete normalized.damageNotes;
+    }
+    return normalized;
+  });
+}
 
 async function ensureCollection(name) {
   const db = mongoose.connection.db;
@@ -44,12 +76,15 @@ async function backfillGoodsReceipts() {
       {acceptedValue: {$exists: false}},
       {damagedValue: {$exists: false}},
       {numberVersion: {$exists: false}},
+      {requestHashVersion: {$ne: 2}},
+      {'items': {$elemMatch: {damagedQty: {$gt: 0}, damageReason: {$exists: false}}}},
+      {'items': {$elemMatch: {damagedQty: {$gt: 0}, damageDisposition: {$ne: DAMAGE_DISPOSITION}}}},
       {$and: [{idempotencyKey: {$type: 'string'}}, {requestHash: {$exists: false}}]}
     ]
   }, {projection: {
     _id: 1, restaurant: 1, branch: 1, supplier: 1, purchaseOrder: 1, receivedBy: 1,
     receivedAt: 1, createdAt: 1, receivedValue: 1, acceptedValue: 1, damagedValue: 1,
-    numberVersion: 1, idempotencyKey: 1, requestHash: 1, notes: 1, items: 1
+    numberVersion: 1, idempotencyKey: 1, requestHash: 1, requestHashVersion: 1, notes: 1, items: 1
   }}).toArray();
   if (!rows.length) return {migrated: 0, unresolved: 0};
 
@@ -68,7 +103,8 @@ async function backfillGoodsReceipts() {
     const po = poById.get(String(row.purchaseOrder));
     const branch = row.branch || po?.branch;
     const restaurant = row.restaurant || po?.restaurant || restaurantByBranch.get(String(branch));
-    const set = {};
+    const items = normalizedReceiptItems(row.items);
+    const set = {items, requestHashVersion: 2};
     if (!row.restaurant && restaurant) set.restaurant = restaurant;
     if (!row.branch && branch) set.branch = branch;
     if (!row.supplier && po?.supplier) set.supplier = po.supplier;
@@ -76,29 +112,32 @@ async function backfillGoodsReceipts() {
     if (!row.receivedAt) set.receivedAt = row.createdAt || new Date();
     if (row.numberVersion === undefined) set.numberVersion = 1;
     if (row.receivedValue === undefined) {
-      set.receivedValue = money((row.items || []).reduce((sum, item) => sum + Number(item.receivedQty || 0) * Number(item.unitPrice || 0), 0));
+      set.receivedValue = money(items.reduce((sum, item) => sum + item.receivedQty * Number(item.unitPrice || 0), 0));
     }
     if (row.acceptedValue === undefined) {
-      set.acceptedValue = money((row.items || []).reduce((sum, item) => sum + Number(item.acceptedQty || 0) * Number(item.unitPrice || 0), 0));
+      set.acceptedValue = money(items.reduce((sum, item) => sum + item.acceptedQty * Number(item.unitPrice || 0), 0));
     }
     if (row.damagedValue === undefined) {
-      set.damagedValue = money((row.items || []).reduce((sum, item) => sum + Number(item.damagedQty || 0) * Number(item.unitPrice || 0), 0));
+      set.damagedValue = money(items.reduce((sum, item) => sum + item.damagedQty * Number(item.unitPrice || 0), 0));
     }
-    if (!row.requestHash && typeof row.idempotencyKey === 'string' && row.idempotencyKey.trim() && row.purchaseOrder) {
+    if (typeof row.idempotencyKey === 'string' && row.idempotencyKey.trim() && row.purchaseOrder) {
       set.requestHash = receiptRequestFingerprint({
         poId: row.purchaseOrder,
         notes: row.notes,
-        items: (row.items || []).map(item => ({
+        items: items.map(item => ({
           itemId: item.poItem,
           receivedQty: item.receivedQty,
           damagedQty: item.damagedQty,
+          damageReason: item.damageReason,
+          damageDisposition: item.damageDisposition,
+          damageNotes: item.damageNotes,
           batchNumber: item.batchNumber,
           expiryDate: item.expiryDate
         }))
       });
     }
     if (!restaurant || !branch) unresolved += 1;
-    if (Object.keys(set).length) operations.push({updateOne: {filter: {_id: row._id}, update: {$set: set}}});
+    operations.push({updateOne: {filter: {_id: row._id}, update: {$set: set}}});
   }
   if (operations.length) await GoodsReceipt.collection.bulkWrite(operations, {ordered: false});
   return {migrated: operations.length, unresolved};

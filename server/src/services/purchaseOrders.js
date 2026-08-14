@@ -24,11 +24,12 @@ export const PO_TRANSITIONS = {
   sent: ['cancelled'],
   partially_received: [],
   received: [],
+  closed_short: [],
   cancelled: []
 };
 
 export const RECEIVABLE_STATUSES = ['approved', 'sent', 'partially_received'];
-export const REPORTABLE_PO_STATUSES = ['approved', 'sent', 'partially_received', 'received'];
+export const REPORTABLE_PO_STATUSES = ['approved', 'sent', 'partially_received', 'received', 'closed_short'];
 
 export function canReceivePo(status) {
   return RECEIVABLE_STATUSES.includes(status);
@@ -59,7 +60,8 @@ function populatedPurchaseOrder(query) {
     .populate('updatedBy', 'name role')
     .populate('submittedBy', 'name role')
     .populate('approvedBy', 'name role')
-    .populate('rejectedBy', 'name role');
+    .populate('rejectedBy', 'name role')
+    .populate('shortClosedBy', 'name role');
 }
 
 export async function purchaseBranchContext({user, branchId, session, allowInactive = false}) {
@@ -457,4 +459,111 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
     user: context.userId
   }], {session});
   return populatedPurchaseOrder(PurchaseOrder.findById(po._id).session(session || null));
+}
+
+function shortCloseFingerprint({poId, reason}) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    purchaseOrder: String(poId),
+    reason: clean(reason)
+  })).digest('hex');
+}
+
+async function findShortCloseReplay({poId, reason, idempotencyKey, identity, session}) {
+  const requestHash = shortCloseFingerprint({poId, reason});
+  const prior = await PurchaseOrder.findOne({
+    restaurant: identity.restaurantId,
+    shortCloseIdempotencyKey: idempotencyKey
+  }).select('+shortCloseRequestHash').session(session || null);
+  if (!prior) return null;
+  if (String(prior._id) !== String(poId) || prior.shortCloseRequestHash !== requestHash || prior.status !== 'closed_short') {
+    throw httpError('Idempotency key was already used for a different short-close request', 409);
+  }
+  return populatedPurchaseOrder(PurchaseOrder.findById(prior._id).session(session || null));
+}
+
+export async function replayShortClosePurchaseOrder({poId, reason, user, idempotencyKey, session}) {
+  if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
+  const key = clean(idempotencyKey);
+  if (!key) throw httpError('Idempotency-Key is required', 400);
+  const identity = await userRestaurantContext(user, {session});
+  if (!['owner', 'manager'].includes(identity.role)) throw httpError('Only owners and managers can close a partial purchase order', 403);
+  const target = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).select('branch').session(session || null);
+  if (!target) throw httpError('Purchase order not found', 404);
+  await purchaseBranchContext({user, branchId: target.branch, session, allowInactive: true});
+  const replay = await findShortCloseReplay({poId, reason, idempotencyKey: key, identity, session});
+  if (!replay) throw httpError('Short-close request could not be replayed; retry with a new key', 409);
+  return replay;
+}
+
+export async function closeShortPurchaseOrder({poId, reason, expectedVersion, user, session, idempotencyKey}) {
+  if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
+  const key = clean(idempotencyKey);
+  if (!key) throw httpError('Idempotency-Key is required', 400);
+  if (key.length > 120) throw httpError('Idempotency-Key must be 120 characters or fewer', 400);
+  const identity = await userRestaurantContext(user, {session});
+  if (!['owner', 'manager'].includes(identity.role)) throw httpError('Only owners and managers can close a partial purchase order', 403);
+  const po = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).session(session || null);
+  if (!po) throw httpError('Purchase order not found', 404);
+  const context = await purchaseBranchContext({user, branchId: po.branch, session, allowInactive: true});
+  const replay = await findShortCloseReplay({poId, reason, idempotencyKey: key, identity, session});
+  if (replay) return {purchaseOrder: replay, duplicate: true};
+  if (po.status !== 'partially_received') throw httpError('Only a partially received purchase order can be closed short', 409);
+  if (Number(expectedVersion) !== Number(po.__v)) {
+    throw httpError('Purchase order changed since it was loaded; refresh and try again', 409);
+  }
+  const explanation = clean(reason);
+  if (explanation.length < 3) throw httpError('Short-close reason must be at least 3 characters', 400);
+
+  const outstanding = (po.items || []).map(line => ({
+    poItem: line._id,
+    ingredient: line.ingredient,
+    orderedQty: Number(line.orderedQty || 0),
+    receivedQty: Number(line.receivedQty || 0),
+    shortQty: Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0)),
+    unit: line.unit
+  })).filter(line => line.shortQty > 1e-9);
+  if (!outstanding.length) throw httpError('Purchase order has no outstanding quantity to close', 409);
+  if (!(po.items || []).some(line => Number(line.receivedQty || 0) > 0)) {
+    throw httpError('A purchase order must have a receipt before it can be closed short', 409);
+  }
+
+  const before = {status: po.status, version: po.__v, outstanding};
+  const closedAt = new Date();
+  po.status = 'closed_short';
+  po.shortClosedBy = context.userId;
+  po.shortClosedAt = closedAt;
+  po.shortCloseReason = explanation;
+  po.shortCloseIdempotencyKey = key;
+  po.shortCloseRequestHash = shortCloseFingerprint({poId, reason: explanation});
+  po.updatedBy = context.userId;
+  try {
+    await po.save({session: session || undefined});
+  } catch (error) {
+    if (error?.name === 'VersionError') throw httpError('Purchase order changed since it was loaded; refresh and try again', 409);
+    throw error;
+  }
+
+  await Audit.create([{
+    entity: 'purchase_order',
+    entityId: po._id,
+    restaurant: context.restaurantId,
+    branch: context.branch._id,
+    action: 'po_short_close',
+    before,
+    after: {
+      status: po.status,
+      version: po.__v,
+      shortClosedAt: closedAt,
+      shortClosedBy: context.userId,
+      shortCloseReason: explanation,
+      outstanding
+    },
+    reason: explanation,
+    user: context.userId
+  }], {session: session || undefined});
+
+  return {
+    purchaseOrder: await populatedPurchaseOrder(PurchaseOrder.findById(po._id).session(session || null)),
+    duplicate: false
+  };
 }

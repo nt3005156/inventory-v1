@@ -170,7 +170,7 @@ describe('socket purchasing events', () => {
         method: 'POST',
         token: tokenFor(world.manager),
         headers: {'Idempotency-Key': 'live-gr'},
-        body: {items: [{itemId: String(line._id), receivedQty: 100, damagedQty: 10}]}
+        body: {items: [{itemId: String(line._id), receivedQty: 100, damagedQty: 10, damageReason: 'transport_damage'}]}
       });
       assert.equal(rec.status, 201, rec.body?.message);
       const payload = await pending;
@@ -178,6 +178,50 @@ describe('socket purchasing events', () => {
       assert.equal(payload.status, 'partially_received');
     } finally {
       socket.close();
+    }
+  });
+
+  it('emits a branch-scoped short-close update after partial receiving', async () => {
+    const created = await createDraftPo();
+    const approved = await approvePo(created.body._id);
+    assert.equal(approved.status, 200, approved.body?.message);
+    const line = approved.body.items[0];
+    const rec = await request('/api/purchase-orders/' + created.body._id + '/receive', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'live-short-gr'},
+      body: {items: [{itemId: String(line._id), receivedQty: 100, damagedQty: 0}]}
+    });
+    assert.equal(rec.status, 201, rec.body?.message);
+
+    const socketA = await connectSocket(tokenFor(world.manager), world.branchA._id);
+    const socketB = await connectSocket(tokenFor(world.staffB), world.branchB._id);
+    try {
+      await joinBranch(socketA, world.branchA._id);
+      await joinBranch(socketB, world.branchB._id);
+      const leaked = [];
+      socketB.on('purchasing:update', payload => leaked.push(payload));
+      const pending = waitEvent(socketA, 'purchasing:update');
+      const closed = await request('/api/purchase-orders/' + created.body._id + '/close-short', {
+        method: 'POST',
+        token: tokenFor(world.manager),
+        headers: {'Idempotency-Key': 'live-short-close'},
+        body: {
+          reason: 'Supplier cancelled the remainder',
+          expectedVersion: rec.body.purchaseOrder.__v
+        }
+      });
+      assert.equal(closed.status, 200, closed.body?.message);
+      const payload = await pending;
+      assert.equal(payload.reason, 'po_short_close');
+      assert.equal(payload.status, 'closed_short');
+      assert.equal(payload.poId, String(created.body._id));
+      assert.equal(String(payload.branch), String(world.branchA._id));
+      await new Promise(r => setTimeout(r, 200));
+      assert.equal(leaked.length, 0);
+    } finally {
+      socketA.close();
+      socketB.close();
     }
   });
 

@@ -3,17 +3,50 @@ const {Schema, model} = mongoose;
 const n = {type: Number, default: 0};
 const oid = {type: Schema.Types.ObjectId};
 
+const receiptDamageReasons = [
+  'transport_damage',
+  'packaging_damage',
+  'temperature_abuse',
+  'spoiled',
+  'expired',
+  'quality',
+  'wrong_item',
+  'other',
+  'legacy_unspecified'
+];
+
 const receiptLineSchema = new Schema({
   poItem: {...oid, required: true, immutable: true},
   ingredient: {...oid, ref: 'Ingredient', required: true, immutable: true},
   receivedQty: {type: Number, required: true, min: 0, immutable: true},
   damagedQty: {type: Number, required: true, min: 0, immutable: true},
   acceptedQty: {type: Number, required: true, min: 0, immutable: true},
+  damageReason: {type: String, enum: receiptDamageReasons, immutable: true},
+  damageDisposition: {type: String, enum: ['rejected_at_receiving'], immutable: true},
+  damageNotes: {type: String, trim: true, maxlength: 500, immutable: true},
   unit: {type: String, required: true, trim: true, maxlength: 30, immutable: true},
   unitPrice: {type: Number, required: true, min: 0, immutable: true},
   batchNumber: {type: String, trim: true, maxlength: 120, immutable: true},
   expiryDate: {type: Date, immutable: true}
 }, {_id: true});
+receiptLineSchema.pre('validate', function validateReceiptLine() {
+  const received = Number(this.receivedQty || 0);
+  const damaged = Number(this.damagedQty || 0);
+  const accepted = Number(this.acceptedQty || 0);
+  if (Math.abs(accepted - (received - damaged)) > 1e-9) {
+    this.invalidate('acceptedQty', 'Accepted quantity must equal received quantity minus damaged quantity');
+  }
+  if (damaged > 0 && !this.damageReason) this.invalidate('damageReason', 'Damage reason is required');
+  if (damaged > 0 && this.damageDisposition !== 'rejected_at_receiving') {
+    this.invalidate('damageDisposition', 'Damaged goods must be rejected at receiving');
+  }
+  if (damaged === 0 && (this.damageReason || this.damageDisposition || this.damageNotes)) {
+    this.invalidate('damageReason', 'Damage details require a damaged quantity');
+  }
+  if (this.damageReason === 'other' && String(this.damageNotes || '').trim().length < 3) {
+    this.invalidate('damageNotes', 'Damage notes are required when the reason is other');
+  }
+});
 
 const goodsReceiptSchema = new Schema({
   restaurant: {...oid, ref: 'Restaurant', required: true, immutable: true},
@@ -26,6 +59,7 @@ const goodsReceiptSchema = new Schema({
   notes: {type: String, trim: true, maxlength: 1000, immutable: true},
   idempotencyKey: {type: String, trim: true, maxlength: 120, select: false, immutable: true},
   requestHash: {type: String, select: false, immutable: true},
+  requestHashVersion: {type: Number, default: 2, select: false, immutable: true},
   receivedBy: {...oid, ref: 'User', required: true, immutable: true},
   receivedValue: {type: Number, required: true, min: 0, immutable: true},
   acceptedValue: {type: Number, required: true, min: 0, immutable: true},
@@ -39,6 +73,7 @@ goodsReceiptSchema.set('toJSON', {
   transform: (_document, result) => {
     delete result.idempotencyKey;
     delete result.requestHash;
+    delete result.requestHashVersion;
     return result;
   }
 });

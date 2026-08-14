@@ -38,7 +38,7 @@ const purchaseOrderSchema=new Schema({
   numberVersion:{type:Number,default:2,immutable:true},
   branch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
   supplier:{...oid,ref:'Supplier',required:true,index:true,immutable:true},
-  status:{type:String,enum:['draft','pending','approved','rejected','sent','partially_received','received','cancelled'],default:'draft',index:true},
+  status:{type:String,enum:['draft','pending','approved','rejected','sent','partially_received','received','closed_short','cancelled'],default:'draft',index:true},
   orderDate:{type:Date,default:Date.now,required:true,immutable:true},
   expectedDeliveryDate:{type:Date,immutable:true},
   deliveryAddress:{type:String,trim:true,maxlength:500,immutable:true},
@@ -52,6 +52,11 @@ const purchaseOrderSchema=new Schema({
   rejectedBy:{...oid,ref:'User'},
   rejectedAt:Date,
   rejectionReason:{type:String,trim:true,maxlength:1000},
+  shortClosedBy:{...oid,ref:'User'},
+  shortClosedAt:Date,
+  shortCloseReason:{type:String,trim:true,maxlength:1000},
+  shortCloseIdempotencyKey:{type:String,trim:true,maxlength:120,select:false},
+  shortCloseRequestHash:{type:String,select:false},
   items:{type:[purchaseOrderLineSchema],validate:[items=>items.length>0,'At least one purchase order item is required']},
   subtotal:{type:Number,default:0,min:0,immutable:true},
   vat:{type:Number,default:0,min:0,immutable:true},
@@ -64,6 +69,7 @@ const purchaseOrderSchema=new Schema({
 },{timestamps:true,autoIndex:false,optimisticConcurrency:true});
 purchaseOrderSchema.index({restaurant:1,poNo:1},{unique:true,name:'po_restaurant_number_v2',partialFilterExpression:{numberVersion:2}});
 purchaseOrderSchema.index({restaurant:1,requestKey:1},{unique:true,name:'po_restaurant_request_key',partialFilterExpression:{requestKey:{$type:'string'}}});
+purchaseOrderSchema.index({restaurant:1,shortCloseIdempotencyKey:1},{unique:true,name:'po_restaurant_short_close_key',partialFilterExpression:{shortCloseIdempotencyKey:{$type:'string'}}});
 purchaseOrderSchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'po_restaurant_branch_status_created'});
 purchaseOrderSchema.index({restaurant:1,supplier:1,createdAt:-1},{name:'po_restaurant_supplier_created'});
 export const PurchaseOrder=model('PurchaseOrder',purchaseOrderSchema);

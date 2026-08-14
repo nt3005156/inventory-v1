@@ -12,6 +12,10 @@ const PO_INDEXES = [
     options: {unique: true, name: 'po_restaurant_request_key', partialFilterExpression: {requestKey: {$type: 'string'}}}
   },
   {
+    key: {restaurant: 1, shortCloseIdempotencyKey: 1},
+    options: {unique: true, name: 'po_restaurant_short_close_key', partialFilterExpression: {shortCloseIdempotencyKey: {$type: 'string'}}}
+  },
+  {
     key: {restaurant: 1, branch: 1, status: 1, createdAt: -1},
     options: {name: 'po_restaurant_branch_status_created'}
   },
@@ -84,14 +88,14 @@ async function backfillPurchaseOrders() {
 }
 
 async function backfillPurchaseOrderApprovals() {
-  const lifecycleStatuses = ['pending', 'approved', 'rejected', 'sent', 'partially_received', 'received'];
+  const lifecycleStatuses = ['pending', 'approved', 'rejected', 'sent', 'partially_received', 'received', 'closed_short'];
   const rows = await PurchaseOrder.collection.find({
     status: {$in: lifecycleStatuses},
     $or: [
       {submittedAt: {$exists: false}},
       {submittedBy: {$exists: false}},
       {approvalRound: {$exists: false}},
-      {status: {$in: ['approved', 'sent', 'partially_received', 'received']}, approvedAt: {$exists: false}},
+      {status: {$in: ['approved', 'sent', 'partially_received', 'received', 'closed_short']}, approvedAt: {$exists: false}},
       {status: 'rejected', rejectedAt: {$exists: false}},
       {status: 'rejected', rejectionReason: {$exists: false}}
     ]
@@ -117,7 +121,7 @@ async function backfillPurchaseOrderApprovals() {
     auditsByOrder.set(key, events);
   }
 
-  const approvedStatuses = ['approved', 'sent', 'partially_received', 'received'];
+  const approvedStatuses = ['approved', 'sent', 'partially_received', 'received', 'closed_short'];
   const operations = rows.map(row => {
     const events = auditsByOrder.get(String(row._id)) || [];
     const submitted = [...events].reverse().find(event => event.after?.status === 'pending');

@@ -62,7 +62,11 @@ function receive(poId, items, extras = {}) {
     method: 'POST',
     token: tokenFor(extras.user || world.manager),
     headers: key ? {'Idempotency-Key': key} : {},
-    body: {items, notes: extras.notes, expectedVersion: extras.expectedVersion}
+    body: {
+      items: items.map(item => Number(item.damagedQty || 0) > 0 && !item.damageReason ? {...item, damageReason: 'quality'} : item),
+      notes: extras.notes,
+      expectedVersion: extras.expectedVersion
+    }
   });
 }
 
@@ -376,8 +380,12 @@ describe('GET /api/reports/purchasing', () => {
     assert.equal(report.body.purchaseOrders.damagedQty, 50);
     assert.equal(report.body.purchaseOrders.acceptedQty, 350);
     assert.equal(report.body.purchaseOrders.returnedQty, 100);
+    assert.equal(report.body.purchaseOrders.outstandingQty, 600);
+    assert.equal(report.body.purchaseOrders.shortClosedQty, 0);
+    assert.equal(report.body.purchaseOrders.partialCount, 1);
     assert.equal(report.body.receipts.acceptedValue, 17.5);
     assert.equal(report.body.receipts.damagedValue, 2.5);
+    assert.deepEqual(report.body.receipts.damageByReason, [{reason: 'quality', qty: 50, value: 2.5}]);
     assert.equal(report.body.returns.value, 5);
     assert.equal(report.body.invoices.invoiced, 1130);
     assert.equal(report.body.invoices.vat, 130);

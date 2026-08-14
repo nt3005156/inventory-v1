@@ -29,14 +29,25 @@ export function summarizePoLines(orders) {
   let receivedQty = 0;
   let damagedQty = 0;
   let returnedQty = 0;
+  let outstandingQty = 0;
+  let shortClosedQty = 0;
+  let partialCount = 0;
+  let shortClosedCount = 0;
   let orderedValue = 0;
   for (const po of orders) {
     orderedValue += Number(po.total || 0);
+    if (po.status === 'partially_received') partialCount += 1;
+    if (po.status === 'closed_short') shortClosedCount += 1;
     for (const line of po.items || []) {
-      orderedQty += Number(line.orderedQty || 0);
-      receivedQty += Number(line.receivedQty || 0);
+      const ordered = Number(line.orderedQty || 0);
+      const received = Number(line.receivedQty || 0);
+      const remaining = Math.max(0, ordered - received);
+      orderedQty += ordered;
+      receivedQty += received;
       damagedQty += Number(line.damagedQty || 0);
       returnedQty += Number(line.returnedQty || 0);
+      if (po.status === 'closed_short') shortClosedQty += remaining;
+      else if (!['received', 'cancelled'].includes(po.status)) outstandingQty += remaining;
     }
   }
   const acceptedQty = receivedQty - damagedQty;
@@ -46,6 +57,10 @@ export function summarizePoLines(orders) {
     damagedQty,
     acceptedQty,
     returnedQty,
+    outstandingQty,
+    shortClosedQty,
+    partialCount,
+    shortClosedCount,
     onHandFromPos: acceptedQty - returnedQty,
     orderedValue: money(orderedValue)
   };
@@ -93,6 +108,18 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   const poQty = summarizePoLines(orders);
   const receivedValue = money(receipts.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.acceptedQty || 0) * Number(i.unitPrice || 0), 0), 0));
   const damagedValue = money(receipts.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.damagedQty || 0) * Number(i.unitPrice || 0), 0), 0));
+  const damageByReason = new Map();
+  for (const receipt of receipts) {
+    for (const item of receipt.items || []) {
+      const qty = Number(item.damagedQty || 0);
+      if (!(qty > 0)) continue;
+      const reason = item.damageReason || 'legacy_unspecified';
+      const current = damageByReason.get(reason) || {reason, qty: 0, value: 0};
+      current.qty += qty;
+      current.value = money(current.value + qty * Number(item.unitPrice || 0));
+      damageByReason.set(reason, current);
+    }
+  }
   const returnedValue = money(returns.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.qty || 0) * Number(i.unitCost || 0), 0), 0));
   const invoiced = money(invoices.reduce((s, i) => s + Number(i.total || 0), 0));
   const vat = money(invoices.reduce((s, i) => s + Number(i.vat || 0), 0));
@@ -131,7 +158,8 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
     receipts: {
       count: receipts.length,
       acceptedValue: receivedValue,
-      damagedValue
+      damagedValue,
+      damageByReason: [...damageByReason.values()].sort((a, b) => b.value - a.value || b.qty - a.qty)
     },
     returns: {
       count: returns.length,

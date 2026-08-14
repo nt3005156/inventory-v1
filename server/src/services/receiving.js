@@ -16,6 +16,19 @@ function httpError(message, status) {
 const clean = value => String(value || '').trim();
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
+export const RECEIPT_DAMAGE_REASONS = Object.freeze([
+  'transport_damage',
+  'packaging_damage',
+  'temperature_abuse',
+  'spoiled',
+  'expired',
+  'quality',
+  'wrong_item',
+  'other'
+]);
+export const LEGACY_DAMAGE_REASON = 'legacy_unspecified';
+export const DAMAGE_DISPOSITION = 'rejected_at_receiving';
+
 export function remainingQty(line) {
   return Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
 }
@@ -35,13 +48,19 @@ function canonicalReceiptRequest({poId, items, notes}) {
   return {
     purchaseOrder: String(poId),
     notes: clean(notes),
-    items: (items || []).map(row => ({
-      itemId: String(row.itemId || ''),
-      receivedQty: Number(row.receivedQty),
-      damagedQty: Number(row.damagedQty || 0),
-      batchNumber: clean(row.batchNumber),
-      expiryDate: canonicalExpiryDate(row.expiryDate)
-    })).sort((a, b) => a.itemId.localeCompare(b.itemId))
+    items: (items || []).map(row => {
+      const damagedQty = Number(row.damagedQty || 0);
+      return {
+        itemId: String(row.itemId || ''),
+        receivedQty: Number(row.receivedQty),
+        damagedQty,
+        damageReason: damagedQty > 0 ? (clean(row.damageReason) || LEGACY_DAMAGE_REASON) : clean(row.damageReason),
+        damageDisposition: damagedQty > 0 ? DAMAGE_DISPOSITION : clean(row.damageDisposition),
+        damageNotes: clean(row.damageNotes),
+        batchNumber: clean(row.batchNumber),
+        expiryDate: canonicalExpiryDate(row.expiryDate)
+      };
+    }).sort((a, b) => a.itemId.localeCompare(b.itemId))
   };
 }
 
@@ -52,14 +71,34 @@ export function receiptRequestFingerprint(input) {
 function validateLine(line, row) {
   const received = Number(row.receivedQty);
   const damaged = Number(row.damagedQty || 0);
+  const damageReason = clean(row.damageReason);
+  const damageNotes = clean(row.damageNotes);
   if (!Number.isFinite(received) || !(received > 0)) throw httpError('Received quantity must be positive', 400);
   if (!Number.isFinite(damaged) || damaged < 0) throw httpError('Damaged quantity cannot be negative', 400);
   if (damaged > received) throw httpError('Damaged quantity cannot exceed received quantity', 409);
+  if (damaged > 0 && !RECEIPT_DAMAGE_REASONS.includes(damageReason)) {
+    throw httpError('A valid damage reason is required when damaged quantity is recorded', 400);
+  }
+  if (damaged > 0 && damageReason === 'other' && damageNotes.length < 3) {
+    throw httpError('Damage notes of at least 3 characters are required when the reason is other', 400);
+  }
+  if (damaged === 0 && (damageReason || damageNotes || row.damageDisposition)) {
+    throw httpError('Damage details require a damaged quantity', 400);
+  }
   const remaining = remainingQty(line);
   if (received > remaining) throw httpError('Received quantity exceeds remaining ordered quantity', 409);
   const unitCost = Number(line.unitPrice);
   if (!Number.isFinite(unitCost) || unitCost < 0) throw httpError('Purchase order line has an invalid unit cost', 409);
-  return {received, damaged, accepted: acceptedQty(received, damaged), remaining, unitCost};
+  return {
+    received,
+    damaged,
+    accepted: acceptedQty(received, damaged),
+    remaining,
+    unitCost,
+    damageReason: damaged > 0 ? damageReason : undefined,
+    damageDisposition: damaged > 0 ? DAMAGE_DISPOSITION : undefined,
+    damageNotes: damaged > 0 && damageNotes ? damageNotes : undefined
+  };
 }
 
 async function populatedPurchaseOrder(poId, session) {
@@ -67,6 +106,7 @@ async function populatedPurchaseOrder(poId, session) {
     .populate('branch', 'name code address phone')
     .populate('supplier', 'name contact address paymentTerms')
     .populate('items.ingredient', 'name code category unit')
+    .populate('shortClosedBy', 'name role')
     .session(session || null);
 }
 
@@ -187,6 +227,7 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
     notes: clean(notes) || undefined,
     idempotencyKey: key,
     requestHash,
+    requestHashVersion: 2,
     receivedBy: context.userId,
     receivedValue,
     acceptedValue,
@@ -197,6 +238,9 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
       receivedQty: item.received,
       damagedQty: item.damaged,
       acceptedQty: item.accepted,
+      damageReason: item.damageReason,
+      damageDisposition: item.damageDisposition,
+      damageNotes: item.damageNotes,
       unit: item.line.unit,
       unitPrice: item.unitCost,
       batchNumber: clean(item.row.batchNumber) || undefined,
@@ -236,7 +280,12 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
     ? 'received'
     : 'partially_received';
   po.updatedBy = context.userId;
-  await po.save({session: session || undefined});
+  try {
+    await po.save({session: session || undefined});
+  } catch (error) {
+    if (error?.name === 'VersionError') throw httpError('Purchase order changed; refresh before receiving', 409);
+    throw error;
+  }
 
   await Audit.create([{
     entity: 'purchase_order',
@@ -258,6 +307,9 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
         receivedNow: item.received,
         damagedNow: item.damaged,
         acceptedNow: item.accepted,
+        damageReason: item.damageReason,
+        damageDisposition: item.damageDisposition,
+        damageNotes: item.damageNotes,
         receivedQty: Number(item.line.receivedQty || 0),
         damagedQty: Number(item.line.damagedQty || 0),
         remainingQty: remainingQty(item.line)

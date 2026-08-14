@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
+import {RECEIPT_DAMAGE_REASONS, receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
@@ -15,6 +15,8 @@ import {listLiveInventory} from '../services/inventory.js';
 import {buildMenuEngineering} from '../services/menuEngineering.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
 import {
+  closeShortPurchaseOrder,
+  replayShortClosePurchaseOrder,
   createPurchaseOrder,
   getPurchaseOrder,
   getPurchaseOrderApprovalHistory,
@@ -153,9 +155,18 @@ const receiveSchema = z.object({
     itemId: z.string(),
     receivedQty: z.number().positive(),
     damagedQty: z.number().nonnegative().optional(),
+    damageReason: z.enum(RECEIPT_DAMAGE_REASONS).optional(),
+    damageNotes: z.string().trim().max(500).optional(),
     batchNumber: z.string().trim().max(120).optional(),
     expiryDate: receiptDateSchema.optional()
-  }).strict()).min(1).max(100)
+  }).strict().superRefine((value, ctx) => {
+    if (Number(value.damagedQty || 0) === 0 && (value.damageReason || value.damageNotes)) {
+      ctx.addIssue({code: z.ZodIssueCode.custom, path: ['damageReason'], message: 'Damage details require a damaged quantity'});
+    }
+    if (value.damageReason === 'other' && String(value.damageNotes || '').trim().length < 3) {
+      ctx.addIssue({code: z.ZodIssueCode.custom, path: ['damageNotes'], message: 'Damage notes are required when the reason is other'});
+    }
+  })).min(1).max(100)
 }).strict();
 
 r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
@@ -200,6 +211,61 @@ r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, r
       });
     });
     publishPurchaseOrder(po.branch?._id || po.branch, {reason: 'po_status', poId: String(po._id), status: po.status});
+    res.json(po);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+const shortCloseSchema = z.object({
+  reason: z.string().trim().min(3).max(1000),
+  expectedVersion: z.number().int().nonnegative()
+}).strict();
+
+r.post('/purchase-orders/:id/close-short', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  let body;
+  let idempotencyKey;
+  try {
+    body = shortCloseSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await closeShortPurchaseOrder({
+          poId: req.params.id,
+          reason: body.reason,
+          expectedVersion: body.expectedVersion,
+          user: req.user,
+          session,
+          idempotencyKey
+        });
+      });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = {
+          purchaseOrder: await replayShortClosePurchaseOrder({
+            poId: req.params.id,
+            reason: body.reason,
+            user: req.user,
+            idempotencyKey
+          }),
+          duplicate: true
+        };
+      } else {
+        throw error;
+      }
+    }
+    const po = result.purchaseOrder;
+    if (!result.duplicate) {
+      publishPurchaseOrder(po.branch?._id || po.branch, {
+        reason: 'po_short_close',
+        poId: String(po._id),
+        status: po.status
+      });
+    }
     res.json(po);
   } catch (e) {
     fail(res, e);
@@ -264,7 +330,10 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
         poId: String(result.purchaseOrder._id),
         receiptId: String(result.receipt._id),
         receiptNo: result.receipt.receiptNo,
-        status: result.purchaseOrder.status
+        status: result.purchaseOrder.status,
+        hasDamage: Number(result.receipt.damagedValue || 0) > 0,
+        acceptedValue: result.receipt.acceptedValue,
+        damagedValue: result.receipt.damagedValue
       });
     }
     res.status(result.duplicate ? 200 : 201).json(result);

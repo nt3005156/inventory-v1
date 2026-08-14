@@ -53,13 +53,14 @@ async function createApprovedPo({currentWorld = world, currentSupplier = supplie
   return approved.body;
 }
 
-function postReceipt(po, {items, key, user = world.manager, notes = 'Counted at receiving bay', expectedVersion = po.__v} = {}) {
+function postReceipt(po, {items, key, user = world.manager, notes = 'Counted at receiving bay', expectedVersion = po.__v, preserveLegacyDamage = false} = {}) {
+  const receiptItems = items || [{itemId: String(po.items[0]._id), receivedQty: 25, damagedQty: 0}];
   return request(`/api/purchase-orders/${po._id}/receive`, {
     method: 'POST',
     token: tokenFor(user),
     headers: key ? {'Idempotency-Key': key} : {},
     body: {
-      items: items || [{itemId: String(po.items[0]._id), receivedQty: 25, damagedQty: 0}],
+      items: receiptItems.map(item => !preserveLegacyDamage && Number(item.damagedQty || 0) > 0 && !item.damageReason ? {...item, damageReason: 'quality'} : item),
       notes,
       expectedVersion
     }
@@ -300,11 +301,15 @@ describe('production goods receiving', () => {
     assert.equal(legacy.acceptedValue, 4);
     assert.equal(legacy.damagedValue, 1);
     assert.equal(legacy.receivedAt.toISOString(), '2025-01-01T00:00:00.000Z');
+    assert.equal(legacy.requestHashVersion, 2);
+    assert.equal(legacy.items[0].damageReason, 'legacy_unspecified');
+    assert.equal(legacy.items[0].damageDisposition, 'rejected_at_receiving');
     assert.match(legacy.requestHash, /^[a-f0-9]{64}$/);
 
     const replay = await postReceipt(po, {
       key: 'legacy-key',
       notes: '',
+      preserveLegacyDamage: true,
       items: [{itemId: String(po.items[0]._id), receivedQty: 10, damagedQty: 2}]
     });
     assert.equal(replay.status, 200, replay.body?.message);
@@ -313,6 +318,7 @@ describe('production goods receiving', () => {
     const changedReplay = await postReceipt(po, {
       key: 'legacy-key',
       notes: '',
+      preserveLegacyDamage: true,
       items: [{itemId: String(po.items[0]._id), receivedQty: 9, damagedQty: 2}]
     });
     assert.equal(changedReplay.status, 409);

@@ -18,6 +18,18 @@ const draftRow = () => ({key: globalThis.crypto?.randomUUID?.() || Math.random()
 const requestKey = () => globalThis.crypto?.randomUUID?.() || `po-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const canReceivePo = s => ['approved', 'sent', 'partially_received'].includes(s);
 const poPill = s => ['approved', 'sent', 'partially_received', 'received'].includes(s) ? 'pill ok' : 'pill';
+const DAMAGE_REASON_OPTIONS = [
+  ['transport_damage', 'Transport damage'],
+  ['packaging_damage', 'Packaging damage'],
+  ['temperature_abuse', 'Temperature issue'],
+  ['spoiled', 'Spoiled'],
+  ['expired', 'Expired'],
+  ['quality', 'Quality issue'],
+  ['wrong_item', 'Wrong item'],
+  ['other', 'Other']
+];
+const damageReasonLabel = value => DAMAGE_REASON_OPTIONS.find(option => option[0] === value)?.[1]
+  || (value === 'legacy_unspecified' ? 'Legacy reason unavailable' : String(value || 'Not recorded').replaceAll('_', ' '));
 
 export default function Purchasing({call, user, token}) {
   const locked = user?.role !== 'owner';
@@ -39,6 +51,7 @@ export default function Purchasing({call, user, token}) {
   const [returns, setReturns] = useState([]);
   const [approvalHistory, setApprovalHistory] = useState([]);
   const [approvalAction, setApprovalAction] = useState(null);
+  const [shortCloseAction, setShortCloseAction] = useState(null);
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState('');
   const [lines, setLines] = useState({});
@@ -230,12 +243,15 @@ export default function Purchasing({call, user, token}) {
     setError('');
     setOpenId(order._id);
     setApprovalAction(null);
+    setShortCloseAction(null);
     setApprovalHistory([]);
     setNotes('');
     receiptRequestKey.current = requestKey();
     setLines(Object.fromEntries((order.items || []).map(i => [i._id, {
       receivedQty: 0,
       damagedQty: 0,
+      damageReason: '',
+      damageNotes: '',
       batchNumber: '',
       expiryDate: ''
     }])));
@@ -352,6 +368,8 @@ export default function Purchasing({call, user, token}) {
         itemId: i._id,
         receivedQty: Number(row.receivedQty || 0),
         damagedQty: Number(row.damagedQty || 0),
+        damageReason: Number(row.damagedQty || 0) > 0 ? (row.damageReason || undefined) : undefined,
+        damageNotes: Number(row.damagedQty || 0) > 0 ? (row.damageNotes?.trim() || undefined) : undefined,
         batchNumber: row.batchNumber || undefined,
         expiryDate: row.expiryDate || undefined
       };
@@ -366,6 +384,16 @@ export default function Purchasing({call, user, token}) {
       || item.damagedQty > item.receivedQty);
     if (invalid) {
       setError('Damaged quantity must be between zero and the received quantity');
+      return;
+    }
+    const undocumentedDamage = items.find(item => item.damagedQty > 0 && !item.damageReason);
+    if (undocumentedDamage) {
+      setError('Choose a reason for every line with damaged goods');
+      return;
+    }
+    const unexplainedOther = items.find(item => item.damageReason === 'other' && String(item.damageNotes || '').trim().length < 3);
+    if (unexplainedOther) {
+      setError('Add at least 3 characters of damage detail when the reason is Other');
       return;
     }
     const receivedTotal = items.reduce((sum, item) => sum + item.receivedQty, 0);
@@ -544,6 +572,32 @@ export default function Purchasing({call, user, token}) {
     }
   };
 
+  const closeShort = async e => {
+    e.preventDefault();
+    const order = shortCloseAction?.order;
+    const closeReason = String(shortCloseAction?.reason || '').trim();
+    if (!order || closeReason.length < 3) return;
+    if (typeof globalThis.confirm === 'function' && !globalThis.confirm(`Close ${order.poNo} with its outstanding quantities unreceived? This ends further receiving on the PO.`)) return;
+    setBusy('short-' + order._id);
+    setError('');
+    setSuccess('');
+    try {
+      const updated = await call('/purchase-orders/' + order._id + '/close-short', {
+        method: 'POST',
+        headers: {'Idempotency-Key': shortCloseAction.requestKey},
+        body: JSON.stringify({reason: closeReason, expectedVersion: order.__v})
+      });
+      setShortCloseAction(null);
+      setSuccess(`${order.poNo} closed short. Outstanding quantities remain visible but cannot be received.`);
+      await load();
+      if (openId === order._id) await openReceive(updated);
+    } catch (err) {
+      setError(err.message || 'Could not close the partial purchase order');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const sameUser = actor => String(actor?._id || actor || '') === String(user?._id || user?.id || '');
   const canDecide = order => user?.role === 'owner' || (user?.role === 'manager' && !sameUser(order.createdBy) && !sameUser(order.submittedBy));
   const requestApprovalDecision = (order, status) => {
@@ -581,7 +635,12 @@ export default function Purchasing({call, user, token}) {
       damagedQty: summary.damagedQty + damagedQty,
       acceptedQty: summary.acceptedQty + Math.max(0, acceptedQty),
       acceptedValue: summary.acceptedValue + Math.max(0, acceptedQty) * Number(item.unitPrice || 0),
-      invalid: summary.invalid || damagedQty < 0 || damagedQty > receivedQty || receivedQty > remaining(item)
+      invalid: summary.invalid
+        || damagedQty < 0
+        || damagedQty > receivedQty
+        || receivedQty > remaining(item)
+        || (damagedQty > 0 && !row.damageReason)
+        || (row.damageReason === 'other' && String(row.damageNotes || '').trim().length < 3)
     };
   }, {lineCount: 0, receivedQty: 0, damagedQty: 0, acceptedQty: 0, acceptedValue: 0, invalid: false});
   const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
@@ -692,7 +751,7 @@ export default function Purchasing({call, user, token}) {
         <label>Search<input value={filterDraft.q} onChange={e => setFilterDraft({...filterDraft, q: e.target.value})} placeholder="PO number, supplier, notes"/></label>
         <label>Status<select value={filterDraft.status} onChange={e => setFilterDraft({...filterDraft, status: e.target.value})}>
           <option value="">All statuses</option>
-          {['draft', 'pending', 'approved', 'rejected', 'sent', 'partially_received', 'received', 'cancelled'].map(status => <option key={status} value={status}>{status.replace('_', ' ')}</option>)}
+          {['draft', 'pending', 'approved', 'rejected', 'sent', 'partially_received', 'received', 'closed_short', 'cancelled'].map(status => <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>)}
         </select></label>
         <label>Supplier<select value={filterDraft.supplier} onChange={e => setFilterDraft({...filterDraft, supplier: e.target.value})}>
           <option value="">All suppliers</option>
@@ -719,7 +778,7 @@ export default function Purchasing({call, user, token}) {
               <td><strong>{x.poNo}</strong><small>{ymd(x.orderDate || x.createdAt)}{x.expectedDeliveryDate ? ` · due ${ymd(x.expectedDeliveryDate)}` : ''}</small></td>
               <td>{x.supplier?.name || 'Unavailable supplier'}</td>
               <td>{x.items?.length || 0}<small>{x.items?.map(i => `${i.ingredient?.name || 'Ingredient'}: ${i.orderedQty} ${i.unit || ''}`).join(' · ')}</small></td>
-              <td>{x.items?.map(i => `${i.receivedQty || 0}/${i.orderedQty} ${i.unit || ''}`).join(', ') || 'Not received'}</td>
+              <td>{x.items?.map(i => `${i.receivedQty || 0}/${i.orderedQty} ${i.unit || ''}${Number(i.damagedQty || 0) > 0 ? ` · ${i.damagedQty} damaged` : ''}`).join(', ') || 'Not received'}{x.status === 'closed_short' && <small>Closed with {x.items?.reduce((sum, item) => sum + remaining(item), 0)} outstanding</small>}</td>
               <td><span className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</span>{x.status === 'pending' && <small>Round {x.approvalRound || 1} · {x.submittedBy?.name ? `by ${x.submittedBy.name}` : 'awaiting decision'}</small>}</td>
               <td><strong>{rs(x.total)}</strong><small>Net {rs(x.subtotal)} · VAT {rs(x.vat)}</small></td>
               <td><div className="po-row-actions">
@@ -730,6 +789,7 @@ export default function Purchasing({call, user, token}) {
                 {canManagePurchasing && x.status === 'pending' && !canDecide(x) && <small className="po-separation-note">Independent approval required</small>}
                 {canManagePurchasing && x.status === 'approved' && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'sent')}>Mark sent</button>}
                 {canManagePurchasing && ['draft', 'pending', 'approved', 'rejected', 'sent'].includes(x.status) && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => setPoStatus(x, 'cancelled')}>Cancel</button>}
+                {canManagePurchasing && x.status === 'partially_received' && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => { setError(''); setShortCloseAction({order: x, reason: '', requestKey: requestKey()}); }}>Close short</button>}
                 <button type="button" className="receive" disabled={!!busy} onClick={() => openReceive(x)}>{canManagePurchasing && canReceivePo(x.status) ? 'Receive / return' : 'Open'}</button>
               </div></td>
             </tr>
@@ -757,6 +817,20 @@ export default function Purchasing({call, user, token}) {
           <button className={approvalAction.status === 'rejected' ? 'kds-cancel' : 'receive'} disabled={!!busy || (approvalAction.status === 'rejected' && approvalAction.notes.trim().length < 3)}>{busy ? 'Saving…' : `Confirm ${approvalAction.status === 'approved' ? 'approval' : 'rejection'}`}</button>
         </div>
       </form>}
+      {shortCloseAction && <form className="po-approval-action po-short-close" onSubmit={closeShort}>
+        <div>
+          <span className="eyebrow">Receiving exception</span>
+          <h3>Close {shortCloseAction.order.poNo} short</h3>
+          <p>This permanently stops further receipts on this PO. Received and damaged quantities stay unchanged, and every outstanding line remains visible for audit and reporting.</p>
+        </div>
+        <label>Why will the supplier not deliver the remainder?
+          <textarea autoFocus required minLength="3" maxLength="1000" value={shortCloseAction.reason} onChange={e => setShortCloseAction(current => ({...current, reason: e.target.value}))} placeholder="Example: Supplier confirmed the remaining 20 kg is unavailable"/>
+        </label>
+        <div className="po-approval-buttons">
+          <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setShortCloseAction(null)}>Keep open</button>
+          <button className="kds-cancel" disabled={!!busy || shortCloseAction.reason.trim().length < 3}>{busy === 'short-' + shortCloseAction.order._id ? 'Closing…' : 'Confirm short close'}</button>
+        </div>
+      </form>}
       {poPagination.pages > 1 && <div className="po-pagination">
         <button type="button" className="po-secondary" disabled={poLoading || poPagination.page <= 1} onClick={() => setPoPagination(current => ({...current, page: current.page - 1}))}>Previous</button>
         <span>Page {poPagination.page} of {poPagination.pages}</span>
@@ -775,6 +849,7 @@ export default function Purchasing({call, user, token}) {
           {open.submissionNote && <p><strong>Submission note:</strong> {open.submissionNote}</p>}
           {open.approvalNote && <p><strong>Approval comment:</strong> {open.approvalNote}</p>}
           {open.rejectionReason && <p className="po-rejection-reason"><strong>Rejection reason:</strong> {open.rejectionReason}</p>}
+          {open.shortCloseReason && <p className="po-short-close-note"><strong>Closed short:</strong> {open.shortCloseReason} {open.shortClosedBy?.name ? `— ${open.shortClosedBy.name}` : ''}{open.shortClosedAt ? ` · ${new Date(open.shortClosedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}` : ''}</p>}
           <h3>Approval trail</h3>
           {!approvalHistory.length && <p className="empty">No approval decisions have been recorded yet.</p>}
           {!!approvalHistory.length && <div className="po-approval-timeline">{approvalHistory.map(event => <article key={event.id}>
@@ -782,17 +857,17 @@ export default function Purchasing({call, user, token}) {
             <div><strong>{event.actor?.name || 'Recorded user'}</strong><small>{event.actor?.role || 'user'} · {event.at ? new Date(event.at).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}{event.approvalRound ? ` · round ${event.approvalRound}` : ''}</small>{event.note && <p>{event.note}</p>}</div>
           </article>)}</div>}
           {!canReceivePo(open.status) && open.status !== 'received' && (
-            <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : 'This purchase order is not open for receiving.'}</p>
+            <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : open.status === 'closed_short' ? 'This PO was closed short. Outstanding quantities are retained for audit but no further receipts are allowed.' : 'This purchase order is not open for receiving.'}</p>
           )}
           {canReceivePo(open.status) && <p>Enter only quantities physically counted now. Accepted quantity = received − damaged; remaining = ordered − already received. Inventory cost always comes from the approved PO.</p>}
           {canManagePurchasing && canReceivePo(open.status) && <>
           <div className="receipt-toolbar">
-            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: remaining(item), damagedQty: 0}])))}>Fill all remaining</button>
-            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: 0, damagedQty: 0}])))}>Clear counts</button>
+            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: remaining(item), damagedQty: 0, damageReason: '', damageNotes: ''}])))}>Fill all remaining</button>
+            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: 0, damagedQty: 0, damageReason: '', damageNotes: ''}])))}>Clear counts</button>
             <span>Nothing is prefilled—verify the delivery before posting.</span>
           </div>
           <table className="receipt-entry-table">
-            <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Accepted</th><th>PO cost</th><th>Accepted value</th><th>Batch</th><th>Expiry</th></tr></thead>
+            <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Damage reason</th><th>Damage detail</th><th>Accepted</th><th>PO cost</th><th>Accepted value</th><th>Batch</th><th>Expiry</th></tr></thead>
             <tbody>
               {(open.items || []).map(i => {
                 const row = lines[i._id] || {receivedQty: 0, damagedQty: 0};
@@ -806,7 +881,12 @@ export default function Purchasing({call, user, token}) {
                     <td>{i.receivedQty || 0}</td>
                     <td>{remaining(i)}</td>
                     <td><input aria-label={`Receive ${i.ingredient?.name || 'ingredient'}`} type="number" min="0" max={remaining(i)} value={row.receivedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, receivedQty: e.target.value}}))}/></td>
-                    <td><input aria-label={`Damaged ${i.ingredient?.name || 'ingredient'}`} type="number" min="0" max={Math.max(0, rec)} value={row.damagedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, damagedQty: e.target.value}}))}/></td>
+                    <td><input aria-label={`Damaged ${i.ingredient?.name || 'ingredient'}`} type="number" min="0" max={Math.max(0, rec)} value={row.damagedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, damagedQty: e.target.value, ...(Number(e.target.value || 0) > 0 ? {} : {damageReason: '', damageNotes: ''})}}))}/></td>
+                    <td><select aria-label={`Damage reason ${i.ingredient?.name || 'ingredient'}`} disabled={!(dmg > 0)} required={dmg > 0} value={row.damageReason || ''} onChange={e => setLines(s => ({...s, [i._id]: {...row, damageReason: e.target.value}}))}>
+                      <option value="">Choose reason</option>
+                      {DAMAGE_REASON_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select></td>
+                    <td><input aria-label={`Damage detail ${i.ingredient?.name || 'ingredient'}`} disabled={!(dmg > 0)} required={row.damageReason === 'other'} minLength={row.damageReason === 'other' ? 3 : undefined} maxLength="500" value={row.damageNotes || ''} onChange={e => setLines(s => ({...s, [i._id]: {...row, damageNotes: e.target.value}}))} placeholder={row.damageReason === 'other' ? 'Required details' : 'Optional detail'}/></td>
                     <td>{acceptedNow}</td>
                     <td>{rs(i.unitPrice)} / {i.unit}</td>
                     <td>{rs(acceptedNow * Number(i.unitPrice || 0))}</td>
@@ -824,7 +904,7 @@ export default function Purchasing({call, user, token}) {
             <span><small>Damaged</small><strong>{receiptDraft.damagedQty}</strong></span>
             <span><small>Stock value</small><strong>{rs(receiptDraft.acceptedValue)}</strong></span>
           </div>
-          {receiptDraft.invalid && <p className="danger" role="alert">A line exceeds its remaining quantity or has damaged quantity greater than received.</p>}
+          {receiptDraft.invalid && <p className="danger" role="alert">Check remaining quantities and document every damaged quantity with a reason. Other reasons also require details.</p>}
           <input className="receive-notes" maxLength="1000" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes (delivery reference, discrepancy, or handover details)"/>
           <button className="receive receipt-post" disabled={!!busy || !receiptDraft.lineCount || receiptDraft.invalid} onClick={() => receive(open)}>{busy === open._id ? 'Posting receipt…' : 'Review and post receipt'}</button>
           </>}
@@ -882,13 +962,14 @@ export default function Purchasing({call, user, token}) {
           {!receipts.length && <p className="empty">No receipts posted yet.</p>}
           {!!receipts.length && (
             <table>
-              <thead><tr><th>Receipt</th><th>Accepted</th><th>Damaged</th><th>Accepted value</th><th>Batch</th><th>Received by</th><th>Notes</th><th>When</th></tr></thead>
+              <thead><tr><th>Receipt</th><th>Accepted</th><th>Damaged</th><th>Damage record</th><th>Accepted value</th><th>Batch</th><th>Received by</th><th>Notes</th><th>When</th></tr></thead>
               <tbody>
                 {receipts.map(r => (
                   <tr key={r._id}>
                     <td><strong>{r.receiptNo}</strong></td>
                     <td>{r.items?.map(i => i.acceptedQty).join(', ')}</td>
                     <td>{r.items?.map(i => i.damagedQty).join(', ')}</td>
+                    <td>{r.items?.filter(i => Number(i.damagedQty || 0) > 0).map(i => `${damageReasonLabel(i.damageReason)} · rejected at receiving${i.damageNotes ? ` · ${i.damageNotes}` : ''}`).join(' | ') || 'No damage'}</td>
                     <td>{rs(r.acceptedValue)}</td>
                     <td>{r.items?.map(i => i.batchNumber || '—').join(', ')}</td>
                     <td>{r.receivedBy?.name || 'Recorded user'}</td>
@@ -1042,8 +1123,8 @@ export default function Purchasing({call, user, token}) {
       {report && (
         <div className="receive-box">
           <div className="kpis">
-            <article><small>PO value</small><strong>{rs(report.purchaseOrders?.orderedValue)}</strong><em>{report.purchaseOrders?.count || 0} open/received POs</em></article>
-            <article><small>Accepted stock value</small><strong>{rs(report.receipts?.acceptedValue)}</strong><em>Damaged {rs(report.receipts?.damagedValue)}</em></article>
+            <article><small>PO value</small><strong>{rs(report.purchaseOrders?.orderedValue)}</strong><em>{report.purchaseOrders?.count || 0} operational POs · {report.purchaseOrders?.outstandingQty || 0} outstanding · {report.purchaseOrders?.shortClosedQty || 0} closed short</em></article>
+            <article><small>Accepted stock value</small><strong>{rs(report.receipts?.acceptedValue)}</strong><em>Damaged {rs(report.receipts?.damagedValue)}{report.receipts?.damageByReason?.length ? ` · ${report.receipts.damageByReason.map(item => `${damageReasonLabel(item.reason)} ${item.qty}`).join(', ')}` : ''}</em></article>
             <article><small>Returned value</small><strong>{rs(report.returns?.value)}</strong><em>{report.returns?.count || 0} returns</em></article>
             <article><small>Invoice due</small><strong>{rs(report.invoices?.due)}</strong><em>VAT {rs(report.invoices?.vat)}</em></article>
           </div>
