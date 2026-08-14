@@ -17,6 +17,7 @@ import {updateSupplierInvoice} from '../services/invoices.js';
 import {
   createPurchaseOrder,
   getPurchaseOrder,
+  getPurchaseOrderApprovalHistory,
   listAccessibleBranches,
   listPurchaseOrders,
   replayPurchaseOrderCreate,
@@ -162,6 +163,18 @@ const poStatusSchema = z.object({
   status: z.enum(['pending', 'approved', 'rejected', 'sent', 'cancelled']),
   notes: z.string().trim().max(1000).optional(),
   expectedVersion: z.number().int().nonnegative().optional()
+}).superRefine((value, ctx) => {
+  if (value.status === 'rejected' && String(value.notes || '').trim().length < 3) {
+    ctx.addIssue({code: z.ZodIssueCode.custom, path: ['notes'], message: 'Rejection reason must be at least 3 characters'});
+  }
+});
+
+r.get('/purchase-orders/:id/approval-history', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    res.json(await getPurchaseOrderApprovalHistory({poId: req.params.id, user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
 });
 
 r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, res) => {

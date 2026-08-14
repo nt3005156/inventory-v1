@@ -1,7 +1,7 @@
 import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
-import {Supplier} from '../src/models/index.js';
+import {Audit, Supplier, User} from '../src/models/index.js';
 import {InventoryBalance, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {acceptedQty, remainingQty} from '../src/services/receiving.js';
@@ -545,15 +545,25 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
     assert.equal(forced.status, 201);
     assert.equal(forced.body.status, 'draft');
 
-    const pending = await patchPoStatus(po.body._id, 'pending');
+    const pending = await patchPoStatus(po.body._id, 'pending', {notes: 'Weekly stock request'});
     assert.equal(pending.status, 200, pending.body?.message);
     assert.equal(pending.body.status, 'pending');
+    assert.equal(pending.body.submittedBy._id, String(world.manager._id));
+    assert.ok(pending.body.submittedAt);
+    assert.equal(pending.body.submissionNote, 'Weekly stock request');
+    assert.equal(pending.body.approvalRound, 1);
     assert.equal((await receive(po.body._id, [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}])).status, 409);
 
     const approved = await patchPoStatus(po.body._id, 'approved', {user: world.owner, notes: 'OK to buy'});
     assert.equal(approved.status, 200, approved.body?.message);
     assert.equal(approved.body.status, 'approved');
+    assert.equal(approved.body.approvedBy._id, String(world.owner._id));
+    assert.ok(approved.body.approvedAt);
     assert.equal(approved.body.approvalNote, 'OK to buy');
+    const history = await request('/api/purchase-orders/' + po.body._id + '/approval-history', {token: tokenFor(world.staffA)});
+    assert.equal(history.status, 200, history.body?.message);
+    assert.deepEqual(history.body.map(event => event.status), ['pending', 'approved']);
+    assert.deepEqual(history.body.map(event => event.actor.name), ['Manager', 'Owner']);
     const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 100, damagedQty: 0}], {key: 'appr-gr'});
     assert.equal(rec.status, 201, rec.body?.message);
     assert.equal(rec.body.purchaseOrder.status, 'partially_received');
@@ -562,10 +572,14 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
   it('rejects a pending PO, keeps it off the report, and blocks receive', async () => {
     const po = await createPo(200, {draft: true});
     await patchPoStatus(po.body._id, 'pending');
-    const rejected = await patchPoStatus(po.body._id, 'rejected', {notes: 'Too expensive'});
+    assert.equal((await patchPoStatus(po.body._id, 'rejected', {user: world.owner})).status, 400);
+    const rejected = await patchPoStatus(po.body._id, 'rejected', {user: world.owner, notes: 'Too expensive'});
     assert.equal(rejected.status, 200, rejected.body?.message);
     assert.equal(rejected.body.status, 'rejected');
-    assert.equal(rejected.body.approvalNote, 'Too expensive');
+    assert.equal(rejected.body.rejectedBy._id, String(world.owner._id));
+    assert.ok(rejected.body.rejectedAt);
+    assert.equal(rejected.body.rejectionReason, 'Too expensive');
+    assert.equal(rejected.body.approvalNote, undefined);
     const line = po.body.items[0];
     assert.equal((await receive(po.body._id, [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}])).status, 409);
     const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
@@ -574,13 +588,43 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
     const again = await patchPoStatus(po.body._id, 'pending');
     assert.equal(again.status, 200, again.body?.message);
     assert.equal(again.body.status, 'pending');
+    assert.equal(again.body.approvalRound, 2);
+    assert.equal(again.body.rejectedBy, undefined);
+    assert.equal(again.body.rejectionReason, undefined);
+  });
+
+  it('prevents manager self-approval while retaining an explicit owner override', async () => {
+    const own = await createPo(100, {draft: true});
+    const pending = await patchPoStatus(own.body._id, 'pending');
+    assert.equal(pending.status, 200, pending.body?.message);
+    const denied = await patchPoStatus(own.body._id, 'approved');
+    assert.equal(denied.status, 403);
+    assert.match(denied.body.message, /cannot approve or reject/i);
+    const unchanged = await PurchaseOrder.findById(own.body._id).lean();
+    assert.equal(unchanged.status, 'pending');
+    assert.equal(await Audit.countDocuments({entity: 'purchase_order', entityId: own.body._id, action: 'po_status'}), 1);
+    const reviewer = await User.create({
+      name: 'Reviewer', email: 'reviewer@test.com', password: 'hashed', role: 'manager',
+      restaurant: world.restaurant.name, restaurantId: world.restaurant._id, branch: world.branchA._id
+    });
+    const independentlyApproved = await patchPoStatus(own.body._id, 'approved', {user: reviewer, notes: 'Reviewed independently'});
+    assert.equal(independentlyApproved.status, 200, independentlyApproved.body?.message);
+    assert.equal(independentlyApproved.body.approvedBy._id, String(reviewer._id));
+
+    const ownerPo = await createPo(100, {draft: true, user: world.owner});
+    const ownerPending = await patchPoStatus(ownerPo.body._id, 'pending', {user: world.owner});
+    const ownerApproved = await patchPoStatus(ownerPo.body._id, 'approved', {user: world.owner});
+    assert.equal(ownerPending.status, 200, ownerPending.body?.message);
+    assert.equal(ownerApproved.status, 200, ownerApproved.body?.message);
+    const approvalAudit = await Audit.findOne({entity: 'purchase_order', entityId: ownerPo.body._id, action: 'po_status', 'after.status': 'approved'}).lean();
+    assert.equal(approvalAudit.after.ownerOverride, true);
   });
 
   it('cannot skip pending or cancel after a receipt', async () => {
     const po = await createPo(100, {draft: true});
     assert.equal((await patchPoStatus(po.body._id, 'approved')).status, 409);
     await patchPoStatus(po.body._id, 'pending');
-    await patchPoStatus(po.body._id, 'approved');
+    await patchPoStatus(po.body._id, 'approved', {user: world.owner});
     const line = po.body.items[0];
     const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 40, damagedQty: 0}], {key: 'appr-gr2'});
     assert.equal(rec.status, 201, rec.body?.message);
@@ -606,6 +650,7 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
     });
     assert.equal(other.status, 201, other.body?.message);
     assert.equal((await patchPoStatus(other.body._id, 'pending')).status, 403);
+    assert.equal((await request('/api/purchase-orders/' + other.body._id + '/approval-history', {token: tokenFor(world.manager)})).status, 403);
     assert.equal((await request('/api/purchase-orders', {
       method: 'POST',
       token: tokenFor(world.manager),

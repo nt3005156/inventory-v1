@@ -28,7 +28,7 @@ export default function Purchasing({call, user, token}) {
   const branch = visibleBranches.find(b => b._id === branchId) || null;
   const [po, setPo] = useState([]);
   const [poPagination, setPoPagination] = useState({page: 1, limit: 25, total: 0, pages: 1});
-  const [poSummary, setPoSummary] = useState({subtotal: 0, vat: 0, total: 0, open: 0});
+  const [poSummary, setPoSummary] = useState({subtotal: 0, vat: 0, total: 0, open: 0, pendingApprovals: 0});
   const [poLoading, setPoLoading] = useState(false);
   const [poFilters, setPoFilters] = useState({q: '', supplier: '', status: '', from: '', to: ''});
   const [filterDraft, setFilterDraft] = useState({q: '', supplier: '', status: '', from: '', to: ''});
@@ -37,6 +37,8 @@ export default function Purchasing({call, user, token}) {
   const [invoices, setInvoices] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [returns, setReturns] = useState([]);
+  const [approvalHistory, setApprovalHistory] = useState([]);
+  const [approvalAction, setApprovalAction] = useState(null);
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState('');
   const [lines, setLines] = useState({});
@@ -84,7 +86,7 @@ export default function Purchasing({call, user, token}) {
       if (sequence !== loadSequence.current) return;
       setPo(a.items || (Array.isArray(a) ? a : []));
       setPoPagination(a.pagination || {page: 1, limit: 25, total: a.length || 0, pages: 1});
-      setPoSummary(a.summary || {subtotal: 0, vat: 0, total: 0, open: 0});
+      setPoSummary(a.summary || {subtotal: 0, vat: 0, total: 0, open: 0, pendingApprovals: 0});
       setSuppliers(b.suppliers || []);
       setIngredients(b.ingredients || []);
       setInvoices(d);
@@ -135,12 +137,14 @@ export default function Purchasing({call, user, token}) {
 
   useEffect(() => {
     setPo([]);
-    setPoSummary({subtotal: 0, vat: 0, total: 0, open: 0});
+    setPoSummary({subtotal: 0, vat: 0, total: 0, open: 0, pendingApprovals: 0});
     setInvoices([]);
     setReport(null);
     setOpenId('');
     setReceipts([]);
     setReturns([]);
+    setApprovalHistory([]);
+    setApprovalAction(null);
     setStatement(null);
     setStatementId('');
     setPayInvoiceId('');
@@ -163,12 +167,14 @@ export default function Purchasing({call, user, token}) {
   const refreshOpenHistory = async id => {
     if (!id) return;
     try {
-      const [r, ret] = await Promise.all([
+      const [r, ret, approvals] = await Promise.all([
         call('/purchase-orders/' + id + '/receipts'),
-        call('/purchase-orders/' + id + '/returns')
+        call('/purchase-orders/' + id + '/returns'),
+        call('/purchase-orders/' + id + '/approval-history')
       ]);
       setReceipts(r);
       setReturns(ret);
+      setApprovalHistory(approvals);
     } catch {
       /* list reload still ran */
     }
@@ -222,6 +228,8 @@ export default function Purchasing({call, user, token}) {
   const openReceive = async order => {
     setError('');
     setOpenId(order._id);
+    setApprovalAction(null);
+    setApprovalHistory([]);
     setNotes('');
     setLines(Object.fromEntries((order.items || []).map(i => [i._id, {
       receivedQty: remaining(i) || 0,
@@ -233,15 +241,18 @@ export default function Purchasing({call, user, token}) {
     setReason('quality');
     setRetLines(Object.fromEntries((order.items || []).map(i => [i._id, {qty: 0, batchNumber: ''}])));
     try {
-      const [r, ret] = await Promise.all([
+      const [r, ret, approvals] = await Promise.all([
         call('/purchase-orders/' + order._id + '/receipts'),
-        call('/purchase-orders/' + order._id + '/returns')
+        call('/purchase-orders/' + order._id + '/returns'),
+        call('/purchase-orders/' + order._id + '/approval-history')
       ]);
       setReceipts(r);
       setReturns(ret);
+      setApprovalHistory(approvals);
     } catch (e) {
       setReceipts([]);
       setReturns([]);
+      setApprovalHistory([]);
       setError(e.message);
     }
   };
@@ -494,20 +505,18 @@ export default function Purchasing({call, user, token}) {
     }
   };
 
-  const setPoStatus = async (order, status) => {
-    let notes;
-    if (status === 'rejected') {
-      notes = window.prompt('Rejection note (optional)') || undefined;
-    } else if (status === 'cancelled' && !window.confirm('Cancel ' + order.poNo + '?')) {
-      return;
-    }
+  const setPoStatus = async (order, status, statusNotes = '') => {
+    if (status === 'cancelled' && !window.confirm('Cancel ' + order.poNo + '?')) return;
     setBusy('st-' + order._id);
     setError('');
+    setSuccess('');
     try {
       const updated = await call('/purchase-orders/' + order._id + '/status', {
         method: 'PATCH',
-        body: JSON.stringify({status, notes, expectedVersion: order.__v})
+        body: JSON.stringify({status, notes: statusNotes.trim() || undefined, expectedVersion: order.__v})
       });
+      setApprovalAction(null);
+      setSuccess(`${order.poNo} ${status === 'pending' ? 'submitted for approval' : status}.`);
       await load();
       if (openId === order._id) await openReceive(updated);
     } catch (e) {
@@ -515,6 +524,13 @@ export default function Purchasing({call, user, token}) {
     } finally {
       setBusy('');
     }
+  };
+
+  const sameUser = actor => String(actor?._id || actor || '') === String(user?._id || user?.id || '');
+  const canDecide = order => user?.role === 'owner' || (user?.role === 'manager' && !sameUser(order.createdBy) && !sameUser(order.submittedBy));
+  const requestApprovalDecision = (order, status) => {
+    setError('');
+    setApprovalAction({order, status, notes: ''});
   };
 
   const voidInvoice = async inv => {
@@ -654,6 +670,7 @@ export default function Purchasing({call, user, token}) {
         <div className="po-filter-actions"><button disabled={poLoading}>Apply</button><button type="button" className="po-secondary" onClick={() => { const empty = {q: '', supplier: '', status: '', from: '', to: ''}; setFilterDraft(empty); setPoPagination(current => ({...current, page: 1})); setPoFilters(empty); }}>Clear</button></div>
       </form>
       <div className="po-summary-grid">
+        <article className={poSummary.pendingApprovals ? 'attention' : ''}><small>Awaiting approval</small><strong>{poSummary.pendingApprovals || 0}</strong>{poSummary.pendingApprovals > 0 && <button type="button" onClick={() => { setFilterDraft(current => ({...current, status: 'pending'})); setPoPagination(current => ({...current, page: 1})); setPoFilters(current => ({...current, status: 'pending'})); }}>View queue</button>}</article>
         <article><small>Open orders</small><strong>{poSummary.open || 0}</strong></article>
         <article><small>Net subtotal</small><strong>{rs(poSummary.subtotal)}</strong></article>
         <article><small>VAT</small><strong>{rs(poSummary.vat)}</strong></article>
@@ -670,13 +687,14 @@ export default function Purchasing({call, user, token}) {
               <td>{x.supplier?.name || 'Unavailable supplier'}</td>
               <td>{x.items?.length || 0}<small>{x.items?.map(i => `${i.ingredient?.name || 'Ingredient'}: ${i.orderedQty} ${i.unit || ''}`).join(' · ')}</small></td>
               <td>{x.items?.map(i => `${i.receivedQty || 0}/${i.orderedQty} ${i.unit || ''}`).join(', ') || 'Not received'}</td>
-              <td><span className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</span></td>
+              <td><span className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</span>{x.status === 'pending' && <small>Round {x.approvalRound || 1} · {x.submittedBy?.name ? `by ${x.submittedBy.name}` : 'awaiting decision'}</small>}</td>
               <td><strong>{rs(x.total)}</strong><small>Net {rs(x.subtotal)} · VAT {rs(x.vat)}</small></td>
               <td><div className="po-row-actions">
                 {canManagePurchasing && ['draft', 'rejected'].includes(x.status) && <button type="button" className="receive" disabled={!!busy} onClick={() => openDraftEdit(x)}>Edit</button>}
                 {canManagePurchasing && ['draft', 'rejected'].includes(x.status) && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'pending')}>Submit</button>}
-                {canManagePurchasing && x.status === 'pending' && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'approved')}>Approve</button>}
-                {canManagePurchasing && x.status === 'pending' && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => setPoStatus(x, 'rejected')}>Reject</button>}
+                {canManagePurchasing && x.status === 'pending' && canDecide(x) && <button type="button" className="receive" disabled={!!busy} onClick={() => requestApprovalDecision(x, 'approved')}>Approve</button>}
+                {canManagePurchasing && x.status === 'pending' && canDecide(x) && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => requestApprovalDecision(x, 'rejected')}>Reject</button>}
+                {canManagePurchasing && x.status === 'pending' && !canDecide(x) && <small className="po-separation-note">Independent approval required</small>}
                 {canManagePurchasing && x.status === 'approved' && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'sent')}>Mark sent</button>}
                 {canManagePurchasing && ['draft', 'pending', 'approved', 'rejected', 'sent'].includes(x.status) && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => setPoStatus(x, 'cancelled')}>Cancel</button>}
                 <button type="button" className="receive" disabled={!!busy} onClick={() => openReceive(x)}>{canManagePurchasing && canReceivePo(x.status) ? 'Receive / return' : 'Open'}</button>
@@ -685,6 +703,27 @@ export default function Purchasing({call, user, token}) {
           ))}
         </tbody>
       </table></div>}
+      {approvalAction && <form className="po-approval-action" onSubmit={e => {
+        e.preventDefault();
+        if (approvalAction.status === 'rejected' && approvalAction.notes.trim().length < 3) {
+          setError('Enter a rejection reason of at least 3 characters.');
+          return;
+        }
+        setPoStatus(approvalAction.order, approvalAction.status, approvalAction.notes);
+      }}>
+        <div>
+          <span className="eyebrow">Approval decision</span>
+          <h3>{approvalAction.status === 'approved' ? 'Approve' : 'Reject'} {approvalAction.order.poNo}</h3>
+          <p>{approvalAction.status === 'rejected' ? 'A clear reason is required and will be kept in the approval trail.' : 'An approval comment is optional. Your identity and decision time are recorded automatically.'}</p>
+        </div>
+        <label>{approvalAction.status === 'rejected' ? 'Rejection reason' : 'Approval comment'}
+          <textarea autoFocus required={approvalAction.status === 'rejected'} minLength={approvalAction.status === 'rejected' ? 3 : undefined} maxLength="1000" value={approvalAction.notes} onChange={e => setApprovalAction(current => ({...current, notes: e.target.value}))} placeholder={approvalAction.status === 'rejected' ? 'Explain what must be corrected before resubmission' : 'Optional purchasing note'}/>
+        </label>
+        <div className="po-approval-buttons">
+          <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setApprovalAction(null)}>Keep pending</button>
+          <button className={approvalAction.status === 'rejected' ? 'kds-cancel' : 'receive'} disabled={!!busy || (approvalAction.status === 'rejected' && approvalAction.notes.trim().length < 3)}>{busy ? 'Saving…' : `Confirm ${approvalAction.status === 'approved' ? 'approval' : 'rejection'}`}</button>
+        </div>
+      </form>}
       {poPagination.pages > 1 && <div className="po-pagination">
         <button type="button" className="po-secondary" disabled={poLoading || poPagination.page <= 1} onClick={() => setPoPagination(current => ({...current, page: current.page - 1}))}>Previous</button>
         <span>Page {poPagination.page} of {poPagination.pages}</span>
@@ -695,7 +734,20 @@ export default function Purchasing({call, user, token}) {
       {open && (
         <div className="receive-box">
           <h3>{open.poNo} · {String(open.status || '').replace('_', ' ')}</h3>
-          {open.approvalNote && <p>Note: {open.approvalNote}</p>}
+          <div className="po-approval-meta">
+            {open.submittedAt && <article><small>Submitted</small><strong>{open.submittedBy?.name || 'Recorded user'}</strong><span>{new Date(open.submittedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})} · round {open.approvalRound || 1}</span></article>}
+            {open.approvedAt && <article><small>Approved</small><strong>{open.approvedBy?.name || 'Recorded user'}</strong><span>{new Date(open.approvedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}</span></article>}
+            {open.rejectedAt && <article className="rejected"><small>Rejected</small><strong>{open.rejectedBy?.name || 'Recorded user'}</strong><span>{new Date(open.rejectedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}</span></article>}
+          </div>
+          {open.submissionNote && <p><strong>Submission note:</strong> {open.submissionNote}</p>}
+          {open.approvalNote && <p><strong>Approval comment:</strong> {open.approvalNote}</p>}
+          {open.rejectionReason && <p className="po-rejection-reason"><strong>Rejection reason:</strong> {open.rejectionReason}</p>}
+          <h3>Approval trail</h3>
+          {!approvalHistory.length && <p className="empty">No approval decisions have been recorded yet.</p>}
+          {!!approvalHistory.length && <div className="po-approval-timeline">{approvalHistory.map(event => <article key={event.id}>
+            <span className={poPill(event.status)}>{event.status}</span>
+            <div><strong>{event.actor?.name || 'Recorded user'}</strong><small>{event.actor?.role || 'user'} · {event.at ? new Date(event.at).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}{event.approvalRound ? ` · round ${event.approvalRound}` : ''}</small>{event.note && <p>{event.note}</p>}</div>
+          </article>)}</div>}
           {!canReceivePo(open.status) && open.status !== 'received' && (
             <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : 'This purchase order is not open for receiving.'}</p>
           )}

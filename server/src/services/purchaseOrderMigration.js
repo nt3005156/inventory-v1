@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {Audit} from '../models/index.js';
 import {Branch, PurchaseOrder} from '../models/operations.js';
 
 const PO_INDEXES = [
@@ -82,6 +83,65 @@ async function backfillPurchaseOrders() {
   return operations.length;
 }
 
+async function backfillPurchaseOrderApprovals() {
+  const lifecycleStatuses = ['pending', 'approved', 'rejected', 'sent', 'partially_received', 'received'];
+  const rows = await PurchaseOrder.collection.find({
+    status: {$in: lifecycleStatuses},
+    $or: [
+      {submittedAt: {$exists: false}},
+      {submittedBy: {$exists: false}},
+      {approvalRound: {$exists: false}},
+      {status: {$in: ['approved', 'sent', 'partially_received', 'received']}, approvedAt: {$exists: false}},
+      {status: 'rejected', rejectedAt: {$exists: false}},
+      {status: 'rejected', rejectionReason: {$exists: false}}
+    ]
+  }, {projection: {
+    _id: 1, status: 1, createdBy: 1, updatedBy: 1, createdAt: 1, updatedAt: 1,
+    submittedBy: 1, submittedAt: 1, approvalRound: 1,
+    approvedBy: 1, approvedAt: 1, approvalNote: 1,
+    rejectedBy: 1, rejectedAt: 1, rejectionReason: 1
+  }}).toArray();
+  if (!rows.length) return 0;
+
+  const audits = await Audit.find({
+    entity: 'purchase_order',
+    entityId: {$in: rows.map(row => row._id)},
+    action: 'po_status',
+    'after.status': {$in: ['pending', 'approved', 'rejected']}
+  }).sort({at: 1, _id: 1}).select('entityId after user at').lean();
+  const auditsByOrder = new Map();
+  for (const audit of audits) {
+    const key = String(audit.entityId);
+    const events = auditsByOrder.get(key) || [];
+    events.push(audit);
+    auditsByOrder.set(key, events);
+  }
+
+  const approvedStatuses = ['approved', 'sent', 'partially_received', 'received'];
+  const operations = rows.map(row => {
+    const events = auditsByOrder.get(String(row._id)) || [];
+    const submitted = [...events].reverse().find(event => event.after?.status === 'pending');
+    const approved = [...events].reverse().find(event => event.after?.status === 'approved');
+    const rejected = [...events].reverse().find(event => event.after?.status === 'rejected');
+    const set = {};
+    if (!row.submittedAt) set.submittedAt = submitted?.at || row.updatedAt || row.createdAt || new Date();
+    if (!row.submittedBy) set.submittedBy = submitted?.user || row.createdBy || row.updatedBy;
+    if (row.approvalRound === undefined) set.approvalRound = Math.max(1, events.filter(event => event.after?.status === 'pending').length);
+    if (approvedStatuses.includes(row.status)) {
+      if (!row.approvedAt) set.approvedAt = approved?.at || row.updatedAt || row.createdAt || new Date();
+      if (!row.approvedBy && approved?.user) set.approvedBy = approved.user;
+    }
+    if (row.status === 'rejected') {
+      if (!row.rejectedAt) set.rejectedAt = rejected?.at || row.updatedAt || row.createdAt || new Date();
+      if (!row.rejectedBy) set.rejectedBy = rejected?.user || row.updatedBy || row.createdBy;
+      if (!row.rejectionReason) set.rejectionReason = rejected?.after?.rejectionReason || rejected?.after?.approvalNote || row.approvalNote || 'Legacy rejection reason unavailable';
+    }
+    return {updateOne: {filter: {_id: row._id}, update: {$set: set}}};
+  });
+  await PurchaseOrder.collection.bulkWrite(operations, {ordered: false});
+  return operations.length;
+}
+
 function normalizedBranchCode(branch) {
   return String(branch?.code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
     || String(branch?._id || '').slice(-4).toUpperCase();
@@ -129,12 +189,18 @@ async function backfillPurchaseOrderCounters() {
 export async function ensurePurchaseOrderIndexes() {
   if (!mongoose.connection.db) return;
   await ensureCollection(PurchaseOrder.collection.collectionName);
+  await ensureCollection(Audit.collection.collectionName);
   await ensureCollection('purchaseordercounters');
   const migrated = await backfillPurchaseOrders();
+  const approvalMigrated = await backfillPurchaseOrderApprovals();
   const counterMigrated = await backfillPurchaseOrderCounters();
   for (const index of PO_INDEXES) {
     await PurchaseOrder.collection.createIndex(index.key, index.options);
   }
+  await Audit.collection.createIndex(
+    {restaurant: 1, branch: 1, entity: 1, entityId: 1, action: 1, at: 1},
+    {name: 'audit_entity_timeline'}
+  );
   const counters = mongoose.connection.db.collection('purchaseordercounters');
   const currentCounterIndex = (await counters.indexes()).find(index => index.name === 'po_counter_scope');
   if (currentCounterIndex && (
@@ -149,5 +215,12 @@ export async function ensurePurchaseOrderIndexes() {
     {restaurant: 1, branchCode: 1, year: 1},
     {unique: true, name: 'po_counter_scope'}
   );
-  return {migrated, counterMigrated, purchaseOrderIndexes: PO_INDEXES.map(index => index.options.name), counterIndex: 'po_counter_scope'};
+  return {
+    migrated,
+    approvalMigrated,
+    counterMigrated,
+    purchaseOrderIndexes: PO_INDEXES.map(index => index.options.name),
+    approvalAuditIndex: 'audit_entity_timeline',
+    counterIndex: 'po_counter_scope'
+  };
 }

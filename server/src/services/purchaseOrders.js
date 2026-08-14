@@ -38,6 +38,17 @@ export function canTransitionPo(from, to) {
   return (PO_TRANSITIONS[from] || []).includes(to);
 }
 
+const actorId = value => String(value?._id || value || '');
+
+export function canDecidePurchaseOrder({role, userId, createdBy, submittedBy}) {
+  if (role === 'owner') return {allowed: true, ownerOverride: actorId(createdBy) === actorId(userId) || actorId(submittedBy) === actorId(userId)};
+  if (role !== 'manager') return {allowed: false, reason: 'Only owners and managers can approve purchase orders'};
+  if ([createdBy, submittedBy].some(value => actorId(value) && actorId(value) === actorId(userId))) {
+    return {allowed: false, reason: 'Managers cannot approve or reject a purchase order they created or submitted'};
+  }
+  return {allowed: true, ownerOverride: false};
+}
+
 function populatedPurchaseOrder(query) {
   return query
     .populate('branch', 'name code address phone')
@@ -46,7 +57,9 @@ function populatedPurchaseOrder(query) {
     .populate('items.catalogItem', 'supplierSku purchaseUnit baseUnit')
     .populate('createdBy', 'name role')
     .populate('updatedBy', 'name role')
-    .populate('approvedBy', 'name role');
+    .populate('submittedBy', 'name role')
+    .populate('approvedBy', 'name role')
+    .populate('rejectedBy', 'name role');
 }
 
 export async function purchaseBranchContext({user, branchId, session, allowInactive = false}) {
@@ -85,7 +98,8 @@ export async function listPurchaseOrders({user, branchId, q, supplier, status, f
   const context = await purchaseBranchContext({user, branchId});
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.min(100, Math.max(1, Number(limit) || 25));
-  const match = {restaurant: context.restaurantId, branch: context.branch._id};
+  const scope = {restaurant: context.restaurantId, branch: context.branch._id};
+  const match = {...scope};
 
   if (supplier) {
     if (!mongoose.isValidObjectId(supplier)) throw httpError('Invalid supplier', 400);
@@ -107,7 +121,7 @@ export async function listPurchaseOrders({user, branchId, q, supplier, status, f
     match.$or = [{poNo: regex}, {notes: regex}, {supplier: {$in: supplierIds}}];
   }
 
-  const [items, total, summary] = await Promise.all([
+  const [items, total, summary, pendingApprovals] = await Promise.all([
     populatedPurchaseOrder(PurchaseOrder.find(match)
       .sort({orderDate: -1, createdAt: -1, _id: -1})
       .skip((safePage - 1) * safeLimit)
@@ -115,15 +129,28 @@ export async function listPurchaseOrders({user, branchId, q, supplier, status, f
     PurchaseOrder.countDocuments(match),
     PurchaseOrder.aggregate([
       {$match: match},
-      {$group: {_id: null, subtotal: {$sum: '$subtotal'}, vat: {$sum: '$vat'}, total: {$sum: '$total'}, open: {$sum: {$cond: [{$in: ['$status', ['draft', 'pending', 'approved', 'sent', 'partially_received']]}, 1, 0]}}}}
-    ])
+      {$group: {
+        _id: null,
+        subtotal: {$sum: '$subtotal'},
+        vat: {$sum: '$vat'},
+        total: {$sum: '$total'},
+        open: {$sum: {$cond: [{$in: ['$status', ['draft', 'pending', 'approved', 'sent', 'partially_received']]}, 1, 0]}}
+      }}
+    ]),
+    PurchaseOrder.countDocuments({...scope, status: 'pending'})
   ]);
 
   const totals = summary[0] || {subtotal: 0, vat: 0, total: 0, open: 0};
   return {
     items,
     pagination: {page: safePage, limit: safeLimit, total, pages: Math.max(1, Math.ceil(total / safeLimit))},
-    summary: {subtotal: money(totals.subtotal), vat: money(totals.vat), total: money(totals.total), open: totals.open || 0}
+    summary: {
+      subtotal: money(totals.subtotal),
+      vat: money(totals.vat),
+      total: money(totals.total),
+      open: totals.open || 0,
+      pendingApprovals
+    }
   };
 }
 
@@ -133,6 +160,28 @@ export async function getPurchaseOrder({poId, user, session}) {
   if (!po) throw httpError('Purchase order not found', 404);
   await purchaseBranchContext({user, branchId: po.branch, session, allowInactive: true});
   return populatedPurchaseOrder(PurchaseOrder.findById(po._id).session(session || null));
+}
+
+export async function getPurchaseOrderApprovalHistory({poId, user}) {
+  const po = await getPurchaseOrder({poId, user});
+  const rows = await Audit.find({
+    entity: 'purchase_order',
+    entityId: po._id,
+    restaurant: po.restaurant,
+    branch: po.branch?._id || po.branch,
+    action: 'po_status',
+    'after.status': {$in: ['pending', 'approved', 'rejected']}
+  }).sort({at: 1, _id: 1}).populate('user', 'name role').lean();
+  return rows.map(row => ({
+    id: String(row._id),
+    status: row.after?.status,
+    previousStatus: row.before?.status,
+    actor: row.user ? {_id: String(row.user._id), name: row.user.name, role: row.user.role} : null,
+    at: row.at,
+    note: row.after?.rejectionReason || row.after?.approvalNote || row.after?.submissionNote || row.reason || '',
+    approvalRound: Number(row.after?.approvalRound || 0),
+    version: row.after?.version
+  }));
 }
 
 function parseOrderDate(value) {
@@ -316,6 +365,23 @@ export async function updatePurchaseOrder({poId, input, expectedVersion, user, s
   return populatedPurchaseOrder(PurchaseOrder.findById(current._id).session(session || null));
 }
 
+function approvalAuditView(po) {
+  return {
+    status: po.status,
+    submittedBy: po.submittedBy,
+    submittedAt: po.submittedAt,
+    submissionNote: po.submissionNote,
+    approvalRound: Number(po.approvalRound || 0),
+    approvedBy: po.approvedBy,
+    approvedAt: po.approvedAt,
+    approvalNote: po.approvalNote,
+    rejectedBy: po.rejectedBy,
+    rejectedAt: po.rejectedAt,
+    rejectionReason: po.rejectionReason,
+    version: po.__v
+  };
+}
+
 export async function transitionPurchaseOrder({poId, status, notes, expectedVersion, user, session}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   if (!status) throw httpError('Status is required', 400);
@@ -329,25 +395,47 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
   if (!canTransitionPo(po.status, status)) {
     throw httpError(`Invalid purchase order transition from ${po.status} to ${status}`, 409);
   }
+  const note = clean(notes);
+  const isDecision = status === 'approved' || status === 'rejected';
+  const decision = isDecision
+    ? canDecidePurchaseOrder({role: context.role, userId: context.userId, createdBy: po.createdBy, submittedBy: po.submittedBy})
+    : null;
+  if (decision && !decision.allowed) throw httpError(decision.reason, 403);
+  if (status === 'rejected' && note.length < 3) throw httpError('Rejection reason must be at least 3 characters', 400);
   if (status === 'cancelled') {
     const received = (po.items || []).some(item => Number(item.receivedQty || 0) > 0);
     if (received) throw httpError('Cannot cancel a purchase order that has receipts', 409);
   }
 
-  const before = {status: po.status, approvedBy: po.approvedBy, approvalNote: po.approvalNote, version: po.__v};
+  const before = approvalAuditView(po);
+  const now = new Date();
   po.status = status;
   po.updatedBy = context.userId;
-  if (status === 'approved') {
+  if (status === 'pending') {
+    po.submittedBy = context.userId;
+    po.submittedAt = now;
+    po.submissionNote = note || undefined;
+    po.approvalRound = Number(po.approvalRound || 0) + 1;
+    po.approvedBy = undefined;
+    po.approvedAt = undefined;
+    po.approvalNote = undefined;
+    po.rejectedBy = undefined;
+    po.rejectedAt = undefined;
+    po.rejectionReason = undefined;
+  } else if (status === 'approved') {
     po.approvedBy = context.userId;
-    po.approvalNote = clean(notes) || undefined;
+    po.approvedAt = now;
+    po.approvalNote = note || undefined;
+    po.rejectedBy = undefined;
+    po.rejectedAt = undefined;
+    po.rejectionReason = undefined;
   } else if (status === 'rejected') {
     po.approvedBy = undefined;
-    po.approvalNote = clean(notes) || undefined;
-  } else if (status === 'pending') {
-    po.approvedBy = undefined;
-    po.approvalNote = clean(notes) || undefined;
-  } else if (status === 'cancelled' && clean(notes)) {
-    po.approvalNote = clean(notes);
+    po.approvedAt = undefined;
+    po.approvalNote = undefined;
+    po.rejectedBy = context.userId;
+    po.rejectedAt = now;
+    po.rejectionReason = note;
   }
   try {
     await po.save({session});
@@ -355,6 +443,8 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
     if (error?.name === 'VersionError') throw httpError('Purchase order changed since it was loaded; refresh and try again', 409);
     throw error;
   }
+  const after = approvalAuditView(po);
+  if (decision?.ownerOverride) after.ownerOverride = true;
   await Audit.create([{
     entity: 'purchase_order',
     entityId: po._id,
@@ -362,7 +452,8 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
     branch: context.branch._id,
     action: 'po_status',
     before,
-    after: {status: po.status, approvedBy: po.approvedBy, approvalNote: po.approvalNote, version: po.__v},
+    after,
+    reason: (status === 'rejected' || status === 'cancelled') ? note : undefined,
     user: context.userId
   }], {session});
   return populatedPurchaseOrder(PurchaseOrder.findById(po._id).session(session || null));

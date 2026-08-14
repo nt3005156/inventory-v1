@@ -80,6 +80,7 @@ describe('purchase order migration', () => {
 
     const result = await ensurePurchaseOrderIndexes();
     assert.equal(result.migrated, 1);
+    assert.equal(result.approvalMigrated, 0);
     assert.equal(result.counterMigrated, 2);
     const po = await PurchaseOrder.findById(legacy.insertedId).lean();
     assert.equal(String(po.restaurant), String(world.restaurant._id));
@@ -92,15 +93,57 @@ describe('purchase order migration', () => {
     assert.equal(po.items[0].lineTotal, 50);
 
     const poIndexes = await PurchaseOrder.collection.indexes();
+    const auditIndexes = await Audit.collection.indexes();
     const counterIndexes = await PurchaseOrderCounter.collection.indexes();
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_number_v2' && index.unique));
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_request_key' && index.unique));
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_branch_status_created'));
+    assert.ok(auditIndexes.some(index => index.name === 'audit_entity_timeline'));
     assert.ok(counterIndexes.some(index => index.name === 'po_counter_scope' && index.unique
       && index.key.restaurant === 1 && index.key.branchCode === 1 && index.key.year === 1));
     const counter = await PurchaseOrderCounter.findOne({restaurant: world.restaurant._id, branchCode: 'KTM', year: 2026}).lean();
     assert.equal(counter.value, 4);
     assert.equal(await PurchaseOrderCounter.countDocuments({restaurant: world.restaurant._id, year: 2026}), 1);
+  });
+
+  it('backfills approval actors, timestamps, rounds and legacy rejection reasons from status audits', async () => {
+    const createdAt = new Date('2026-01-10T04:15:00.000Z');
+    const rejectedAt = new Date('2026-01-11T05:30:00.000Z');
+    const legacy = await PurchaseOrder.collection.insertOne({
+      restaurant: world.restaurant._id,
+      poNo: 'PO-KTM-2026-009998',
+      numberVersion: 2,
+      branch: world.branchA._id,
+      supplier: supplier._id,
+      status: 'rejected',
+      orderDate: createdAt,
+      items: [{
+        _id: new mongoose.Types.ObjectId(), ingredient: world.ingredient._id,
+        orderedQty: 10, unit: 'g', unitPrice: 5,
+        lineSubtotal: 50, lineVat: 6.5, lineTotal: 56.5
+      }],
+      subtotal: 50, vat: 6.5, total: 56.5,
+      approvalNote: 'Legacy budget rejection',
+      createdBy: world.manager._id,
+      updatedBy: world.owner._id,
+      createdAt,
+      updatedAt: rejectedAt,
+      __v: 2
+    });
+    await Audit.create([
+      {entity: 'purchase_order', entityId: legacy.insertedId, restaurant: world.restaurant._id, branch: world.branchA._id, action: 'po_status', after: {status: 'pending'}, user: world.manager._id, at: createdAt},
+      {entity: 'purchase_order', entityId: legacy.insertedId, restaurant: world.restaurant._id, branch: world.branchA._id, action: 'po_status', after: {status: 'rejected', approvalNote: 'Legacy budget rejection'}, user: world.owner._id, at: rejectedAt}
+    ]);
+
+    const result = await ensurePurchaseOrderIndexes();
+    assert.equal(result.approvalMigrated, 1);
+    const migrated = await PurchaseOrder.findById(legacy.insertedId).lean();
+    assert.equal(String(migrated.submittedBy), String(world.manager._id));
+    assert.equal(migrated.submittedAt.toISOString(), createdAt.toISOString());
+    assert.equal(migrated.approvalRound, 1);
+    assert.equal(String(migrated.rejectedBy), String(world.owner._id));
+    assert.equal(migrated.rejectedAt.toISOString(), rejectedAt.toISOString());
+    assert.equal(migrated.rejectionReason, 'Legacy budget rejection');
   });
 });
 
@@ -313,7 +356,7 @@ describe('purchase order listing and draft concurrency', () => {
     assert.equal(list.body.items.length, 1);
     assert.equal(list.body.items[0]._id, second.body._id);
     assert.deepEqual(list.body.pagination, {page: 1, limit: 1, total: 1, pages: 1});
-    assert.deepEqual(list.body.summary, {subtotal: 200, vat: 26, total: 226, open: 1});
+    assert.deepEqual(list.body.summary, {subtotal: 200, vat: 26, total: 226, open: 1, pendingApprovals: 1});
 
     const search = await request(`/api/purchase-orders?branch=${world.branchA._id}&q=emergency`, {token: tokenFor(world.staffA)});
     assert.equal(search.status, 200);
