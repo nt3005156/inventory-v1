@@ -12,11 +12,12 @@ function httpError(message, status) {
   return err;
 }
 
-function createdAtRange(from, to) {
-  if (!from && !to) return {};
+function createdAtRange(from, to, toExclusive) {
+  if (!from && !to && !toExclusive) return {};
   const createdAt = {};
   if (from) createdAt.$gte = new Date(from);
-  if (to) {
+  if (toExclusive) createdAt.$lt = new Date(toExclusive);
+  else if (to) {
     const end = new Date(to);
     end.setHours(23, 59, 59, 999);
     createdAt.$lte = end;
@@ -24,14 +25,14 @@ function createdAtRange(from, to) {
   return {createdAt};
 }
 
-export async function buildPnl({branchId, user, from, to}) {
+export async function buildPnl({branchId, user, from, to, toExclusive}) {
   if (branchId) {
     if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
     assertBranchAccess(user, branchId);
   }
 
-  const purchasing = await buildPurchasingReport({branchId, user, from, to});
-  const dates = createdAtRange(from, to);
+  const purchasing = await buildPurchasingReport({branchId, user, from, to, toExclusive});
+  const dates = createdAtRange(from, to, toExclusive);
   const orderMatch = {
     ...(branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {}),
     ...dates,
@@ -53,10 +54,14 @@ export async function buildPnl({branchId, user, from, to}) {
         orders: {$sum: 1},
         discounts: {$sum: '$discount'},
         vat: {$sum: '$vat'},
-        cogs: {$sum: {$sum: '$items.foodCost'}}
+        cogs: {$sum: {$sum: {$map: {
+          input: '$items',
+          as: 'item',
+          in: {$multiply: [{$ifNull: ['$$item.foodCost', 0]}, {$ifNull: ['$$item.qty', 0]}]}
+        }}}}
       }}
     ]),
-    Expense.find(expenseQuery({branchId, from, to})),
+    Expense.find(expenseQuery({branchId, from, to, toExclusive})),
     InventoryTransaction.find(wasteMatch)
   ]);
 

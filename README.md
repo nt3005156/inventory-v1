@@ -9,7 +9,7 @@ A full-stack operational system for Nepali restaurants: purchases update live st
 - Live inventory, reorder thresholds, stock valuation, waste model, stock alerts
 - Fast mobile-responsive POS: dine-in/takeaway/delivery and cash/eSewa/Khalti/card selections
 - Dashboard KPIs, menu engineering (Star / Plow-horse / Puzzle / Dog), P&L endpoint
-- Expenses, monthly snapshot data model, supplier and historical sales/purchase foundations
+- Expenses, branch-aware month reconciliation, immutable close revisions, owner-controlled reopen and audit history
 - Docker Compose deployment configuration and MongoDB Atlas-compatible environment setup
 
 ## Run locally
@@ -35,7 +35,15 @@ To stop the system later, open Command Prompt in the project folder and run `doc
 Set production `MONGODB_URI`, strong `JWT_SECRET`, and `CLIENT_URL`, then use Docker Compose. On a VPS, put the web app behind TLS (Caddy/Nginx). eSewa and Khalti keys are intentionally environment stubs; no payment credential is hard-coded.
 
 ## Accounting integrity
-Sales store their calculated food cost at creation, so later ingredient price changes do not rewrite historical COGS. PriceHistory is append-only. For a formal month close, create a `MonthlySnapshot` only after reconciliation; it is modeled separately from live data to prevent later operational edits altering the locked figures.
+Sales store their calculated food cost at creation, so later ingredient price changes do not rewrite historical COGS. PriceHistory and the inventory transaction ledger are append-only.
+
+The **Month Close** workspace previews a calendar month using `Asia/Kathmandu` boundaries, checks open orders and ledger health, and shows unresolved purchasing warnings. Managers can reconcile their assigned branch; only the owner can close or reopen. A close stores an immutable `MonthlySnapshot` of P&L and historical opening/closing inventory. Reopening preserves that revision and its figures; the next close creates a new audited revision.
+
+Month-close API:
+- `GET /api/month-close/preview?month=YYYY-MM&branch=<id>`
+- `GET /api/month-close`
+- `POST /api/month-close`
+- `POST /api/month-close/:id/reopen`
 
 ## Remaining client configuration items
 Actual production needs client menu/import data, VAT invoice numbering rules, POS printer hardware configuration, payment-provider verification endpoints, staff training, and a backup/retention policy before launch.

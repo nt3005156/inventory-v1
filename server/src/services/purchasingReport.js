@@ -11,11 +11,12 @@ function httpError(message, status) {
   return err;
 }
 
-function dateMatch(from, to) {
-  if (!from && !to) return {};
+function dateMatch(from, to, toExclusive) {
+  if (!from && !to && !toExclusive) return {};
   const createdAt = {};
   if (from) createdAt.$gte = new Date(from);
-  if (to) {
+  if (toExclusive) createdAt.$lt = new Date(toExclusive);
+  else if (to) {
     const end = new Date(to);
     end.setHours(23, 59, 59, 999);
     createdAt.$lte = end;
@@ -50,12 +51,12 @@ export function summarizePoLines(orders) {
   };
 }
 
-export async function buildPurchasingReport({branchId, user, from, to}) {
+export async function buildPurchasingReport({branchId, user, from, to, toExclusive}) {
   if (branchId) {
     if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
     assertBranchAccess(user, branchId);
   }
-  const dates = dateMatch(from, to);
+  const dates = dateMatch(from, to, toExclusive);
   const branchMatch = branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {};
   const match = {...branchMatch, ...dates};
 

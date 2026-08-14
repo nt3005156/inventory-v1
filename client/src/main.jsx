@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -11,6 +11,7 @@ import Inventory from './Inventory.jsx';
 import Dashboard from './Dashboard.jsx';
 import POS from './Pos.jsx';
 import Expenses from './Expenses.jsx';
+import MonthClose from './MonthClose.jsx';
 import './style.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
@@ -70,6 +71,7 @@ function App() {
     ['Tables', Armchair],
     ['POS', ChefHat],
     ['KDS', UtensilsCrossed],
+    ...(user?.role !== 'staff' ? [['Month Close', CalendarCheck2]] : []),
     ['Analytics', BarChart3]
   ];
 
@@ -142,6 +144,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
+  if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;
   return <Analytics call={call} branches={branches} user={user}/>;
 }

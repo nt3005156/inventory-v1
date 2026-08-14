@@ -10,5 +10,39 @@ export const Purchase=model('Purchase',new Schema({date:{type:Date,default:Date.
 export const Sale=model('Sale',new Schema({date:{type:Date,default:Date.now},items:[{menuItem:{type:Schema.Types.ObjectId,ref:'MenuItem'},name:String,qty:money,unitPrice:money,foodCost:money}],orderType:{type:String,default:'dine-in'},paymentMethod:{type:String,default:'cash'},subtotal:money,vat:money,total:money,cogs:money,grossProfit:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 export const Waste=model('Waste',new Schema({date:{type:Date,default:Date.now},ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,reason:String,cost:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 export const Expense=model('Expense',new Schema({date:{type:Date,default:Date.now},category:String,description:String,amount:money,vat:money,branch:{type:Schema.Types.ObjectId,ref:'Branch'},createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
-export const MonthlySnapshot=model('MonthlySnapshot',new Schema({month:{type:String,unique:true},revenue:money,cogs:money,grossProfit:money,expenses:money,netProfit:money,netMargin:money,openingInventory:money,closingInventory:money,closedAt:Date,closedBy:{type:Schema.Types.ObjectId,ref:'User'}}));
+const monthlySnapshotSchema=new Schema({
+  month:{type:String,required:true,match:/^\d{4}-(0[1-9]|1[0-2])$/,immutable:true},
+  branch:{type:Schema.Types.ObjectId,ref:'Branch',default:null,immutable:true},
+  scopeKey:{type:String,required:true,immutable:true},
+  revision:{type:Number,default:1,min:1,immutable:true},
+  status:{type:String,enum:['closed','reopened'],default:'closed'},
+  currency:{type:String,default:'NPR',immutable:true},
+  vatRate:{type:Number,default:13,immutable:true},
+  periodFrom:{type:Date,immutable:true},
+  periodTo:{type:Date,immutable:true},
+  revenue:{...money,immutable:true},
+  cogs:{...money,immutable:true},
+  grossProfit:{...money,immutable:true},
+  purchases:{...money,immutable:true},
+  waste:{...money,immutable:true},
+  expenses:{...money,immutable:true},
+  netProfit:{...money,immutable:true},
+  netMargin:{...money,immutable:true},
+  openingInventory:{...money,immutable:true},
+  closingInventory:{...money,immutable:true},
+  sales:{type:Schema.Types.Mixed,immutable:true},
+  purchasing:{type:Schema.Types.Mixed,immutable:true},
+  expenseDetail:{type:Schema.Types.Mixed,immutable:true},
+  wasteDetail:{type:Schema.Types.Mixed,immutable:true},
+  reconciliation:{type:Schema.Types.Mixed,immutable:true},
+  notes:{type:String,default:'',immutable:true},
+  closedAt:{type:Date,default:Date.now,immutable:true},
+  closedBy:{type:Schema.Types.ObjectId,ref:'User',immutable:true},
+  reopenedAt:Date,
+  reopenedBy:{type:Schema.Types.ObjectId,ref:'User'},
+  reopenReason:String
+},{timestamps:true,autoIndex:false});
+monthlySnapshotSchema.index({scopeKey:1,month:1,revision:1},{unique:true});
+monthlySnapshotSchema.index({scopeKey:1,month:1,status:1});
+export const MonthlySnapshot=model('MonthlySnapshot',monthlySnapshotSchema);
 export const Audit=model('Audit',auditSchema);

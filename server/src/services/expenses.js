@@ -11,11 +11,12 @@ function httpError(message, status) {
   return err;
 }
 
-function dateRange(from, to) {
-  if (!from && !to) return {};
+function dateRange(from, to, toExclusive) {
+  if (!from && !to && !toExclusive) return {};
   const date = {};
   if (from) date.$gte = new Date(from);
-  if (to) {
+  if (toExclusive) date.$lt = new Date(toExclusive);
+  else if (to) {
     const end = new Date(to);
     end.setHours(23, 59, 59, 999);
     date.$lte = end;
@@ -28,8 +29,8 @@ export function expenseVat(amount, vat) {
   return vatOf(amount);
 }
 
-export function expenseQuery({branchId, from, to} = {}) {
-  const match = dateRange(from, to);
+export function expenseQuery({branchId, from, to, toExclusive} = {}) {
+  const match = dateRange(from, to, toExclusive);
   if (!branchId) return match;
   match.$or = [
     {branch: branchId},
