@@ -97,7 +97,7 @@ after(async () => {
 beforeEach(async () => {
   await clearDb();
   world = await seedWorld();
-  supplier = await Supplier.create({name: 'Live Mill', contact: '9800111222'});
+  supplier = await Supplier.create({restaurant: world.restaurant._id, name: 'Live Mill', contact: '9800111222'});
 });
 
 describe('socket purchasing events', () => {
@@ -215,6 +215,42 @@ describe('socket purchasing events', () => {
       assert.equal(payload.status, 'partial');
     } finally {
       socket.close();
+    }
+  });
+
+  it('publishes restaurant catalog changes through each branch purchasing room', async () => {
+    const socketA = await connectSocket(tokenFor(world.manager), world.branchA._id);
+    const socketB = await connectSocket(tokenFor(world.staffB), world.branchB._id);
+    try {
+      await joinBranch(socketA, world.branchA._id);
+      await joinBranch(socketB, world.branchB._id);
+      const eventA = waitEvent(socketA, 'purchasing:update');
+      const eventB = waitEvent(socketB, 'purchasing:update');
+      const created = await request('/api/supplier-catalog', {
+        method: 'POST',
+        token: tokenFor(world.manager),
+        body: {
+          supplier: String(supplier._id),
+          ingredient: String(world.ingredient._id),
+          supplierSku: 'LIVE-RICE',
+          purchaseUnit: 'kg',
+          conversionFactor: 1000,
+          currentPrice: 50,
+          minOrderQty: 1,
+          leadDays: 1,
+          reason: 'Live supplier quote'
+        }
+      });
+      assert.equal(created.status, 201, created.body?.message);
+      const [payloadA, payloadB] = await Promise.all([eventA, eventB]);
+      assert.equal(payloadA.reason, 'catalog_create');
+      assert.equal(payloadA.catalogItemId, String(created.body._id));
+      assert.equal(String(payloadA.branch), String(world.branchA._id));
+      assert.equal(payloadB.reason, 'catalog_create');
+      assert.equal(String(payloadB.branch), String(world.branchB._id));
+    } finally {
+      socketA.close();
+      socketB.close();
     }
   });
 

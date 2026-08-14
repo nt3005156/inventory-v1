@@ -29,7 +29,10 @@ export default function Purchasing({call, branches = [], user, token}) {
   const [returnNotes, setReturnNotes] = useState('');
   const [reason, setReason] = useState('quality');
   const [busy, setBusy] = useState('');
-  const [form, setForm] = useState({supplier: '', ingredient: '', qty: 1, price: 0});
+  const [catalog, setCatalog] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogLoadedFor, setCatalogLoadedFor] = useState('');
+  const [form, setForm] = useState({supplier: '', catalogItem: '', ingredient: '', purchaseQty: 1, qty: 1, price: 0});
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
   const [statementId, setStatementId] = useState('');
   const [statement, setStatement] = useState(null);
@@ -43,14 +46,13 @@ export default function Purchasing({call, branches = [], user, token}) {
 
   const load = () => Promise.all([
     call('/purchase-orders' + (branch ? `?branch=${branch._id}` : '')),
-    call('/suppliers'),
-    call('/ingredients'),
+    call('/supplier-catalog/options'),
     call('/supplier-invoices' + (branch ? `?branch=${branch._id}` : '')),
     call('/reports/purchasing' + (branch ? `?branch=${branch._id}` : ''))
-  ]).then(([a, b, c, d, e]) => {
+  ]).then(([a, b, d, e]) => {
     setPo(a);
-    setSuppliers(b);
-    setIngredients(c);
+    setSuppliers(b.suppliers || []);
+    setIngredients(b.ingredients || []);
     setInvoices(d);
     setReport(e);
   }).catch(e => setError(e.message));
@@ -61,6 +63,26 @@ export default function Purchasing({call, branches = [], user, token}) {
   }, [assigned, locked, visibleBranches, branchId]);
 
   useEffect(() => { load(); }, [branch?._id]);
+
+  useEffect(() => {
+    if (!form.supplier) {
+      setCatalog([]);
+      setCatalogLoadedFor('');
+      return;
+    }
+    let cancelled = false;
+    setCatalogLoading(true);
+    setCatalogLoadedFor('');
+    call(`/supplier-catalog?supplier=${form.supplier}&limit=200`)
+      .then(result => {
+        if (cancelled) return;
+        setCatalog(result.items || []);
+        setCatalogLoadedFor(form.supplier);
+      })
+      .catch(err => !cancelled && setError(err.message || 'Could not load current supplier catalog'))
+      .finally(() => !cancelled && setCatalogLoading(false));
+    return () => { cancelled = true; };
+  }, [form.supplier]);
 
   useEffect(() => {
     setOpenId('');
@@ -172,18 +194,24 @@ export default function Purchasing({call, branches = [], user, token}) {
     e.preventDefault();
     if (!branch) return;
     setError('');
+    setBusy('create-po');
     try {
-      const i = ingredients.find(x => x._id === form.ingredient);
+      const mapping = catalog.find(item => item._id === form.catalogItem && item.active);
+      const ingredient = mapping?.ingredient || ingredients.find(item => item._id === form.ingredient);
+      const item = mapping
+        ? {catalogItem: mapping._id, ingredient: mapping.ingredient._id, purchaseQty: Number(form.purchaseQty)}
+        : {ingredient: form.ingredient, orderedQty: Number(form.qty), unit: ingredient?.unit || 'each', unitPrice: Number(form.price)};
       await call('/purchase-orders', {method: 'POST', body: JSON.stringify({
         branch: branch._id,
         supplier: form.supplier,
-        items: [{ingredient: form.ingredient, orderedQty: Number(form.qty), unit: i?.unit || 'g', unitPrice: Number(form.price)}],
-        total: Number(form.qty) * Number(form.price)
+        items: [item]
       })});
-      setForm({...form, qty: 1, price: 0});
-      load();
+      setForm(current => ({...current, catalogItem: '', ingredient: '', purchaseQty: 1, qty: 1, price: 0}));
+      await load();
     } catch (e) {
       setError(e.message);
+    } finally {
+      setBusy('');
     }
   };
 
@@ -390,6 +418,11 @@ export default function Purchasing({call, branches = [], user, token}) {
   };
 
   const open = po.find(x => x._id === openId);
+  const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
+  const activeCatalog = catalog.filter(item => item.active);
+  const selectedCatalog = activeCatalog.find(item => item._id === form.catalogItem);
+  const supplierUsesCatalog = catalogReady && catalog.length > 0;
+  const catalogEstimate = selectedCatalog ? Number(form.purchaseQty || 0) * Number(selectedCatalog.currentPrice || 0) : 0;
 
   return (
     <section className="panel">
@@ -404,19 +437,38 @@ export default function Purchasing({call, branches = [], user, token}) {
       </div>
       {error && <p className="danger">{error}</p>}
 
-      <form className="purchaseform" onSubmit={create}>
-        <select required value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})}>
-          <option value="">Supplier</option>
-          {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
-        </select>
-        <select required value={form.ingredient} onChange={e => setForm({...form, ingredient: e.target.value})}>
-          <option value="">Ingredient</option>
-          {ingredients.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
-        </select>
-        <input required min="1" type="number" value={form.qty} onChange={e => setForm({...form, qty: e.target.value})} placeholder="Qty"/>
-        <input required min="0" type="number" value={form.price} onChange={e => setForm({...form, price: e.target.value})} placeholder="Unit price"/>
-        <button>Create PO</button>
-      </form>
+      {['owner', 'manager'].includes(user?.role) && <div className="po-create-box">
+        <div>
+          <strong>Create a draft purchase order</strong>
+          <small>Catalog suppliers use their current server-controlled price and conversion. Historical POs keep their original terms.</small>
+        </div>
+        <form className="purchaseform catalog-po-form" onSubmit={create}>
+          <label>Supplier<select required value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value, catalogItem: '', ingredient: ''})}>
+            <option value="">Select supplier</option>
+            {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
+          </select></label>
+          {catalogLoading && <div className="po-catalog-note">Loading active supplier terms…</div>}
+          {supplierUsesCatalog && <>
+            <label>Catalog ingredient<select required value={form.catalogItem} onChange={e => setForm({...form, catalogItem: e.target.value})}>
+              <option value="">Select supplier item</option>
+              {activeCatalog.map(item => <option key={item._id} value={item._id}>{item.ingredient?.name} · {rs(item.currentPrice)}/{item.purchaseUnit}{item.supplierSku ? ` · ${item.supplierSku}` : ''}</option>)}
+            </select></label>
+            <label>Purchase quantity<input required min={selectedCatalog?.minOrderQty || 0.000001} step="any" type="number" value={form.purchaseQty} onChange={e => setForm({...form, purchaseQty: e.target.value})} placeholder="Purchase qty"/></label>
+            {selectedCatalog && <div className="po-price-preview"><span>Authoritative estimate</span><strong>{rs(catalogEstimate)}</strong><small>{form.purchaseQty || 0} {selectedCatalog.purchaseUnit} = {(Number(form.purchaseQty || 0) * Number(selectedCatalog.conversionFactor)).toLocaleString('en-NP')} {selectedCatalog.baseUnit} · min {selectedCatalog.minOrderQty} · VAT {selectedCatalog.priceIncludesVat ? 'included' : 'excluded'}</small></div>}
+          </>}
+          {catalogReady && catalog.length === 0 && <>
+            <label>Ingredient<select required value={form.ingredient} onChange={e => setForm({...form, ingredient: e.target.value})}>
+              <option value="">Select ingredient</option>
+              {ingredients.map(x => <option key={x._id} value={x._id}>{x.name} ({x.unit})</option>)}
+            </select></label>
+            <label>Base quantity<input required min="0.000001" step="any" type="number" value={form.qty} onChange={e => setForm({...form, qty: e.target.value})}/></label>
+            <label>Price per base unit<input required min="0.000001" step="any" type="number" value={form.price} onChange={e => setForm({...form, price: e.target.value})}/></label>
+            <div className="po-catalog-note legacy">Legacy supplier: manual terms remain available until its first catalog mapping is created.</div>
+          </>}
+          {catalogReady && catalog.length > 0 && activeCatalog.length === 0 && <div className="po-catalog-note blocked">This supplier has catalog records, but none are active. Reactivate a mapping in Supplier Catalog before ordering.</div>}
+          <button disabled={busy === 'create-po' || !catalogReady || (supplierUsesCatalog && (!selectedCatalog || activeCatalog.length === 0))}>{busy === 'create-po' ? 'Creating…' : 'Create draft PO'}</button>
+        </form>
+      </div>}
 
       <h3>Purchase orders</h3>
       <table>

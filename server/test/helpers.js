@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import operations from '../src/routes/operations.js';
+import supplierCatalog from '../src/routes/supplierCatalog.js';
 import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
@@ -17,7 +18,7 @@ let baseUrl;
 
 export function tokenFor(user, extras = {}) {
   return jwt.sign(
-    {id: user._id, name: user.name, role: user.role, branch: user.branch || null, ...extras},
+    {id: user._id, name: user.name, role: user.role, restaurantId: user.restaurantId || null, branch: user.branch || null, ...extras},
     process.env.JWT_SECRET,
     {expiresIn: '2h'}
   );
@@ -32,6 +33,7 @@ export async function startTestApp() {
     const app = express();
     app.use(express.json());
     app.use('/api', operations);
+    app.use('/api', supplierCatalog);
     app.use((err, req, res, next) => res.status(err.status || 500).json({message: err.message || 'Server error'}));
     server = http.createServer(app);
     attachRealtime(server);
@@ -81,11 +83,11 @@ export async function seedWorld() {
   const restaurant = await Restaurant.create({name: 'Mittho Test', currency: 'NPR', vatRate: 13});
   const branchA = await Branch.create({restaurant: restaurant._id, name: 'Kathmandu Branch', code: 'KTM', address: 'Kalanki'});
   const branchB = await Branch.create({restaurant: restaurant._id, name: 'Lalitpur Branch', code: 'LTP', address: 'Patan'});
-  const owner = await User.create({name: 'Owner', email: 'owner@test.com', password: 'hashed', role: 'owner', restaurant: 'Mittho Test'});
-  const manager = await User.create({name: 'Manager', email: 'manager@test.com', password: 'hashed', role: 'manager', restaurant: 'Mittho Test', branch: branchA._id});
-  const staffA = await User.create({name: 'Staff A', email: 'staffa@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', branch: branchA._id});
-  const staffB = await User.create({name: 'Staff B', email: 'staffb@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', branch: branchB._id});
-  const ingredient = await Ingredient.create({code: 'ING-T1', name: 'Basmati Rice', unit: 'g', averageCost: 0.045, stockQty: 20000, minimumStock: 2000});
+  const owner = await User.create({name: 'Owner', email: 'owner@test.com', password: 'hashed', role: 'owner', restaurant: 'Mittho Test', restaurantId: restaurant._id});
+  const manager = await User.create({name: 'Manager', email: 'manager@test.com', password: 'hashed', role: 'manager', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchA._id});
+  const staffA = await User.create({name: 'Staff A', email: 'staffa@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchA._id});
+  const staffB = await User.create({name: 'Staff B', email: 'staffb@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchB._id});
+  const ingredient = await Ingredient.create({restaurant: restaurant._id, code: 'ING-T1', name: 'Basmati Rice', unit: 'g', averageCost: 0.045, stockQty: 20000, minimumStock: 2000});
   const menu = await MenuItem.create({
     name: 'Chicken Biryani',
     price: 350,
