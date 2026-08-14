@@ -14,12 +14,129 @@ import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
 import {buildMenuEngineering} from '../services/menuEngineering.js';
 import {updateSupplierInvoice} from '../services/invoices.js';
-import {transitionPurchaseOrder} from '../services/purchaseOrders.js';
+import {
+  createPurchaseOrder,
+  getPurchaseOrder,
+  listAccessibleBranches,
+  listPurchaseOrders,
+  replayPurchaseOrderCreate,
+  transitionPurchaseOrder,
+  updatePurchaseOrder
+} from '../services/purchaseOrders.js';
 import {publishPurchasingEvent} from '../services/realtime.js';
 import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
 
 const r = Router();
 const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+
+const poLineSchema = z.object({
+  ingredient: z.string(),
+  catalogItem: z.string().optional(),
+  purchaseQty: z.number().positive().optional(),
+  orderedQty: z.number().positive().optional(),
+  unit: z.string().trim().max(30).optional(),
+  unitPrice: z.number().positive().optional(),
+  priceIncludesVat: z.boolean().optional(),
+  vatRate: z.number().min(0).max(100).optional()
+});
+const poCreateSchema = z.object({
+  branch: z.string(),
+  supplier: z.string(),
+  items: z.array(poLineSchema).min(1).max(100),
+  orderDate: z.string().optional(),
+  expectedDeliveryDate: z.string().nullable().optional(),
+  deliveryAddress: z.string().trim().max(500).optional(),
+  notes: z.string().trim().max(1000).optional()
+});
+const poUpdateSchema = z.object({
+  supplier: z.string(),
+  items: z.array(poLineSchema).min(1).max(100),
+  expectedDeliveryDate: z.string().nullable().optional(),
+  deliveryAddress: z.string().trim().max(500).optional(),
+  notes: z.string().trim().max(1000).optional(),
+  expectedVersion: z.number().int().nonnegative()
+});
+const poListSchema = z.object({
+  branch: z.string(),
+  q: z.string().trim().max(120).optional(),
+  supplier: z.string().optional(),
+  status: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  page: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().max(100).optional()
+});
+
+function publishPurchaseOrder(branch, payload) {
+  try {
+    publishPurchasingEvent(branch, payload);
+  } catch (error) {
+    console.error('purchase order realtime publish failed', error.message);
+  }
+}
+
+r.get('/purchase-orders', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    const query = poListSchema.parse(req.query);
+    res.json(await listPurchaseOrders({user: req.user, branchId: query.branch, ...query}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/purchase-order-branches', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    res.json(await listAccessibleBranches({user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.post('/purchase-orders', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const input = poCreateSchema.parse(req.body);
+    const requestKey = req.headers['idempotency-key'];
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await createPurchaseOrder({input, user: req.user, requestKey, session});
+      });
+    } catch (error) {
+      if (error?.code === 11000 && requestKey) result = await replayPurchaseOrderCreate({input, user: req.user, requestKey});
+      else throw error;
+    }
+    if (!result.duplicate) publishPurchaseOrder(result.purchaseOrder.branch?._id || result.purchaseOrder.branch, {reason: 'po_create', poId: String(result.purchaseOrder._id)});
+    res.status(result.duplicate ? 200 : 201).json(result.purchaseOrder);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+r.patch('/purchase-orders/:id', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const body = poUpdateSchema.parse(req.body);
+    let po;
+    await session.withTransaction(async () => {
+      po = await updatePurchaseOrder({
+        poId: req.params.id,
+        input: body,
+        expectedVersion: body.expectedVersion,
+        user: req.user,
+        session
+      });
+    });
+    publishPurchaseOrder(po.branch?._id || po.branch, {reason: 'po_update', poId: String(po._id), status: po.status});
+    res.json(po);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
 
 const receiveSchema = z.object({
   notes: z.string().optional(),
@@ -35,10 +152,7 @@ const receiveSchema = z.object({
 
 r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
-    const po = await PurchaseOrder.findById(req.params.id).populate('supplier items.ingredient');
-    if (!po) return res.status(404).json({message: 'Purchase order not found'});
-    assertBranchAccess(req.user, po.branch);
-    res.json(po);
+    res.json(await getPurchaseOrder({poId: req.params.id, user: req.user}));
   } catch (e) {
     fail(res, e);
   }
@@ -46,30 +160,37 @@ r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, r
 
 const poStatusSchema = z.object({
   status: z.enum(['pending', 'approved', 'rejected', 'sent', 'cancelled']),
-  notes: z.string().optional()
+  notes: z.string().trim().max(1000).optional(),
+  expectedVersion: z.number().int().nonnegative().optional()
 });
 
 r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
   try {
     const body = poStatusSchema.parse(req.body);
-    const po = await transitionPurchaseOrder({
-      poId: req.params.id,
-      status: body.status,
-      notes: body.notes,
-      user: req.user
+    let po;
+    await session.withTransaction(async () => {
+      po = await transitionPurchaseOrder({
+        poId: req.params.id,
+        status: body.status,
+        notes: body.notes,
+        expectedVersion: body.expectedVersion,
+        user: req.user,
+        session
+      });
     });
-    publishPurchasingEvent(po.branch, {reason: 'po_status', poId: String(po._id), status: po.status});
+    publishPurchaseOrder(po.branch?._id || po.branch, {reason: 'po_status', poId: String(po._id), status: po.status});
     res.json(po);
   } catch (e) {
     fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 
 r.get('/purchase-orders/:id/receipts', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
-    const po = await PurchaseOrder.findById(req.params.id);
-    if (!po) return res.status(404).json({message: 'Purchase order not found'});
-    assertBranchAccess(req.user, po.branch);
+    const po = await getPurchaseOrder({poId: req.params.id, user: req.user});
     res.json(await GoodsReceipt.find({purchaseOrder: po._id}).sort({createdAt: -1}).populate('items.ingredient receivedBy'));
   } catch (e) {
     fail(res, e);
@@ -120,9 +241,7 @@ const returnSchema = z.object({
 
 r.get('/purchase-orders/:id/returns', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
-    const po = await PurchaseOrder.findById(req.params.id);
-    if (!po) return res.status(404).json({message: 'Purchase order not found'});
-    assertBranchAccess(req.user, po.branch);
+    const po = await getPurchaseOrder({poId: req.params.id, user: req.user});
     res.json(await PurchaseReturn.find({purchaseOrder: po._id}).sort({createdAt: -1}).populate('items.ingredient returnedBy'));
   } catch (e) {
     fail(res, e);

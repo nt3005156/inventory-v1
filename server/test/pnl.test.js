@@ -18,7 +18,7 @@ after(async () => {
 beforeEach(async () => {
   await clearDb();
   world = await seedWorld();
-  supplier = await Supplier.create({name: 'Kathmandu Food Suppliers', contact: '9800000000'});
+  supplier = await Supplier.create({restaurant: world.restaurant._id, name: 'Kathmandu Food Suppliers', contact: '9800000000'});
 });
 
 async function createApprovedPo(orderedQty = 1000) {

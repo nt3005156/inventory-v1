@@ -290,7 +290,9 @@ describe('catalog-authoritative purchase orders', () => {
       }
     });
     assert.equal(created.status, 201, created.body?.message);
-    assert.equal(created.body.total, 3600);
+    assert.equal(created.body.subtotal, 3600);
+    assert.equal(created.body.vat, 468);
+    assert.equal(created.body.total, 4068);
     assert.equal(created.body.items[0].orderedQty, 50000);
     assert.equal(created.body.items[0].purchaseQty, 2);
     assert.equal(created.body.items[0].unit, 'g');
@@ -303,7 +305,9 @@ describe('catalog-authoritative purchase orders', () => {
     const repriced = await patchEntry(mapping.body._id, mapping.body.__v, {currentPrice: 2000, reason: 'New market price'});
     assert.equal(repriced.status, 200, repriced.body?.message);
     const historical = await PurchaseOrder.findById(created.body._id).lean();
-    assert.equal(historical.total, 3600);
+    assert.equal(historical.subtotal, 3600);
+    assert.equal(historical.vat, 468);
+    assert.equal(historical.total, 4068);
     assert.equal(historical.items[0].catalogPrice, 1800);
     assert.equal(historical.items[0].unitPrice, 0.072);
     await PurchaseOrder.updateOne({_id: created.body._id}, {$set: {
@@ -328,7 +332,9 @@ describe('catalog-authoritative purchase orders', () => {
       }
     });
     assert.equal(newPo.status, 201, newPo.body?.message);
-    assert.equal(newPo.body.total, 4000);
+    assert.equal(newPo.body.subtotal, 4000);
+    assert.equal(newPo.body.vat, 520);
+    assert.equal(newPo.body.total, 4520);
     assert.equal(newPo.body.items[0].catalogPrice, 2000);
     assert.equal(newPo.body.items[0].unitPrice, 0.08);
   });
@@ -377,7 +383,9 @@ describe('catalog-authoritative purchase orders', () => {
       }
     });
     assert.equal(created.status, 201, created.body?.message);
-    assert.equal(created.body.total, 20);
+    assert.equal(created.body.subtotal, 20);
+    assert.equal(created.body.vat, 2.6);
+    assert.equal(created.body.total, 22.6);
     assert.equal(created.body.items[0].catalogItem, undefined);
     assert.equal(created.body.items[0].orderedQty, 400);
     assert.equal(created.body.items[0].unitPrice, 0.05);

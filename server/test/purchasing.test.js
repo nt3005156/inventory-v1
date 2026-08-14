@@ -23,7 +23,7 @@ after(async () => {
 beforeEach(async () => {
   await clearDb();
   world = await seedWorld();
-  supplier = await Supplier.create({name: 'Kathmandu Food Suppliers', contact: '9800000000'});
+  supplier = await Supplier.create({restaurant: world.restaurant._id, name: 'Kathmandu Food Suppliers', contact: '9800000000'});
 });
 
 function patchPoStatus(poId, status, extras = {}) {
@@ -279,7 +279,7 @@ describe('supplier statement', () => {
   });
 
   it('does not mix another supplier or another branch onto the statement', async () => {
-    const other = await Supplier.create({name: 'Other Supplier'});
+    const other = await Supplier.create({restaurant: world.restaurant._id, name: 'Other Supplier'});
     await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.owner),
@@ -354,7 +354,7 @@ describe('GET /api/reports/purchasing', () => {
       body: {amount: 130, method: 'cash'}
     });
 
-    const other = await Supplier.create({name: 'Other Mill'});
+    const other = await Supplier.create({restaurant: world.restaurant._id, name: 'Other Mill'});
     await request('/api/purchase-orders', {
       method: 'POST',
       token: tokenFor(world.owner),
@@ -369,7 +369,7 @@ describe('GET /api/reports/purchasing', () => {
     const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(report.status, 200, report.body?.message);
     assert.equal(report.body.purchaseOrders.count, 1);
-    assert.equal(report.body.purchaseOrders.orderedValue, 50);
+    assert.equal(report.body.purchaseOrders.orderedValue, 56.5);
     assert.equal(report.body.purchaseOrders.receivedQty, 400);
     assert.equal(report.body.purchaseOrders.damagedQty, 50);
     assert.equal(report.body.purchaseOrders.acceptedQty, 350);
@@ -695,7 +695,7 @@ describe('purchasing E2E workflow', () => {
     const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(report.status, 200, report.body?.message);
     assert.equal(report.body.purchaseOrders.count, 1);
-    assert.equal(report.body.purchaseOrders.orderedValue, 50);
+    assert.equal(report.body.purchaseOrders.orderedValue, 56.5);
     assert.equal(report.body.purchaseOrders.receivedQty, 400);
     assert.equal(report.body.purchaseOrders.damagedQty, 50);
     assert.equal(report.body.purchaseOrders.acceptedQty, 350);

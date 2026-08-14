@@ -17,24 +17,28 @@ const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 const unitRate = value => Math.round((Number(value) + Number.EPSILON) * 1000000) / 1000000;
 const escapeRegex = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-export async function restaurantForUser(user, {session} = {}) {
+export async function userRestaurantContext(user, {session} = {}) {
   if (!user?.id) throw httpError('Authentication required', 401);
   const stored = await User.findById(user.id).select('restaurant restaurantId branch role').session(session || null).lean();
   if (!stored) throw httpError('User not found', 401);
   if (user.role !== stored.role) throw httpError('User permissions changed; sign in again', 401);
-  if (stored.restaurantId) return new mongoose.Types.ObjectId(stored.restaurantId);
 
-  const branchId = asId(user.branch || stored.branch);
-  if (branchId) {
+  let restaurantId = stored.restaurantId ? new mongoose.Types.ObjectId(stored.restaurantId) : null;
+  const branchId = asId(stored.branch);
+  if (!restaurantId && branchId) {
     const branch = await Branch.findById(branchId).select('restaurant').session(session || null).lean();
-    if (branch?.restaurant) return new mongoose.Types.ObjectId(branch.restaurant);
+    if (branch?.restaurant) restaurantId = new mongoose.Types.ObjectId(branch.restaurant);
   }
-
-  if (stored.restaurant) {
+  if (!restaurantId && stored.restaurant) {
     const restaurant = await Restaurant.findOne({name: stored.restaurant}).select('_id').session(session || null).lean();
-    if (restaurant) return restaurant._id;
+    if (restaurant) restaurantId = restaurant._id;
   }
-  throw httpError('User is not assigned to a restaurant', 403);
+  if (!restaurantId) throw httpError('User is not assigned to a restaurant', 403);
+  return {restaurantId, branchId, role: stored.role, userId: stored._id};
+}
+
+export async function restaurantForUser(user, options = {}) {
+  return (await userRestaurantContext(user, options)).restaurantId;
 }
 
 async function assertCatalogReferences({restaurantId, supplierId, ingredientId, session}) {

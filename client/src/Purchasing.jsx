@@ -5,17 +5,33 @@ const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFraction
 const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
 const accepted = line => Math.max(0, Number(line.receivedQty || 0) - Number(line.damagedQty || 0));
 const returnable = line => Math.max(0, accepted(line) - Number(line.returnedQty || 0));
-const ymd = d => d ? new Date(d).toISOString().slice(0, 10) : '';
+const ymd = d => {
+  if (!d) return '';
+  const parts = new Intl.DateTimeFormat('en', {
+    timeZone: 'Asia/Kathmandu', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date(d));
+  const get = type => parts.find(part => part.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+};
+const todayKathmandu = () => ymd(new Date());
+const draftRow = () => ({key: globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2), catalogItem: '', ingredient: '', purchaseQty: 1, qty: 1, price: 0});
+const requestKey = () => globalThis.crypto?.randomUUID?.() || `po-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const canReceivePo = s => ['approved', 'sent', 'partially_received'].includes(s);
 const poPill = s => ['approved', 'sent', 'partially_received', 'received'].includes(s) ? 'pill ok' : 'pill';
 
-export default function Purchasing({call, branches = [], user, token}) {
-  const assigned = user?.branch || null;
-  const locked = user?.role === 'staff' && assigned;
-  const visibleBranches = locked ? branches.filter(b => b._id === assigned) : branches;
-  const [branchId, setBranchId] = useState(visibleBranches[0]?._id || assigned || '');
-  const branch = visibleBranches.find(b => b._id === branchId) || (branchId ? {_id: branchId} : null);
+export default function Purchasing({call, user, token}) {
+  const locked = user?.role !== 'owner';
+  const canManagePurchasing = ['owner', 'manager'].includes(user?.role);
+  const [accessibleBranches, setAccessibleBranches] = useState([]);
+  const visibleBranches = accessibleBranches;
+  const [branchId, setBranchId] = useState('');
+  const branch = visibleBranches.find(b => b._id === branchId) || null;
   const [po, setPo] = useState([]);
+  const [poPagination, setPoPagination] = useState({page: 1, limit: 25, total: 0, pages: 1});
+  const [poSummary, setPoSummary] = useState({subtotal: 0, vat: 0, total: 0, open: 0});
+  const [poLoading, setPoLoading] = useState(false);
+  const [poFilters, setPoFilters] = useState({q: '', supplier: '', status: '', from: '', to: ''});
+  const [filterDraft, setFilterDraft] = useState({q: '', supplier: '', status: '', from: '', to: ''});
   const [suppliers, setSuppliers] = useState([]);
   const [ingredients, setIngredients] = useState([]);
   const [invoices, setInvoices] = useState([]);
@@ -32,7 +48,11 @@ export default function Purchasing({call, branches = [], user, token}) {
   const [catalog, setCatalog] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogLoadedFor, setCatalogLoadedFor] = useState('');
-  const [form, setForm] = useState({supplier: '', catalogItem: '', ingredient: '', purchaseQty: 1, qty: 1, price: 0});
+  const [form, setForm] = useState({supplier: '', orderDate: todayKathmandu(), expectedDeliveryDate: '', deliveryAddress: '', notes: ''});
+  const [draftLines, setDraftLines] = useState([draftRow()]);
+  const [editingPoId, setEditingPoId] = useState('');
+  const createRequestKey = useRef(requestKey());
+  const [success, setSuccess] = useState('');
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
   const [statementId, setStatementId] = useState('');
   const [statement, setStatement] = useState(null);
@@ -43,26 +63,55 @@ export default function Purchasing({call, branches = [], user, token}) {
   const [edit, setEdit] = useState({invoiceNo: '', invoiceDate: '', dueDate: '', subtotal: 0, notes: ''});
   const [live, setLive] = useState('connecting');
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
+  const loadSequence = useRef(0);
 
-  const load = () => Promise.all([
-    call('/purchase-orders' + (branch ? `?branch=${branch._id}` : '')),
-    call('/supplier-catalog/options'),
-    call('/supplier-invoices' + (branch ? `?branch=${branch._id}` : '')),
-    call('/reports/purchasing' + (branch ? `?branch=${branch._id}` : ''))
-  ]).then(([a, b, d, e]) => {
-    setPo(a);
-    setSuppliers(b.suppliers || []);
-    setIngredients(b.ingredients || []);
-    setInvoices(d);
-    setReport(e);
-  }).catch(e => setError(e.message));
+  const load = () => {
+    if (!branch?._id) return Promise.resolve();
+    const sequence = ++loadSequence.current;
+    const query = new URLSearchParams({
+      branch: branch._id,
+      page: String(poPagination.page || 1),
+      limit: String(poPagination.limit || 25)
+    });
+    Object.entries(poFilters).forEach(([key, value]) => value && query.set(key, value));
+    setPoLoading(true);
+    return Promise.all([
+      call('/purchase-orders?' + query.toString()),
+      call('/supplier-catalog/options'),
+      canManagePurchasing ? call('/supplier-invoices?branch=' + branch._id) : Promise.resolve([]),
+      canManagePurchasing ? call('/reports/purchasing?branch=' + branch._id) : Promise.resolve(null)
+    ]).then(([a, b, d, e]) => {
+      if (sequence !== loadSequence.current) return;
+      setPo(a.items || (Array.isArray(a) ? a : []));
+      setPoPagination(a.pagination || {page: 1, limit: 25, total: a.length || 0, pages: 1});
+      setPoSummary(a.summary || {subtotal: 0, vat: 0, total: 0, open: 0});
+      setSuppliers(b.suppliers || []);
+      setIngredients(b.ingredients || []);
+      setInvoices(d);
+      setReport(e);
+    }).catch(e => {
+      if (sequence === loadSequence.current) setError(e.message);
+    }).finally(() => {
+      if (sequence === loadSequence.current) setPoLoading(false);
+    });
+  };
 
   useEffect(() => {
-    if (locked && assigned && branchId !== assigned) setBranchId(assigned);
-    else if (!branchId && visibleBranches[0]) setBranchId(visibleBranches[0]._id);
-  }, [assigned, locked, visibleBranches, branchId]);
+    let cancelled = false;
+    call('/purchase-order-branches')
+      .then(result => {
+        if (!cancelled) setAccessibleBranches(Array.isArray(result) ? result : []);
+      })
+      .catch(err => !cancelled && setError(err.message || 'Could not load purchasing branches'));
+    return () => { cancelled = true; };
+  }, [user?._id]);
 
-  useEffect(() => { load(); }, [branch?._id]);
+  useEffect(() => {
+    if (visibleBranches.length && !visibleBranches.some(item => item._id === branchId)) setBranchId(visibleBranches[0]._id);
+    else if (!visibleBranches.length && branchId) setBranchId('');
+  }, [visibleBranches, branchId]);
+
+  useEffect(() => { load(); }, [branch?._id, poFilters, poPagination.page]);
 
   useEffect(() => {
     if (!form.supplier) {
@@ -85,6 +134,10 @@ export default function Purchasing({call, branches = [], user, token}) {
   }, [form.supplier]);
 
   useEffect(() => {
+    setPo([]);
+    setPoSummary({subtotal: 0, vat: 0, total: 0, open: 0});
+    setInvoices([]);
+    setReport(null);
     setOpenId('');
     setReceipts([]);
     setReturns([]);
@@ -93,6 +146,9 @@ export default function Purchasing({call, branches = [], user, token}) {
     setPayInvoiceId('');
     setInvoicePays([]);
     setEditId('');
+    setEditingPoId('');
+    setSuccess('');
+    setPoPagination(current => current.page === 1 ? current : {...current, page: 1});
   }, [branchId]);
 
   const loadRef = useRef(load);
@@ -190,23 +246,84 @@ export default function Purchasing({call, branches = [], user, token}) {
     }
   };
 
+  const changeDraftLine = (key, patch) => setDraftLines(current => current.map(line => line.key === key ? {...line, ...patch} : line));
+  const addDraftLine = () => setDraftLines(current => [...current, draftRow()]);
+  const removeDraftLine = key => setDraftLines(current => current.length === 1 ? current : current.filter(line => line.key !== key));
+  const resetDraft = () => {
+    setEditingPoId('');
+    setForm({supplier: '', orderDate: todayKathmandu(), expectedDeliveryDate: '', deliveryAddress: '', notes: ''});
+    setDraftLines([draftRow()]);
+    createRequestKey.current = requestKey();
+  };
+  const openDraftEdit = order => {
+    setError('');
+    setSuccess('');
+    setEditingPoId(order._id);
+    setForm({
+      supplier: order.supplier?._id || order.supplier || '',
+      orderDate: ymd(order.orderDate || order.createdAt),
+      expectedDeliveryDate: ymd(order.expectedDeliveryDate),
+      deliveryAddress: order.deliveryAddress || '',
+      notes: order.notes || ''
+    });
+    setDraftLines((order.items || []).map(item => ({
+      key: item._id || requestKey(),
+      catalogItem: item.catalogItem?._id || item.catalogItem || '',
+      ingredient: item.ingredient?._id || item.ingredient || '',
+      purchaseQty: item.purchaseQty || 1,
+      qty: item.orderedQty || 1,
+      price: item.unitPrice || 0
+    })));
+    document.querySelector('.po-create-box')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  };
+
   const create = async e => {
     e.preventDefault();
-    if (!branch) return;
+    if (!branch || !form.supplier || !draftLines.length) return;
     setError('');
+    setSuccess('');
     setBusy('create-po');
     try {
-      const mapping = catalog.find(item => item._id === form.catalogItem && item.active);
-      const ingredient = mapping?.ingredient || ingredients.find(item => item._id === form.ingredient);
-      const item = mapping
-        ? {catalogItem: mapping._id, ingredient: mapping.ingredient._id, purchaseQty: Number(form.purchaseQty)}
-        : {ingredient: form.ingredient, orderedQty: Number(form.qty), unit: ingredient?.unit || 'each', unitPrice: Number(form.price)};
-      await call('/purchase-orders', {method: 'POST', body: JSON.stringify({
-        branch: branch._id,
+      if (!catalogReady) throw new Error('Wait for the supplier terms to finish loading');
+      const usesCatalog = catalog.length > 0;
+      const items = draftLines.map((line, index) => {
+        if (usesCatalog) {
+          const mapping = activeCatalog.find(item => item._id === line.catalogItem);
+          if (!mapping) throw new Error(`Choose an active catalog item on line ${index + 1}`);
+          if (!(Number(line.purchaseQty) > 0)) throw new Error(`Enter a purchase quantity on line ${index + 1}`);
+          return {catalogItem: mapping._id, ingredient: mapping.ingredient._id, purchaseQty: Number(line.purchaseQty)};
+        }
+        const ingredient = ingredients.find(item => item._id === line.ingredient);
+        if (!ingredient) throw new Error(`Choose an ingredient on line ${index + 1}`);
+        if (!(Number(line.qty) > 0) || !(Number(line.price) > 0)) throw new Error(`Quantity and unit price must be positive on line ${index + 1}`);
+        return {ingredient: line.ingredient, orderedQty: Number(line.qty), unit: ingredient.unit || 'each', unitPrice: Number(line.price)};
+      });
+      const identities = items.map(item => item.catalogItem || item.ingredient);
+      if (new Set(identities).size !== identities.length) throw new Error('Each ingredient can appear only once on a purchase order');
+      const common = {
         supplier: form.supplier,
-        items: [item]
-      })});
-      setForm(current => ({...current, catalogItem: '', ingredient: '', purchaseQty: 1, qty: 1, price: 0}));
+        items,
+        expectedDeliveryDate: form.expectedDeliveryDate || (editingPoId ? null : undefined),
+        deliveryAddress: form.deliveryAddress,
+        notes: form.notes
+      };
+      let saved;
+      if (editingPoId) {
+        const current = po.find(order => order._id === editingPoId);
+        if (!current) throw new Error('This draft is no longer on the current page; refresh and try again');
+        saved = await call('/purchase-orders/' + editingPoId, {
+          method: 'PATCH',
+          body: JSON.stringify({...common, expectedVersion: current.__v})
+        });
+      } else {
+        saved = await call('/purchase-orders', {
+          method: 'POST',
+          headers: {'Idempotency-Key': createRequestKey.current},
+          body: JSON.stringify({...common, branch: branch._id, orderDate: form.orderDate || undefined})
+        });
+      }
+      setSuccess(`${saved.poNo} ${editingPoId ? 'updated' : 'created as a draft'}.`);
+      resetDraft();
       await load();
     } catch (e) {
       setError(e.message);
@@ -389,7 +506,7 @@ export default function Purchasing({call, branches = [], user, token}) {
     try {
       const updated = await call('/purchase-orders/' + order._id + '/status', {
         method: 'PATCH',
-        body: JSON.stringify({status, notes})
+        body: JSON.stringify({status, notes, expectedVersion: order.__v})
       });
       await load();
       if (openId === order._id) await openReceive(updated);
@@ -420,80 +537,160 @@ export default function Purchasing({call, branches = [], user, token}) {
   const open = po.find(x => x._id === openId);
   const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
   const activeCatalog = catalog.filter(item => item.active);
-  const selectedCatalog = activeCatalog.find(item => item._id === form.catalogItem);
   const supplierUsesCatalog = catalogReady && catalog.length > 0;
-  const catalogEstimate = selectedCatalog ? Number(form.purchaseQty || 0) * Number(selectedCatalog.currentPrice || 0) : 0;
+  const draftEstimate = draftLines.reduce((totals, line) => {
+    if (supplierUsesCatalog) {
+      const mapping = activeCatalog.find(item => item._id === line.catalogItem);
+      if (!mapping) return totals;
+      const quoted = Number(line.purchaseQty || 0) * Number(mapping.currentPrice || 0);
+      const rate = Number(mapping.vatRate ?? 13);
+      const subtotal = mapping.priceIncludesVat ? quoted / (1 + rate / 100) : quoted;
+      return {subtotal: totals.subtotal + subtotal, vat: totals.vat + (mapping.priceIncludesVat ? quoted - subtotal : subtotal * rate / 100)};
+    }
+    const subtotal = Number(line.qty || 0) * Number(line.price || 0);
+    return {subtotal: totals.subtotal + subtotal, vat: totals.vat + subtotal * 0.13};
+  }, {subtotal: 0, vat: 0});
 
   return (
-    <section className="panel">
+    <section className="panel purchasing-panel">
       <div className="title">
         <div>
           <h2>Purchasing & goods receiving</h2>
           <p>POs start as drafts. Submit, then approve, before stock can be received. Live updates follow this branch. VAT on supplier invoices is 13%.</p>
         </div>
         <div className="kds-toolbar">
-          <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting'}</span>
+          <label className="po-branch-picker">Branch<select value={branchId} disabled={locked || visibleBranches.length < 2} onChange={e => setBranchId(e.target.value)}>
+            {!visibleBranches.length && <option value="">No authorized branch</option>}
+            {visibleBranches.map(item => <option key={item._id} value={item._id}>{item.name} ({item.code})</option>)}
+          </select></label>
+          <span className={'kds-live ' + (!branch ? 'off' : live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{!branch ? 'Unavailable' : live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting'}</span>
         </div>
       </div>
-      {error && <p className="danger">{error}</p>}
+      {error && <p className="danger" role="alert">{error} <button type="button" className="po-inline-button" onClick={() => setError('')}>Dismiss</button></p>}
+      {success && <p className="po-success" role="status">{success}</p>}
+      {!branch && <p className="empty">No active purchasing branch is assigned to this account.</p>}
 
-      {['owner', 'manager'].includes(user?.role) && <div className="po-create-box">
-        <div>
-          <strong>Create a draft purchase order</strong>
-          <small>Catalog suppliers use their current server-controlled price and conversion. Historical POs keep their original terms.</small>
+      {canManagePurchasing && branch && <div className="po-create-box">
+        <div className="po-editor-heading">
+          <div>
+            <strong>{editingPoId ? 'Edit draft purchase order' : 'Create a draft purchase order'}</strong>
+            <small>Build one order with multiple lines. Catalog prices, VAT, conversion, MOQ and lead time are enforced again by the server.</small>
+          </div>
+          {editingPoId && <button type="button" className="po-secondary" onClick={resetDraft}>Cancel edit</button>}
         </div>
-        <form className="purchaseform catalog-po-form" onSubmit={create}>
-          <label>Supplier<select required value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value, catalogItem: '', ingredient: ''})}>
-            <option value="">Select supplier</option>
-            {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
-          </select></label>
+        <form className="po-draft-form" onSubmit={create}>
+          <div className="po-header-fields">
+            <label>Supplier<select required value={form.supplier} onChange={e => { setForm({...form, supplier: e.target.value}); setDraftLines([draftRow()]); }}>
+              <option value="">Select supplier</option>
+              {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
+            </select></label>
+            <label>Order date<input required disabled={Boolean(editingPoId)} type="date" value={form.orderDate} onChange={e => setForm({...form, orderDate: e.target.value})}/></label>
+            <label>Expected delivery<input type="date" min={form.orderDate || undefined} value={form.expectedDeliveryDate} onChange={e => setForm({...form, expectedDeliveryDate: e.target.value})}/></label>
+            <label>Delivery address<input maxLength="500" value={form.deliveryAddress} onChange={e => setForm({...form, deliveryAddress: e.target.value})} placeholder={branch?.address || 'Use branch address'}/></label>
+          </div>
+          <label className="po-notes-field">Order notes<textarea maxLength="1000" value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} placeholder="Delivery window, contact person or supplier instructions"/></label>
+
+          {!form.supplier && <div className="po-catalog-note">Choose a supplier to load current purchasing terms.</div>}
           {catalogLoading && <div className="po-catalog-note">Loading active supplier terms…</div>}
-          {supplierUsesCatalog && <>
-            <label>Catalog ingredient<select required value={form.catalogItem} onChange={e => setForm({...form, catalogItem: e.target.value})}>
-              <option value="">Select supplier item</option>
-              {activeCatalog.map(item => <option key={item._id} value={item._id}>{item.ingredient?.name} · {rs(item.currentPrice)}/{item.purchaseUnit}{item.supplierSku ? ` · ${item.supplierSku}` : ''}</option>)}
-            </select></label>
-            <label>Purchase quantity<input required min={selectedCatalog?.minOrderQty || 0.000001} step="any" type="number" value={form.purchaseQty} onChange={e => setForm({...form, purchaseQty: e.target.value})} placeholder="Purchase qty"/></label>
-            {selectedCatalog && <div className="po-price-preview"><span>Authoritative estimate</span><strong>{rs(catalogEstimate)}</strong><small>{form.purchaseQty || 0} {selectedCatalog.purchaseUnit} = {(Number(form.purchaseQty || 0) * Number(selectedCatalog.conversionFactor)).toLocaleString('en-NP')} {selectedCatalog.baseUnit} · min {selectedCatalog.minOrderQty} · VAT {selectedCatalog.priceIncludesVat ? 'included' : 'excluded'}</small></div>}
-          </>}
-          {catalogReady && catalog.length === 0 && <>
-            <label>Ingredient<select required value={form.ingredient} onChange={e => setForm({...form, ingredient: e.target.value})}>
-              <option value="">Select ingredient</option>
-              {ingredients.map(x => <option key={x._id} value={x._id}>{x.name} ({x.unit})</option>)}
-            </select></label>
-            <label>Base quantity<input required min="0.000001" step="any" type="number" value={form.qty} onChange={e => setForm({...form, qty: e.target.value})}/></label>
-            <label>Price per base unit<input required min="0.000001" step="any" type="number" value={form.price} onChange={e => setForm({...form, price: e.target.value})}/></label>
-            <div className="po-catalog-note legacy">Legacy supplier: manual terms remain available until its first catalog mapping is created.</div>
-          </>}
           {catalogReady && catalog.length > 0 && activeCatalog.length === 0 && <div className="po-catalog-note blocked">This supplier has catalog records, but none are active. Reactivate a mapping in Supplier Catalog before ordering.</div>}
-          <button disabled={busy === 'create-po' || !catalogReady || (supplierUsesCatalog && (!selectedCatalog || activeCatalog.length === 0))}>{busy === 'create-po' ? 'Creating…' : 'Create draft PO'}</button>
+          {catalogReady && catalog.length === 0 && <div className="po-catalog-note legacy">Legacy supplier: manual base-unit terms remain available until its first catalog mapping is created.</div>}
+
+          <div className="po-draft-lines">
+            {draftLines.map((line, index) => {
+              const mapping = activeCatalog.find(item => item._id === line.catalogItem);
+              const ingredient = mapping?.ingredient || ingredients.find(item => item._id === line.ingredient);
+              const quoted = mapping ? Number(line.purchaseQty || 0) * Number(mapping.currentPrice || 0) : Number(line.qty || 0) * Number(line.price || 0);
+              return (
+                <div className="po-draft-line" key={line.key}>
+                  <div className="po-line-number"><strong>Line {index + 1}</strong><button type="button" disabled={draftLines.length === 1} onClick={() => removeDraftLine(line.key)}>Remove</button></div>
+                  {supplierUsesCatalog ? <>
+                    <label>Catalog item<select required value={line.catalogItem} onChange={e => changeDraftLine(line.key, {catalogItem: e.target.value})}>
+                      <option value="">Select supplier item</option>
+                      {activeCatalog.map(item => <option key={item._id} value={item._id} disabled={draftLines.some(other => other.key !== line.key && other.catalogItem === item._id)}>{item.ingredient?.name} · {rs(item.currentPrice)}/{item.purchaseUnit}{item.supplierSku ? ` · ${item.supplierSku}` : ''}</option>)}
+                    </select></label>
+                    <label>Purchase quantity<input required min={mapping?.minOrderQty || 0.000001} step="any" type="number" value={line.purchaseQty} onChange={e => changeDraftLine(line.key, {purchaseQty: e.target.value})}/></label>
+                    <div className="po-line-terms">
+                      <strong>{mapping ? rs(quoted) : 'Choose an item'}</strong>
+                      <small>{mapping ? `${line.purchaseQty || 0} ${mapping.purchaseUnit} = ${(Number(line.purchaseQty || 0) * Number(mapping.conversionFactor)).toLocaleString('en-NP')} ${mapping.baseUnit} · MOQ ${mapping.minOrderQty} · lead ${mapping.leadDays || 0} day(s) · VAT ${mapping.priceIncludesVat ? 'included' : `${mapping.vatRate ?? 13}% extra`}` : 'The server snapshots the current supplier terms.'}</small>
+                    </div>
+                  </> : <>
+                    <label>Ingredient<select required disabled={!catalogReady} value={line.ingredient} onChange={e => changeDraftLine(line.key, {ingredient: e.target.value})}>
+                      <option value="">Select ingredient</option>
+                      {ingredients.map(item => <option key={item._id} value={item._id} disabled={draftLines.some(other => other.key !== line.key && other.ingredient === item._id)}>{item.name} ({item.unit})</option>)}
+                    </select></label>
+                    <label>Base quantity<input required min="0.000001" step="any" type="number" value={line.qty} onChange={e => changeDraftLine(line.key, {qty: e.target.value})}/></label>
+                    <label>Net price / {ingredient?.unit || 'base unit'}<input required min="0.000001" step="any" type="number" value={line.price} onChange={e => changeDraftLine(line.key, {price: e.target.value})}/></label>
+                    <div className="po-line-terms"><strong>{rs(quoted)}</strong><small>Manual terms · 13% VAT added · base inventory unit</small></div>
+                  </>}
+                </div>
+              );
+            })}
+          </div>
+          <div className="po-editor-footer">
+            <button type="button" className="po-secondary" disabled={!catalogReady || (supplierUsesCatalog && activeCatalog.length === 0)} onClick={addDraftLine}>+ Add line</button>
+            <div className="po-draft-totals"><span>Net {rs(draftEstimate.subtotal)}</span><span>VAT {rs(draftEstimate.vat)}</span><strong>Estimated total {rs(draftEstimate.subtotal + draftEstimate.vat)}</strong></div>
+            <button disabled={busy === 'create-po' || !catalogReady || !draftLines.length || (supplierUsesCatalog && activeCatalog.length === 0)}>{busy === 'create-po' ? 'Saving…' : editingPoId ? 'Save draft changes' : 'Create draft PO'}</button>
+          </div>
         </form>
       </div>}
 
-      <h3>Purchase orders</h3>
-      <table>
-        <thead><tr><th>PO</th><th>Supplier</th><th>Received</th><th>Remaining</th><th>Status</th><th>Total</th><th></th></tr></thead>
+      {branch && <>
+      <div className="po-list-heading">
+        <div><h3>Purchase orders</h3><small>{poPagination.total} result(s) for {branch?.name || 'this branch'}</small></div>
+        <button type="button" className="po-secondary" disabled={poLoading} onClick={load}>{poLoading ? 'Refreshing…' : 'Refresh'}</button>
+      </div>
+      <form className="po-filters" onSubmit={e => { e.preventDefault(); setPoPagination(current => ({...current, page: 1})); setPoFilters({...filterDraft}); }}>
+        <label>Search<input value={filterDraft.q} onChange={e => setFilterDraft({...filterDraft, q: e.target.value})} placeholder="PO number, supplier, notes"/></label>
+        <label>Status<select value={filterDraft.status} onChange={e => setFilterDraft({...filterDraft, status: e.target.value})}>
+          <option value="">All statuses</option>
+          {['draft', 'pending', 'approved', 'rejected', 'sent', 'partially_received', 'received', 'cancelled'].map(status => <option key={status} value={status}>{status.replace('_', ' ')}</option>)}
+        </select></label>
+        <label>Supplier<select value={filterDraft.supplier} onChange={e => setFilterDraft({...filterDraft, supplier: e.target.value})}>
+          <option value="">All suppliers</option>
+          {suppliers.map(item => <option key={item._id} value={item._id}>{item.name}</option>)}
+        </select></label>
+        <label>From<input type="date" value={filterDraft.from} onChange={e => setFilterDraft({...filterDraft, from: e.target.value})}/></label>
+        <label>To<input type="date" min={filterDraft.from || undefined} value={filterDraft.to} onChange={e => setFilterDraft({...filterDraft, to: e.target.value})}/></label>
+        <div className="po-filter-actions"><button disabled={poLoading}>Apply</button><button type="button" className="po-secondary" onClick={() => { const empty = {q: '', supplier: '', status: '', from: '', to: ''}; setFilterDraft(empty); setPoPagination(current => ({...current, page: 1})); setPoFilters(empty); }}>Clear</button></div>
+      </form>
+      <div className="po-summary-grid">
+        <article><small>Open orders</small><strong>{poSummary.open || 0}</strong></article>
+        <article><small>Net subtotal</small><strong>{rs(poSummary.subtotal)}</strong></article>
+        <article><small>VAT</small><strong>{rs(poSummary.vat)}</strong></article>
+        <article><small>Gross total</small><strong>{rs(poSummary.total)}</strong></article>
+      </div>
+      {poLoading && !po.length && <p className="empty">Loading purchase orders…</p>}
+      {!poLoading && !po.length && <p className="empty">No purchase orders match these branch filters.</p>}
+      {!!po.length && <div className="po-table-wrap"><table className="po-table">
+        <thead><tr><th>PO / date</th><th>Supplier</th><th>Lines</th><th>Receiving</th><th>Status</th><th>Financials</th><th>Actions</th></tr></thead>
         <tbody>
           {po.map(x => (
             <tr key={x._id}>
-              <td>{x.poNo}</td>
-              <td>{x.supplier?.name}</td>
-              <td>{x.items?.map(i => `${i.receivedQty}/${i.orderedQty} ${i.unit || ''}`).join(', ')}</td>
-              <td>{x.items?.map(i => remaining(i)).join(', ')}</td>
-              <td><label className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</label></td>
-              <td>{rs(x.total)}</td>
-              <td>
-                {['draft', 'rejected'].includes(x.status) && <button className="receive" onClick={() => setPoStatus(x, 'pending')}>Submit</button>}
-                {x.status === 'pending' && <button className="receive" onClick={() => setPoStatus(x, 'approved')}>Approve</button>}
-                {x.status === 'pending' && <button className="kds-cancel" onClick={() => setPoStatus(x, 'rejected')}>Reject</button>}
-                {x.status === 'approved' && <button className="receive" onClick={() => setPoStatus(x, 'sent')}>Mark sent</button>}
-                {['draft', 'pending', 'approved', 'rejected', 'sent'].includes(x.status) && <button className="kds-cancel" onClick={() => setPoStatus(x, 'cancelled')}>Cancel</button>}
-                <button className="receive" onClick={() => openReceive(x)}>{canReceivePo(x.status) ? 'Receive / return' : 'Open'}</button>
-              </td>
+              <td><strong>{x.poNo}</strong><small>{ymd(x.orderDate || x.createdAt)}{x.expectedDeliveryDate ? ` · due ${ymd(x.expectedDeliveryDate)}` : ''}</small></td>
+              <td>{x.supplier?.name || 'Unavailable supplier'}</td>
+              <td>{x.items?.length || 0}<small>{x.items?.map(i => `${i.ingredient?.name || 'Ingredient'}: ${i.orderedQty} ${i.unit || ''}`).join(' · ')}</small></td>
+              <td>{x.items?.map(i => `${i.receivedQty || 0}/${i.orderedQty} ${i.unit || ''}`).join(', ') || 'Not received'}</td>
+              <td><span className={poPill(x.status)}>{String(x.status || '').replace('_', ' ')}</span></td>
+              <td><strong>{rs(x.total)}</strong><small>Net {rs(x.subtotal)} · VAT {rs(x.vat)}</small></td>
+              <td><div className="po-row-actions">
+                {canManagePurchasing && ['draft', 'rejected'].includes(x.status) && <button type="button" className="receive" disabled={!!busy} onClick={() => openDraftEdit(x)}>Edit</button>}
+                {canManagePurchasing && ['draft', 'rejected'].includes(x.status) && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'pending')}>Submit</button>}
+                {canManagePurchasing && x.status === 'pending' && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'approved')}>Approve</button>}
+                {canManagePurchasing && x.status === 'pending' && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => setPoStatus(x, 'rejected')}>Reject</button>}
+                {canManagePurchasing && x.status === 'approved' && <button type="button" className="receive" disabled={!!busy} onClick={() => setPoStatus(x, 'sent')}>Mark sent</button>}
+                {canManagePurchasing && ['draft', 'pending', 'approved', 'rejected', 'sent'].includes(x.status) && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => setPoStatus(x, 'cancelled')}>Cancel</button>}
+                <button type="button" className="receive" disabled={!!busy} onClick={() => openReceive(x)}>{canManagePurchasing && canReceivePo(x.status) ? 'Receive / return' : 'Open'}</button>
+              </div></td>
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>}
+      {poPagination.pages > 1 && <div className="po-pagination">
+        <button type="button" className="po-secondary" disabled={poLoading || poPagination.page <= 1} onClick={() => setPoPagination(current => ({...current, page: current.page - 1}))}>Previous</button>
+        <span>Page {poPagination.page} of {poPagination.pages}</span>
+        <button type="button" className="po-secondary" disabled={poLoading || poPagination.page >= poPagination.pages} onClick={() => setPoPagination(current => ({...current, page: current.page + 1}))}>Next</button>
+      </div>}
+
 
       {open && (
         <div className="receive-box">
@@ -503,7 +700,7 @@ export default function Purchasing({call, branches = [], user, token}) {
             <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : 'This purchase order is not open for receiving.'}</p>
           )}
           {canReceivePo(open.status) && <p>Accepted quantity = received − damaged. Remaining is ordered − already received.</p>}
-          {canReceivePo(open.status) && <>
+          {canManagePurchasing && canReceivePo(open.status) && <>
           <table>
             <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Accepted</th><th>Batch</th><th>Expiry</th></tr></thead>
             <tbody>
@@ -531,7 +728,7 @@ export default function Purchasing({call, branches = [], user, token}) {
           <button className="receive" disabled={!!busy} onClick={() => receive(open)}>{busy ? 'Posting…' : 'Post receipt'}</button>
           </>}
 
-          {(open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
+          {canManagePurchasing && (open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
             <div>
               <h3>Return to supplier</h3>
               <p>Returnable is accepted stock still on this PO (received − damaged − already returned). This deducts usable inventory.</p>
@@ -601,7 +798,9 @@ export default function Purchasing({call, branches = [], user, token}) {
           )}
         </div>
       )}
+      </>}
 
+      {canManagePurchasing && branch && <>
       <h3>Create supplier invoice</h3>
       <form className="purchaseform" onSubmit={createInvoice}>
         <select required value={invoice.supplier} onChange={e => setInvoice({...invoice, supplier: e.target.value})}>
@@ -763,6 +962,7 @@ export default function Purchasing({call, branches = [], user, token}) {
           <p>Ledger net stock value {rs(report.ledger?.netStockValue)} · purchases {rs(report.ledger?.purchaseValue)} · returns {rs(report.ledger?.returnValue)}</p>
         </div>
       )}
+      </>}
     </section>
   );
 }
