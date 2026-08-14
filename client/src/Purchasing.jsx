@@ -54,6 +54,7 @@ export default function Purchasing({call, user, token}) {
   const [draftLines, setDraftLines] = useState([draftRow()]);
   const [editingPoId, setEditingPoId] = useState('');
   const createRequestKey = useRef(requestKey());
+  const receiptRequestKey = useRef(requestKey());
   const [success, setSuccess] = useState('');
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
   const [statementId, setStatementId] = useState('');
@@ -231,8 +232,9 @@ export default function Purchasing({call, user, token}) {
     setApprovalAction(null);
     setApprovalHistory([]);
     setNotes('');
+    receiptRequestKey.current = requestKey();
     setLines(Object.fromEntries((order.items || []).map(i => [i._id, {
-      receivedQty: remaining(i) || 0,
+      receivedQty: 0,
       damagedQty: 0,
       batchNumber: '',
       expiryDate: ''
@@ -350,24 +352,40 @@ export default function Purchasing({call, user, token}) {
         itemId: i._id,
         receivedQty: Number(row.receivedQty || 0),
         damagedQty: Number(row.damagedQty || 0),
-        unitPrice: i.unitPrice,
         batchNumber: row.batchNumber || undefined,
         expiryDate: row.expiryDate || undefined
       };
-    }).filter(x => x.receivedQty > 0);
-    if (!items.length) return;
+    }).filter(item => item.receivedQty > 0);
+    if (!items.length) {
+      setError('Enter a received quantity on at least one line');
+      return;
+    }
+    const invalid = items.find(item => !Number.isFinite(item.receivedQty)
+      || !Number.isFinite(item.damagedQty)
+      || item.damagedQty < 0
+      || item.damagedQty > item.receivedQty);
+    if (invalid) {
+      setError('Damaged quantity must be between zero and the received quantity');
+      return;
+    }
+    const receivedTotal = items.reduce((sum, item) => sum + item.receivedQty, 0);
+    const acceptedTotal = items.reduce((sum, item) => sum + item.receivedQty - item.damagedQty, 0);
+    if (typeof globalThis.confirm === 'function'
+      && !globalThis.confirm(`Post this receipt? ${receivedTotal} units received; ${acceptedTotal} accepted into usable stock. This inventory movement cannot be edited.`)) return;
     setBusy(order._id);
     setError('');
+    setSuccess('');
     try {
-      await call('/purchase-orders/' + order._id + '/receive', {
+      const result = await call('/purchase-orders/' + order._id + '/receive', {
         method: 'POST',
-        headers: {'Idempotency-Key': 'ui-' + order._id + '-' + Date.now()},
-        body: JSON.stringify({items, notes})
+        headers: {'Idempotency-Key': receiptRequestKey.current},
+        body: JSON.stringify({items, notes, expectedVersion: order.__v})
       });
       setNotes('');
       await load();
       const fresh = await call('/purchase-orders/' + order._id);
       await openReceive(fresh);
+      setSuccess(`${result.receipt.receiptNo} ${result.duplicate ? 'was already posted; no stock was added again' : 'posted successfully'}. Accepted value: ${rs(result.receipt.acceptedValue)}.`);
     } catch (e) {
       setError(e.message || 'Receiving failed');
     } finally {
@@ -551,6 +569,21 @@ export default function Purchasing({call, user, token}) {
   };
 
   const open = po.find(x => x._id === openId);
+  const receiptDraft = (open?.items || []).reduce((summary, item) => {
+    const row = lines[item._id] || {};
+    const receivedQty = Number(row.receivedQty || 0);
+    const damagedQty = Number(row.damagedQty || 0);
+    if (!(receivedQty > 0)) return summary;
+    const acceptedQty = receivedQty - damagedQty;
+    return {
+      lineCount: summary.lineCount + 1,
+      receivedQty: summary.receivedQty + receivedQty,
+      damagedQty: summary.damagedQty + damagedQty,
+      acceptedQty: summary.acceptedQty + Math.max(0, acceptedQty),
+      acceptedValue: summary.acceptedValue + Math.max(0, acceptedQty) * Number(item.unitPrice || 0),
+      invalid: summary.invalid || damagedQty < 0 || damagedQty > receivedQty || receivedQty > remaining(item)
+    };
+  }, {lineCount: 0, receivedQty: 0, damagedQty: 0, acceptedQty: 0, acceptedValue: 0, invalid: false});
   const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
   const activeCatalog = catalog.filter(item => item.active);
   const supplierUsesCatalog = catalogReady && catalog.length > 0;
@@ -751,33 +784,49 @@ export default function Purchasing({call, user, token}) {
           {!canReceivePo(open.status) && open.status !== 'received' && (
             <p>{open.status === 'pending' ? 'Waiting for approval. Stock cannot be received yet.' : open.status === 'draft' ? 'Submit this draft for approval before receiving.' : open.status === 'rejected' ? 'Rejected. Resubmit after you correct it.' : 'This purchase order is not open for receiving.'}</p>
           )}
-          {canReceivePo(open.status) && <p>Accepted quantity = received − damaged. Remaining is ordered − already received.</p>}
+          {canReceivePo(open.status) && <p>Enter only quantities physically counted now. Accepted quantity = received − damaged; remaining = ordered − already received. Inventory cost always comes from the approved PO.</p>}
           {canManagePurchasing && canReceivePo(open.status) && <>
-          <table>
-            <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Accepted</th><th>Batch</th><th>Expiry</th></tr></thead>
+          <div className="receipt-toolbar">
+            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: remaining(item), damagedQty: 0}])))}>Fill all remaining</button>
+            <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setLines(current => Object.fromEntries((open.items || []).map(item => [item._id, {...(current[item._id] || {}), receivedQty: 0, damagedQty: 0}])))}>Clear counts</button>
+            <span>Nothing is prefilled—verify the delivery before posting.</span>
+          </div>
+          <table className="receipt-entry-table">
+            <thead><tr><th>Ingredient</th><th>Ordered</th><th>Already in</th><th>Remaining</th><th>Receive now</th><th>Damaged</th><th>Accepted</th><th>PO cost</th><th>Accepted value</th><th>Batch</th><th>Expiry</th></tr></thead>
             <tbody>
               {(open.items || []).map(i => {
                 const row = lines[i._id] || {receivedQty: 0, damagedQty: 0};
                 const rec = Number(row.receivedQty || 0);
                 const dmg = Number(row.damagedQty || 0);
+                const acceptedNow = Math.max(0, rec - dmg);
                 return (
                   <tr key={i._id}>
-                    <td>{i.ingredient?.name || 'Ingredient'}</td>
+                    <td>{i.ingredient?.name || 'Ingredient'}<small>{i.ingredient?.code || i.unit}</small></td>
                     <td>{i.orderedQty} {i.unit}</td>
                     <td>{i.receivedQty || 0}</td>
                     <td>{remaining(i)}</td>
-                    <td><input type="number" min="0" max={remaining(i)} value={row.receivedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, receivedQty: e.target.value}}))}/></td>
-                    <td><input type="number" min="0" value={row.damagedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, damagedQty: e.target.value}}))}/></td>
-                    <td>{Math.max(0, rec - dmg)}</td>
-                    <td><input value={row.batchNumber || ''} onChange={e => setLines(s => ({...s, [i._id]: {...row, batchNumber: e.target.value}}))} placeholder="Batch"/></td>
+                    <td><input aria-label={`Receive ${i.ingredient?.name || 'ingredient'}`} type="number" min="0" max={remaining(i)} value={row.receivedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, receivedQty: e.target.value}}))}/></td>
+                    <td><input aria-label={`Damaged ${i.ingredient?.name || 'ingredient'}`} type="number" min="0" max={Math.max(0, rec)} value={row.damagedQty} onChange={e => setLines(s => ({...s, [i._id]: {...row, damagedQty: e.target.value}}))}/></td>
+                    <td>{acceptedNow}</td>
+                    <td>{rs(i.unitPrice)} / {i.unit}</td>
+                    <td>{rs(acceptedNow * Number(i.unitPrice || 0))}</td>
+                    <td><input maxLength="120" value={row.batchNumber || ''} onChange={e => setLines(s => ({...s, [i._id]: {...row, batchNumber: e.target.value}}))} placeholder="Batch"/></td>
                     <td><input type="date" value={row.expiryDate || ''} onChange={e => setLines(s => ({...s, [i._id]: {...row, expiryDate: e.target.value}}))}/></td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
-          <input className="receive-notes" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes"/>
-          <button className="receive" disabled={!!busy} onClick={() => receive(open)}>{busy ? 'Posting…' : 'Post receipt'}</button>
+          <div className={'receipt-summary' + (receiptDraft.invalid ? ' invalid' : '')}>
+            <span><small>Lines</small><strong>{receiptDraft.lineCount}</strong></span>
+            <span><small>Received now</small><strong>{receiptDraft.receivedQty}</strong></span>
+            <span><small>Accepted</small><strong>{receiptDraft.acceptedQty}</strong></span>
+            <span><small>Damaged</small><strong>{receiptDraft.damagedQty}</strong></span>
+            <span><small>Stock value</small><strong>{rs(receiptDraft.acceptedValue)}</strong></span>
+          </div>
+          {receiptDraft.invalid && <p className="danger" role="alert">A line exceeds its remaining quantity or has damaged quantity greater than received.</p>}
+          <input className="receive-notes" maxLength="1000" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes (delivery reference, discrepancy, or handover details)"/>
+          <button className="receive receipt-post" disabled={!!busy || !receiptDraft.lineCount || receiptDraft.invalid} onClick={() => receive(open)}>{busy === open._id ? 'Posting receipt…' : 'Review and post receipt'}</button>
           </>}
 
           {canManagePurchasing && (open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
@@ -833,16 +882,18 @@ export default function Purchasing({call, user, token}) {
           {!receipts.length && <p className="empty">No receipts posted yet.</p>}
           {!!receipts.length && (
             <table>
-              <thead><tr><th>Receipt</th><th>Accepted</th><th>Damaged</th><th>Batch</th><th>Notes</th><th>When</th></tr></thead>
+              <thead><tr><th>Receipt</th><th>Accepted</th><th>Damaged</th><th>Accepted value</th><th>Batch</th><th>Received by</th><th>Notes</th><th>When</th></tr></thead>
               <tbody>
                 {receipts.map(r => (
                   <tr key={r._id}>
-                    <td>{r.receiptNo}</td>
+                    <td><strong>{r.receiptNo}</strong></td>
                     <td>{r.items?.map(i => i.acceptedQty).join(', ')}</td>
                     <td>{r.items?.map(i => i.damagedQty).join(', ')}</td>
+                    <td>{rs(r.acceptedValue)}</td>
                     <td>{r.items?.map(i => i.batchNumber || '—').join(', ')}</td>
+                    <td>{r.receivedBy?.name || 'Recorded user'}</td>
                     <td>{r.notes || '—'}</td>
-                    <td>{r.createdAt ? new Date(r.createdAt).toLocaleString('en-NP') : ''}</td>
+                    <td>{r.receivedAt ? new Date(r.receivedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}</td>
                   </tr>
                 ))}
               </tbody>

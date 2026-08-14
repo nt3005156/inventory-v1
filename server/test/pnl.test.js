@@ -79,7 +79,7 @@ describe('GET /api/reports/pnl', () => {
       method: 'POST',
       token: tokenFor(world.manager),
       headers: {'Idempotency-Key': 'pnl-gr'},
-      body: {items: [{itemId: String(po.items[0]._id), receivedQty: 400, damagedQty: 50, unitPrice: 0.05}]}
+      body: {items: [{itemId: String(po.items[0]._id), receivedQty: 400, damagedQty: 50}]}
     });
     assert.equal(rec.status, 201, rec.body?.message);
     const ret = await request('/api/purchase-orders/' + po._id + '/returns', {

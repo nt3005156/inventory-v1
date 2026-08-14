@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
-import {PurchaseOrder, SupplierInvoice, SupplierPayment, InventoryTransaction} from '../models/operations.js';
+import {Branch, PurchaseOrder, SupplierInvoice, SupplierPayment, InventoryTransaction} from '../models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
-import {assertBranchAccess} from './kitchen.js';
-import {REPORTABLE_PO_STATUSES} from './purchaseOrders.js';
+import {REPORTABLE_PO_STATUSES, purchaseBranchContext} from './purchaseOrders.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 import {money} from './statements.js';
 
 function httpError(message, status) {
@@ -52,17 +52,34 @@ export function summarizePoLines(orders) {
 }
 
 export async function buildPurchasingReport({branchId, user, from, to, toExclusive}) {
+  let context;
+  let effectiveBranchId = branchId;
   if (branchId) {
     if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branchId);
+    context = await purchaseBranchContext({user, branchId});
+    effectiveBranchId = context.branch._id;
+  } else {
+    context = await userRestaurantContext(user);
+    if (context.role !== 'owner') {
+      if (!context.branchId) throw httpError('User is not assigned to a branch', 403);
+      const branchContext = await purchaseBranchContext({user, branchId: context.branchId});
+      context = branchContext;
+      effectiveBranchId = branchContext.branch._id;
+    }
   }
+
+  const tenantBranches = effectiveBranchId
+    ? [new mongoose.Types.ObjectId(effectiveBranchId)]
+    : await Branch.find({restaurant: context.restaurantId}).distinct('_id');
   const dates = dateMatch(from, to, toExclusive);
-  const branchMatch = branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {};
+  const branchMatch = {branch: effectiveBranchId
+    ? new mongoose.Types.ObjectId(effectiveBranchId)
+    : {$in: tenantBranches}};
   const match = {...branchMatch, ...dates};
 
   const [orders, receipts, returns, invoices, payments, purchaseTx, returnTx] = await Promise.all([
-    PurchaseOrder.find({...match, status: {$in: REPORTABLE_PO_STATUSES}}).populate('supplier', 'name'),
-    GoodsReceipt.find(match),
+    PurchaseOrder.find({restaurant: context.restaurantId, ...match, status: {$in: REPORTABLE_PO_STATUSES}}).populate('supplier', 'name'),
+    GoodsReceipt.find({restaurant: context.restaurantId, ...match}),
     PurchaseReturn.find(match),
     SupplierInvoice.find({...match, status: {$ne: 'void'}}).populate('supplier', 'name'),
     SupplierPayment.find(dates),
@@ -71,9 +88,7 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   ]);
 
   const invoiceIds = new Set(invoices.map(i => String(i._id)));
-  const scopedPayments = branchId
-    ? payments.filter(p => invoiceIds.has(String(p.invoice)))
-    : payments;
+  const scopedPayments = payments.filter(payment => invoiceIds.has(String(payment.invoice)));
 
   const poQty = summarizePoLines(orders);
   const receivedValue = money(receipts.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.acceptedQty || 0) * Number(i.unitPrice || 0), 0), 0));
@@ -106,7 +121,7 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   }
 
   return {
-    branch: branchId || null,
+    branch: effectiveBranchId ? String(effectiveBranchId) : null,
     from: from || null,
     to: to || null,
     purchaseOrders: {

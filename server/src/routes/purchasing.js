@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {receivePurchaseOrder} from '../services/receiving.js';
+import {receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
 import {returnPurchaseOrder} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
@@ -139,17 +139,24 @@ r.patch('/purchase-orders/:id', auth(['owner', 'manager']), async (req, res) => 
   }
 });
 
+const receiptDateSchema = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expiry date must use YYYY-MM-DD')
+  .refine(value => {
+    const date = new Date(`${value}T00:00:00.000+05:45`);
+    if (Number.isNaN(date.getTime())) return false;
+    return new Date(date.getTime() + 5.75 * 60 * 60 * 1000).toISOString().slice(0, 10) === value;
+  }, 'Invalid expiry date');
 const receiveSchema = z.object({
-  notes: z.string().optional(),
+  notes: z.string().trim().max(1000).optional(),
+  expectedVersion: z.number().int().nonnegative().optional(),
   items: z.array(z.object({
     itemId: z.string(),
-    receivedQty: z.number(),
-    damagedQty: z.number().optional(),
-    unitPrice: z.number().optional(),
-    batchNumber: z.string().optional(),
-    expiryDate: z.string().optional()
-  })).min(1)
-});
+    receivedQty: z.number().positive(),
+    damagedQty: z.number().nonnegative().optional(),
+    batchNumber: z.string().trim().max(120).optional(),
+    expiryDate: receiptDateSchema.optional()
+  }).strict()).min(1).max(100)
+}).strict();
 
 r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
@@ -204,7 +211,15 @@ r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, r
 r.get('/purchase-orders/:id/receipts', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
     const po = await getPurchaseOrder({poId: req.params.id, user: req.user});
-    res.json(await GoodsReceipt.find({purchaseOrder: po._id}).sort({createdAt: -1}).populate('items.ingredient receivedBy'));
+    res.json(await GoodsReceipt.find({
+      restaurant: po.restaurant,
+      branch: po.branch?._id || po.branch,
+      purchaseOrder: po._id
+    })
+      .sort({receivedAt: -1, _id: -1})
+      .limit(500)
+      .populate('items.ingredient', 'name code category unit')
+      .populate('receivedBy', 'name role'));
   } catch (e) {
     fail(res, e);
   }
@@ -212,24 +227,43 @@ r.get('/purchase-orders/:id/receipts', auth(['owner', 'manager', 'staff']), asyn
 
 r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, res) => {
   const session = await mongoose.startSession();
+  let body;
+  let idempotencyKey;
   try {
-    const body = receiveSchema.parse(req.body);
-    const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
+    body = receiveSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
     let result;
-    await session.withTransaction(async () => {
-      result = await receivePurchaseOrder({
-        poId: req.params.id,
-        items: body.items.map(i => ({...i, expiryDate: i.expiryDate ? new Date(i.expiryDate) : undefined})),
-        notes: body.notes,
-        user: req.user,
-        session,
-        idempotencyKey
+    try {
+      await session.withTransaction(async () => {
+        result = await receivePurchaseOrder({
+          poId: req.params.id,
+          items: body.items,
+          notes: body.notes,
+          expectedVersion: body.expectedVersion,
+          user: req.user,
+          session,
+          idempotencyKey
+        });
       });
-    });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = await replayGoodsReceipt({
+          poId: req.params.id,
+          items: body.items,
+          notes: body.notes,
+          user: req.user,
+          idempotencyKey
+        });
+      } else {
+        throw error;
+      }
+    }
     if (!result.duplicate) {
-      publishPurchasingEvent(result.purchaseOrder.branch, {
+      publishPurchasingEvent(result.purchaseOrder.branch?._id || result.purchaseOrder.branch, {
         reason: 'receive',
         poId: String(result.purchaseOrder._id),
+        receiptId: String(result.receipt._id),
+        receiptNo: result.receipt.receiptNo,
         status: result.purchaseOrder.status
       });
     }

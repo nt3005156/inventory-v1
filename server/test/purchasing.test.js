@@ -55,12 +55,14 @@ async function createPo(orderedQty = 1000, extras = {}) {
   return {status: 201, body: approved.body};
 }
 
+let receiptRequestSequence = 0;
 function receive(poId, items, extras = {}) {
+  const key = extras.key === null ? null : (extras.key || `test-gr-${++receiptRequestSequence}`);
   return request('/api/purchase-orders/' + poId + '/receive', {
     method: 'POST',
     token: tokenFor(extras.user || world.manager),
-    headers: extras.key ? {'Idempotency-Key': extras.key} : {},
-    body: {items, notes: extras.notes}
+    headers: key ? {'Idempotency-Key': key} : {},
+    body: {items, notes: extras.notes, expectedVersion: extras.expectedVersion}
   });
 }
 
@@ -338,7 +340,7 @@ describe('GET /api/reports/purchasing', () => {
   it('summarizes POs, receipts, returns, invoices and ledger for one branch', async () => {
     const po = await createPo(1000);
     const line = po.body.items[0];
-    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 400, damagedQty: 50, unitPrice: 0.05}], {key: 'rep-gr'});
+    const rec = await receive(po.body._id, [{itemId: String(line._id), receivedQty: 400, damagedQty: 50}], {key: 'rep-gr'});
     assert.equal(rec.status, 201, rec.body?.message);
     const ret = await postReturn(po.body._id, [{itemId: String(line._id), qty: 100}], {key: 'rep-pr'});
     assert.equal(ret.status, 201, ret.body?.message);
@@ -680,7 +682,6 @@ describe('purchasing E2E workflow', () => {
       itemId: String(line._id),
       receivedQty: 400,
       damagedQty: 50,
-      unitPrice: 0.05,
       batchNumber: 'LOT-E2E',
       expiryDate: '2026-12-31'
     }], {notes: 'First truck', key: 'e2e-gr'});
