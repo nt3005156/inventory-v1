@@ -2,7 +2,8 @@ import {Server} from 'socket.io';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import {assertBranchAccess} from './kitchen.js';
-import {Branch, Order} from '../models/operations.js';
+import {purchaseBranchContext} from './purchaseOrders.js';
+import {Order} from '../models/operations.js';
 
 const KITCHEN_ROLES = ['owner', 'manager', 'staff'];
 export const branchRoom = id => 'branch:' + String(id);
@@ -29,13 +30,7 @@ export async function joinBranch(socket, branchId) {
     err.status = 400;
     throw err;
   }
-  assertBranchAccess(socket.user, branchId);
-  const branch = await Branch.findById(branchId);
-  if (!branch) {
-    const err = new Error('Branch not found');
-    err.status = 404;
-    throw err;
-  }
+  await purchaseBranchContext({user: socket.user, branchId, allowInactive: true});
   for (const room of [...socket.rooms]) {
     if (String(room).startsWith('branch:')) socket.leave(room);
   }
@@ -125,6 +120,14 @@ export function publishTableEvent(branchId, extra = {}) {
 export function publishPurchasingEvent(branchId, extra = {}) {
   if (!branchId) return;
   emitKitchenEvent(branchId, 'purchasing:update', {
+    branch: String(branchId),
+    ...extra
+  });
+}
+
+export function publishInventoryEvent(branchId, extra = {}) {
+  if (!branchId) return;
+  emitKitchenEvent(branchId, 'inventory:update', {
     branch: String(branchId),
     ...extra
   });

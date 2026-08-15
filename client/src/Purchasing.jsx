@@ -396,6 +396,14 @@ export default function Purchasing({call, user, token}) {
       setError('Add at least 3 characters of damage detail when the reason is Other');
       return;
     }
+    if (items.some(item => item.expiryDate && !String(item.batchNumber || '').trim())) {
+      setError('Enter a batch number for every line with an expiry date');
+      return;
+    }
+    if (items.some(item => item.receivedQty > item.damagedQty && item.expiryDate && item.expiryDate < todayKathmandu())) {
+      setError('Expired goods cannot be accepted into usable inventory; record the full quantity as damaged or correct the expiry date');
+      return;
+    }
     const receivedTotal = items.reduce((sum, item) => sum + item.receivedQty, 0);
     const acceptedTotal = items.reduce((sum, item) => sum + item.receivedQty - item.damagedQty, 0);
     if (typeof globalThis.confirm === 'function'
@@ -641,6 +649,8 @@ export default function Purchasing({call, user, token}) {
         || receivedQty > remaining(item)
         || (damagedQty > 0 && !row.damageReason)
         || (row.damageReason === 'other' && String(row.damageNotes || '').trim().length < 3)
+        || (row.expiryDate && !String(row.batchNumber || '').trim())
+        || (receivedQty > damagedQty && row.expiryDate && row.expiryDate < todayKathmandu())
     };
   }, {lineCount: 0, receivedQty: 0, damagedQty: 0, acceptedQty: 0, acceptedValue: 0, invalid: false});
   const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
@@ -904,7 +914,7 @@ export default function Purchasing({call, user, token}) {
             <span><small>Damaged</small><strong>{receiptDraft.damagedQty}</strong></span>
             <span><small>Stock value</small><strong>{rs(receiptDraft.acceptedValue)}</strong></span>
           </div>
-          {receiptDraft.invalid && <p className="danger" role="alert">Check remaining quantities and document every damaged quantity with a reason. Other reasons also require details.</p>}
+          {receiptDraft.invalid && <p className="danger" role="alert">Check remaining quantities, damage evidence, and batch/expiry details. Expired goods cannot enter usable stock, and every expiry needs a batch number.</p>}
           <input className="receive-notes" maxLength="1000" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Receiving notes (delivery reference, discrepancy, or handover details)"/>
           <button className="receive receipt-post" disabled={!!busy || !receiptDraft.lineCount || receiptDraft.invalid} onClick={() => receive(open)}>{busy === open._id ? 'Posting receipt…' : 'Review and post receipt'}</button>
           </>}

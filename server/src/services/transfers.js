@@ -1,8 +1,10 @@
 import mongoose from 'mongoose';
 import {Audit, Ingredient} from '../models/index.js';
 import {Branch, InventoryBalance, InventoryTransaction, StockTransfer} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
 import {moveStock} from './inventoryLedger.js';
+import {incomingBatchesFromMovements} from './inventoryBatches.js';
+import {purchaseBranchContext} from './purchaseOrders.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
   const err = new Error(message);
@@ -41,12 +43,16 @@ export function resolveTransferBranch(user, branchId) {
   return null;
 }
 
-async function sourceUnitCost(transfer, session) {
-  const outTx = await InventoryTransaction.findOne({
+async function sourceMovement(transfer, session) {
+  return InventoryTransaction.findOne({
     referenceType: 'transfer',
     referenceId: transfer._id,
     type: 'TRANSFER_OUT'
   }).session(session || null);
+}
+
+async function sourceUnitCost(transfer, session) {
+  const outTx = await sourceMovement(transfer, session);
   if (outTx) return Number(outTx.unitCost || 0);
   const source = await InventoryBalance.findOne({
     branch: transfer.fromBranch,
@@ -56,12 +62,16 @@ async function sourceUnitCost(transfer, session) {
 }
 
 export async function listTransfers({branchId, user}) {
-  const branch = resolveTransferBranch(user, branchId);
+  const identity = await userRestaurantContext(user);
+  const branch = resolveTransferBranch({...user, role: identity.role, branch: identity.branchId}, branchId);
+  let branchIds;
   if (branch) {
-    if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branch);
+    const context = await purchaseBranchContext({user, branchId: branch, allowInactive: true});
+    branchIds = [context.branch._id];
+  } else {
+    branchIds = await Branch.find({restaurant: identity.restaurantId}).distinct('_id');
   }
-  return StockTransfer.find(transferFilter(branch))
+  return StockTransfer.find({$or: [{fromBranch: {$in: branchIds}}, {toBranch: {$in: branchIds}}]})
     .populate(TRANSFER_POPULATE)
     .sort({createdAt: -1});
 }
@@ -74,14 +84,12 @@ export async function createTransfer({fromBranch, toBranch, ingredient, qty, uni
   if (!mongoose.isValidObjectId(ingredient)) throw httpError('Invalid ingredient', 400);
   const amount = Number(qty);
   if (!(amount > 0)) throw httpError('Quantity must be positive', 400);
-  assertBranchAccess(user, fromBranch);
-
-  const [source, dest, item] = await Promise.all([
-    Branch.findById(fromBranch),
-    Branch.findById(toBranch),
-    Ingredient.findById(ingredient)
+  const context = await purchaseBranchContext({user, branchId: fromBranch, allowInactive: true});
+  const [dest, item] = await Promise.all([
+    Branch.findOne({_id: toBranch, restaurant: context.restaurantId}),
+    Ingredient.findOne({_id: ingredient, restaurant: context.restaurantId})
   ]);
-  if (!source || !dest) throw httpError('Branch not found', 404);
+  if (!dest) throw httpError('Destination branch not found', 404);
   if (!item) throw httpError('Ingredient not found', 404);
 
   const saved = await StockTransfer.create({
@@ -107,7 +115,13 @@ export async function transitionTransfer({transferId, status, user, session}) {
   }
 
   const accessBranch = status === 'received' ? transfer.toBranch : transfer.fromBranch;
-  assertBranchAccess(user, accessBranch);
+  const context = await purchaseBranchContext({user, branchId: accessBranch, session, allowInactive: true});
+  const [sourceBranch, destinationBranch, ingredient] = await Promise.all([
+    Branch.exists({_id: transfer.fromBranch, restaurant: context.restaurantId}).session(session || null),
+    Branch.exists({_id: transfer.toBranch, restaurant: context.restaurantId}).session(session || null),
+    Ingredient.exists({_id: transfer.ingredient, restaurant: context.restaurantId}).session(session || null)
+  ]);
+  if (!sourceBranch || !destinationBranch || !ingredient) throw httpError('Transfer references do not belong to the user restaurant', 409);
 
   if (status === 'in_transit') {
     const unitCost = await sourceUnitCost(transfer, session);
@@ -127,7 +141,15 @@ export async function transitionTransfer({transferId, status, user, session}) {
   }
 
   if (status === 'received') {
-    const unitCost = await sourceUnitCost(transfer, session);
+    const outTx = await sourceMovement(transfer, session);
+    if (!outTx) throw httpError('Transfer source movement is unavailable', 409);
+    const unitCost = Number(outTx.unitCost || 0);
+    const incomingBatches = incomingBatchesFromMovements(outTx.batchMovements, {
+      sourceType: 'transfer',
+      sourceId: transfer._id,
+      unitCost,
+      receivedAt: new Date()
+    });
     await moveStock({
       branch: transfer.toBranch,
       ingredient: transfer.ingredient,
@@ -139,7 +161,8 @@ export async function transitionTransfer({transferId, status, user, session}) {
       referenceType: 'transfer',
       referenceId: transfer._id,
       user: user.id,
-      idempotencyKey: `transfer-in:${transfer._id}`
+      idempotencyKey: `transfer-in:${transfer._id}`,
+      incomingBatches
     }, session);
   }
 

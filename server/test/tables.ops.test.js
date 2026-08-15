@@ -169,6 +169,11 @@ describe('POST /api/tables/:id/merge', () => {
     assert.ok(surviving.total > dest.body.total);
     assert.equal(Number(surviving.dueAmount.toFixed(2)), Number((surviving.total - 50).toFixed(2)));
     assert.equal(surviving.inventoryDeducted, true);
+    assert.equal(surviving.inventorySourceOrders.length, 2);
+    assert.deepEqual(
+      surviving.inventorySourceOrders.map(String).sort(),
+      [source.body._id, dest.body._id].map(String).sort()
+    );
     assert.equal(surviving.status, 'pending');
     assert.equal(closed.status, 'cancelled');
     assert.equal(closed.inventoryReversed, true);

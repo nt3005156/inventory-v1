@@ -109,7 +109,8 @@ export async function splitOrder({orderId, items, user, session}) {
         unitPrice: line.unitPrice,
         foodCost: line.foodCost,
         notes: line.notes,
-        modifiers: line.modifiers
+        modifiers: line.modifiers,
+        inventoryRequirements: line.inventoryRequirements
       });
       line.qty = money(line.qty - take);
     }
@@ -144,6 +145,10 @@ export async function splitOrder({orderId, items, user, session}) {
     paidAmount: 0,
     inventoryDeducted: parent.inventoryDeducted,
     inventoryReversed: false,
+    inventorySourceOrder: parent.inventorySourceOrder || parent._id,
+    inventorySourceOrders: parent.inventorySourceOrders?.length
+      ? parent.inventorySourceOrders
+      : [parent.inventorySourceOrder || parent._id],
     createdBy: user.id
   });
   recountOrder(child);

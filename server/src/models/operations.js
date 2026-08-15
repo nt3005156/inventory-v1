@@ -3,12 +3,46 @@ const {Schema,model}=mongoose;
 const n={type:Number,default:0}; const oid={type:Schema.Types.ObjectId};
 export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},phone:String,address:String},{timestamps:true}));
 export const Branch=model('Branch',new Schema({restaurant:{...oid,ref:'Restaurant',index:true},name:{type:String,required:true},code:{type:String,uppercase:true},address:String,phone:String,active:{type:Boolean,default:true}},{timestamps:true}));
-export const InventoryBalance=model('InventoryBalance',new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},quantity:n,reserved:n,averageCost:n,minLevel:n,reorderLevel:n,maxLevel:n,storageLocation:{type:String,default:'Main Store'},expiryDate:Date,batchNumber:String},{timestamps:true}));
+export const InventoryBalance=model('InventoryBalance',new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},quantity:n,reserved:n,averageCost:n,minLevel:n,reorderLevel:n,maxLevel:n,storageLocation:{type:String,default:'Main Store'}},{timestamps:true}));
 InventoryBalance.schema.index({branch:1,ingredient:1,storageLocation:1},{unique:true});
-export const InventoryTransaction=model('InventoryTransaction',new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},type:{type:String,enum:['OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','RECIPE_REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT','RETURN'],required:true},previousQty:n,changeQty:n,newQty:n,unit:String,unitCost:n,totalCost:n,reason:String,referenceType:String,referenceId:oid,user:{...oid,ref:'User'},idempotencyKey:{type:String,sparse:true,unique:true}},{timestamps:true}));
+const inventoryBatchSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,immutable:true,index:true},
+  branch:{...oid,ref:'Branch',required:true,immutable:true,index:true},
+  ingredient:{...oid,ref:'Ingredient',required:true,immutable:true,index:true},
+  lotKey:{type:String,required:true,trim:true,maxlength:300,immutable:true},
+  batchNumber:{type:String,trim:true,maxlength:120,immutable:true},
+  batchNumberNormalized:{type:String,trim:true,maxlength:120,immutable:true},
+  expiryDate:{type:Date,immutable:true},
+  receivedAt:{type:Date,default:Date.now,required:true,immutable:true},
+  sourceType:{type:String,enum:['goods_receipt','transfer','adjustment','opening','reversal','legacy','untracked'],required:true,immutable:true},
+  sourceId:{...oid,immutable:true},
+  sourceLine:{...oid,immutable:true},
+  supplier:{...oid,ref:'Supplier',immutable:true},
+  unit:{type:String,trim:true,maxlength:30,immutable:true},
+  unitCost:{type:Number,default:0,min:0},
+  initialQuantity:{type:Number,default:0,min:0},
+  quantity:{type:Number,default:0,min:0}
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+inventoryBatchSchema.index({restaurant:1,branch:1,ingredient:1,lotKey:1},{unique:true,name:'inventory_batch_lot_key'});
+inventoryBatchSchema.index({restaurant:1,branch:1,expiryDate:1,quantity:1},{name:'inventory_batch_expiry_quantity'});
+inventoryBatchSchema.index({restaurant:1,branch:1,ingredient:1,batchNumberNormalized:1,quantity:1},{name:'inventory_batch_lookup'});
+export const InventoryBatch=model('InventoryBatch',inventoryBatchSchema);
+const inventoryBatchMovementSchema=new Schema({
+  batch:{...oid,ref:'InventoryBatch',required:true,immutable:true},
+  batchNumber:{type:String,trim:true,maxlength:120,immutable:true},
+  expiryDate:{type:Date,immutable:true},
+  previousQty:{type:Number,required:true,immutable:true},
+  changeQty:{type:Number,required:true,immutable:true},
+  newQty:{type:Number,required:true,immutable:true},
+  unitCost:{type:Number,default:0,min:0,immutable:true}
+},{_id:false});
+const inventoryTransactionSchema=new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},type:{type:String,enum:['OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','RECIPE_REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT','RETURN'],required:true},previousQty:n,changeQty:n,newQty:n,unit:String,unitCost:n,totalCost:n,reason:String,referenceType:String,referenceId:oid,user:{...oid,ref:'User'},batchMovements:{type:[inventoryBatchMovementSchema],default:undefined,immutable:true},idempotencyKey:{type:String,trim:true},idempotencyHash:{type:String,trim:true,immutable:true}},{timestamps:true});
+inventoryTransactionSchema.index({branch:1,idempotencyKey:1},{unique:true,partialFilterExpression:{idempotencyKey:{$type:'string'}},name:'inventory_transaction_branch_idempotency'});
+export const InventoryTransaction=model('InventoryTransaction',inventoryTransactionSchema);
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
 export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));
-export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,foodCost:n,notes:String,modifiers:[{name:String,price:n}]}],subtotal:n,discount:n,vatRate:{type:Number,default:13},vat:n,serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
+export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,foodCost:n,notes:String,modifiers:[{name:String,price:n}],inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],subtotal:n,discount:n,vatRate:{type:Number,default:13},vat:n,serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
+Order.schema.index({inventorySourceOrders:1},{name:'order_inventory_source_orders'});
 export const Payment=model('Payment',new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded'],default:'paid'},cashier:{...oid,ref:'User'}},{timestamps:true}));
 const purchaseOrderLineSchema=new Schema({
   ingredient:{...oid,ref:'Ingredient',required:true,immutable:true},

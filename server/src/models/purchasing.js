@@ -46,6 +46,9 @@ receiptLineSchema.pre('validate', function validateReceiptLine() {
   if (this.damageReason === 'other' && String(this.damageNotes || '').trim().length < 3) {
     this.invalidate('damageNotes', 'Damage notes are required when the reason is other');
   }
+  if (this.expiryDate && !String(this.batchNumber || '').trim()) {
+    this.invalidate('batchNumber', 'Batch number is required when an expiry date is recorded');
+  }
 });
 
 const goodsReceiptSchema = new Schema({

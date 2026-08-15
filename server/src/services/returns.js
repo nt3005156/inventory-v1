@@ -73,7 +73,9 @@ export async function returnPurchaseOrder({poId, items, reason, notes, user, ses
       referenceType: 'purchase_return',
       referenceId: purchaseReturn._id,
       user: user.id,
-      idempotencyKey: `return:${purchaseReturn._id}:${p.line._id}`
+      idempotencyKey: `return:${purchaseReturn._id}:${p.line._id}`,
+      batchNumber: p.row.batchNumber || undefined,
+      allowExpired: true
     }, session);
   }
 

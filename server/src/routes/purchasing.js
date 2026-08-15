@@ -26,7 +26,7 @@ import {
   transitionPurchaseOrder,
   updatePurchaseOrder
 } from '../services/purchaseOrders.js';
-import {publishPurchasingEvent} from '../services/realtime.js';
+import {publishPurchasingEvent, publishInventoryEvent} from '../services/realtime.js';
 import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
 
 const r = Router();
@@ -165,6 +165,9 @@ const receiveSchema = z.object({
     }
     if (value.damageReason === 'other' && String(value.damageNotes || '').trim().length < 3) {
       ctx.addIssue({code: z.ZodIssueCode.custom, path: ['damageNotes'], message: 'Damage notes are required when the reason is other'});
+    }
+    if (value.expiryDate && !String(value.batchNumber || '').trim()) {
+      ctx.addIssue({code: z.ZodIssueCode.custom, path: ['batchNumber'], message: 'Batch number is required when an expiry date is recorded'});
     }
   })).min(1).max(100)
 }).strict();
@@ -325,7 +328,8 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
       }
     }
     if (!result.duplicate) {
-      publishPurchasingEvent(result.purchaseOrder.branch?._id || result.purchaseOrder.branch, {
+      const receivingBranch = result.purchaseOrder.branch?._id || result.purchaseOrder.branch;
+      publishPurchasingEvent(receivingBranch, {
         reason: 'receive',
         poId: String(result.purchaseOrder._id),
         receiptId: String(result.receipt._id),
@@ -334,6 +338,11 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
         hasDamage: Number(result.receipt.damagedValue || 0) > 0,
         acceptedValue: result.receipt.acceptedValue,
         damagedValue: result.receipt.damagedValue
+      });
+      publishInventoryEvent(receivingBranch, {
+        reason: 'receive',
+        poId: String(result.purchaseOrder._id),
+        receiptId: String(result.receipt._id)
       });
     }
     res.status(result.duplicate ? 200 : 201).json(result);
@@ -383,6 +392,10 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
     });
     if (!result.duplicate) {
       publishPurchasingEvent(result.purchaseOrder.branch, {
+        reason: 'return',
+        poId: String(result.purchaseOrder._id)
+      });
+      publishInventoryEvent(result.purchaseOrder.branch, {
         reason: 'return',
         poId: String(result.purchaseOrder._id)
       });

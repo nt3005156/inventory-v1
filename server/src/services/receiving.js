@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import {Audit, Ingredient, Supplier} from '../models/index.js';
-import {InventoryBalance, PurchaseOrder} from '../models/operations.js';
+import {PurchaseOrder} from '../models/operations.js';
 import {GoodsReceipt, GoodsReceiptCounter} from '../models/purchasing.js';
 import {canReceivePo, purchaseBranchContext} from './purchaseOrders.js';
 import {moveStock} from './inventoryLedger.js';
+import {canonicalExpiryDate as inventoryExpiryDate, kathmanduDateString} from './inventoryBatches.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
@@ -89,12 +90,21 @@ function validateLine(line, row) {
   if (received > remaining) throw httpError('Received quantity exceeds remaining ordered quantity', 409);
   const unitCost = Number(line.unitPrice);
   if (!Number.isFinite(unitCost) || unitCost < 0) throw httpError('Purchase order line has an invalid unit cost', 409);
+  const accepted = acceptedQty(received, damaged);
+  const batchNumber = clean(row.batchNumber);
+  const expiryDate = row.expiryDate ? inventoryExpiryDate(row.expiryDate) : null;
+  if (expiryDate && !batchNumber) throw httpError('Batch number is required when an expiry date is recorded', 400);
+  if (accepted > 0 && expiryDate && expiryDate.toISOString().slice(0, 10) < kathmanduDateString()) {
+    throw httpError('Expired goods cannot be accepted into usable inventory', 409);
+  }
   return {
     received,
     damaged,
-    accepted: acceptedQty(received, damaged),
+    accepted,
     remaining,
     unitCost,
+    batchNumber: batchNumber || undefined,
+    expiryDate: expiryDate || undefined,
     damageReason: damaged > 0 ? damageReason : undefined,
     damageDisposition: damaged > 0 ? DAMAGE_DISPOSITION : undefined,
     damageNotes: damaged > 0 && damageNotes ? damageNotes : undefined
@@ -243,8 +253,8 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
       damageNotes: item.damageNotes,
       unit: item.line.unit,
       unitPrice: item.unitCost,
-      batchNumber: clean(item.row.batchNumber) || undefined,
-      expiryDate: item.row.expiryDate || undefined
+      batchNumber: item.batchNumber,
+      expiryDate: item.expiryDate
     }))
   }], {session: session || undefined}))[0];
 
@@ -263,16 +273,19 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
         referenceType: 'goods_receipt',
         referenceId: receipt._id,
         user: context.userId,
-        idempotencyKey: `receipt:${receipt._id}:${item.line._id}`
+        idempotencyKey: `receipt:${receipt._id}:${item.line._id}`,
+        incomingBatches: [{
+          quantity: item.accepted,
+          batchNumber: item.batchNumber,
+          expiryDate: item.expiryDate,
+          unitCost: item.unitCost,
+          sourceType: 'goods_receipt',
+          sourceId: receipt._id,
+          sourceLine: item.line._id,
+          supplier: po.supplier,
+          receivedAt
+        }]
       }, session);
-      if (item.row.batchNumber || item.row.expiryDate) {
-        const balance = await InventoryBalance.findOne({branch: po.branch, ingredient: item.line.ingredient}).session(session || null);
-        if (balance) {
-          if (item.row.batchNumber) balance.batchNumber = clean(item.row.batchNumber);
-          if (item.row.expiryDate) balance.expiryDate = item.row.expiryDate;
-          await balance.save({session: session || undefined});
-        }
-      }
     }
   }
 
@@ -310,6 +323,8 @@ export async function receivePurchaseOrder({poId, items, notes, expectedVersion,
         damageReason: item.damageReason,
         damageDisposition: item.damageDisposition,
         damageNotes: item.damageNotes,
+        batchNumber: item.batchNumber,
+        expiryDate: item.expiryDate,
         receivedQty: Number(item.line.receivedQty || 0),
         damagedQty: Number(item.line.damagedQty || 0),
         remainingQty: remainingQty(item.line)

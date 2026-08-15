@@ -147,6 +147,21 @@ export async function applyTableStatus(table, status, user, session) {
   return table;
 }
 
+function copyInventoryRequirements(line) {
+  return (line.inventoryRequirements || []).map(requirement => ({
+    ingredient: requirement.ingredient,
+    qty: requirement.qty,
+    unit: requirement.unit
+  }));
+}
+
+function requirementSignature(line) {
+  return copyInventoryRequirements(line)
+    .map(requirement => `${requirement.ingredient}:${Number(requirement.qty || 0)}:${requirement.unit || ''}`)
+    .sort()
+    .join('|');
+}
+
 export function combineItems(destItems = [], sourceItems = []) {
   const list = destItems.map(i => ({
     menuItem: i.menuItem,
@@ -155,10 +170,14 @@ export function combineItems(destItems = [], sourceItems = []) {
     unitPrice: i.unitPrice,
     foodCost: i.foodCost,
     notes: i.notes,
-    modifiers: i.modifiers
+    modifiers: i.modifiers,
+    inventoryRequirements: copyInventoryRequirements(i)
   }));
   for (const line of sourceItems) {
-    const match = list.find(i => String(i.menuItem) === String(line.menuItem));
+    const signature = requirementSignature(line);
+    const match = list.find(i =>
+      String(i.menuItem) === String(line.menuItem) && requirementSignature(i) === signature
+    );
     if (match) {
       match.qty += line.qty;
       if (line.notes && line.notes !== match.notes) {
@@ -172,7 +191,8 @@ export function combineItems(destItems = [], sourceItems = []) {
         unitPrice: line.unitPrice,
         foodCost: line.foodCost,
         notes: line.notes,
-        modifiers: line.modifiers
+        modifiers: line.modifiers,
+        inventoryRequirements: copyInventoryRequirements(line)
       });
     }
   }
@@ -241,6 +261,17 @@ export async function mergeTableOrders({fromTableId, intoTableId, user, session}
   if (!dest) throw httpError('Destination table has no open order to merge into', 409);
 
   dest.items = combineItems(dest.items, source.items);
+  const inventorySources = [
+    ...(dest.inventorySourceOrders?.length
+      ? dest.inventorySourceOrders
+      : [dest.inventorySourceOrder || dest._id]),
+    ...(source.inventorySourceOrders?.length
+      ? source.inventorySourceOrders
+      : [source.inventorySourceOrder || source._id])
+  ];
+  dest.inventorySourceOrders = [...new Map(
+    inventorySources.map(sourceId => [String(sourceId), sourceId])
+  ).values()];
   dest.discount = Number(dest.discount || 0) + Number(source.discount || 0);
   dest.serviceCharge = Number(dest.serviceCharge || 0) + Number(source.serviceCharge || 0);
   dest.deliveryFee = Number(dest.deliveryFee || 0) + Number(source.deliveryFee || 0);

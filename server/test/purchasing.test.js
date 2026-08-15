@@ -2,7 +2,7 @@ import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
 import {Audit, Supplier, User} from '../src/models/index.js';
-import {InventoryBalance, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
+import {InventoryBalance, InventoryBatch, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {acceptedQty, remainingQty} from '../src/services/receiving.js';
 import {canReceivePo, canTransitionPo} from '../src/services/purchaseOrders.js';
@@ -106,7 +106,15 @@ describe('POST /api/purchase-orders/:id/receive', () => {
     assert.equal(res.body.receipt.notes, 'First truck');
     const after = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
     assert.equal(after.quantity, before.quantity + 350);
-    assert.equal(after.batchNumber, 'LOT-A');
+    assert.equal(after.batchNumber, undefined);
+    const lot = await InventoryBatch.findOne({
+      branch: world.branchA._id,
+      ingredient: world.ingredient._id,
+      batchNumberNormalized: 'LOT-A'
+    });
+    assert.ok(lot);
+    assert.equal(lot.quantity, 350);
+    assert.equal(lot.expiryDate.toISOString().slice(0, 10), '2026-12-31');
     const txs = await InventoryTransaction.find({type: 'PURCHASE', referenceType: 'goods_receipt'});
     assert.equal(txs.length, 1);
     assert.equal(txs[0].changeQty, 350);
