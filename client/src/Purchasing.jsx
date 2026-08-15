@@ -5,6 +5,7 @@ const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFraction
 const remaining = line => Math.max(0, Number(line.orderedQty || 0) - Number(line.receivedQty || 0));
 const accepted = line => Math.max(0, Number(line.receivedQty || 0) - Number(line.damagedQty || 0));
 const returnable = line => Math.max(0, accepted(line) - Number(line.returnedQty || 0));
+const returnLotKey = (poItem, batchId) => `${poItem}:${batchId}`;
 const ymd = d => {
   if (!d) return '';
   const parts = new Intl.DateTimeFormat('en', {
@@ -49,6 +50,8 @@ export default function Purchasing({call, user, token}) {
   const [invoices, setInvoices] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [returns, setReturns] = useState([]);
+  const [returnOptions, setReturnOptions] = useState({items: [], summary: {returnableQty: 0, availableQty: 0, legacyLines: 0}});
+  const [returnOptionsLoading, setReturnOptionsLoading] = useState(false);
   const [approvalHistory, setApprovalHistory] = useState([]);
   const [approvalAction, setApprovalAction] = useState(null);
   const [shortCloseAction, setShortCloseAction] = useState(null);
@@ -68,6 +71,7 @@ export default function Purchasing({call, user, token}) {
   const [editingPoId, setEditingPoId] = useState('');
   const createRequestKey = useRef(requestKey());
   const receiptRequestKey = useRef(requestKey());
+  const returnRequestKey = useRef(requestKey());
   const [success, setSuccess] = useState('');
   const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
   const [statementId, setStatementId] = useState('');
@@ -157,6 +161,8 @@ export default function Purchasing({call, user, token}) {
     setOpenId('');
     setReceipts([]);
     setReturns([]);
+    setReturnOptions({items: [], summary: {returnableQty: 0, availableQty: 0, legacyLines: 0}});
+    setReturnOptionsLoading(false);
     setApprovalHistory([]);
     setApprovalAction(null);
     setStatement(null);
@@ -180,17 +186,22 @@ export default function Purchasing({call, user, token}) {
 
   const refreshOpenHistory = async id => {
     if (!id) return;
+    setReturnOptionsLoading(true);
     try {
-      const [r, ret, approvals] = await Promise.all([
+      const [r, ret, approvals, options] = await Promise.all([
         call('/purchase-orders/' + id + '/receipts'),
         call('/purchase-orders/' + id + '/returns'),
-        call('/purchase-orders/' + id + '/approval-history')
+        call('/purchase-orders/' + id + '/approval-history'),
+        call('/purchase-orders/' + id + '/return-options')
       ]);
       setReceipts(r);
       setReturns(ret);
       setApprovalHistory(approvals);
+      setReturnOptions(options);
     } catch {
       /* list reload still ran */
+    } finally {
+      setReturnOptionsLoading(false);
     }
   };
 
@@ -257,21 +268,28 @@ export default function Purchasing({call, user, token}) {
     }])));
     setReturnNotes('');
     setReason('quality');
-    setRetLines(Object.fromEntries((order.items || []).map(i => [i._id, {qty: 0, batchNumber: ''}])));
+    setRetLines({});
+    returnRequestKey.current = requestKey();
+    setReturnOptionsLoading(true);
     try {
-      const [r, ret, approvals] = await Promise.all([
+      const [r, ret, approvals, options] = await Promise.all([
         call('/purchase-orders/' + order._id + '/receipts'),
         call('/purchase-orders/' + order._id + '/returns'),
-        call('/purchase-orders/' + order._id + '/approval-history')
+        call('/purchase-orders/' + order._id + '/approval-history'),
+        call('/purchase-orders/' + order._id + '/return-options')
       ]);
       setReceipts(r);
       setReturns(ret);
       setApprovalHistory(approvals);
+      setReturnOptions(options);
     } catch (e) {
       setReceipts([]);
       setReturns([]);
+      setReturnOptions({items: [], summary: {returnableQty: 0, availableQty: 0, legacyLines: 0}});
       setApprovalHistory([]);
       setError(e.message);
+    } finally {
+      setReturnOptionsLoading(false);
     }
   };
 
@@ -430,23 +448,55 @@ export default function Purchasing({call, user, token}) {
   };
 
   const postReturn = async order => {
-    const items = (order.items || []).map(i => {
-      const row = retLines[i._id] || {};
-      return {itemId: i._id, qty: Number(row.qty || 0), unitPrice: i.unitPrice, batchNumber: row.batchNumber || undefined};
-    }).filter(x => x.qty > 0);
-    if (!items.length) return;
+    const items = (returnOptions.items || []).flatMap(option => (option.batches || []).map(batch => ({
+      itemId: option.poItem,
+      batchId: batch.batchId,
+      qty: Number(retLines[returnLotKey(option.poItem, batch.batchId)] || 0),
+      availableQty: Number(batch.availableQty || 0)
+    }))).filter(item => item.qty > 0);
+    if (!items.length) {
+      setError('Enter a return quantity for at least one available batch');
+      return;
+    }
+    if (items.some(item => !Number.isFinite(item.qty) || item.qty > item.availableQty)) {
+      setError('A return quantity exceeds the currently available quantity in its batch');
+      return;
+    }
+    const excessiveLine = (returnOptions.items || []).find(option => items
+      .filter(item => String(item.itemId) === String(option.poItem))
+      .reduce((sum, item) => sum + item.qty, 0) > Number(option.returnableQty || 0));
+    if (excessiveLine) {
+      setError('A return quantity exceeds the accepted stock remaining on its purchase order line');
+      return;
+    }
+    if (reason === 'other' && returnNotes.trim().length < 3) {
+      setError('Add at least 3 characters of return detail when the reason is Other');
+      return;
+    }
+    const quantity = items.reduce((sum, item) => sum + item.qty, 0);
+    if (typeof globalThis.confirm === 'function'
+      && !globalThis.confirm(`Post this supplier return? ${quantity} units will be removed from the selected stock batches. This movement cannot be edited.`)) return;
     setBusy('ret-' + order._id);
     setError('');
+    setSuccess('');
     try {
-      await call('/purchase-orders/' + order._id + '/returns', {
+      const result = await call('/purchase-orders/' + order._id + '/returns', {
         method: 'POST',
-        headers: {'Idempotency-Key': 'ret-' + order._id + '-' + Date.now()},
-        body: JSON.stringify({items, reason, notes: returnNotes})
+        headers: {'Idempotency-Key': returnRequestKey.current},
+        body: JSON.stringify({
+          items: items.map(({itemId, batchId, qty}) => ({itemId, batchId, qty})),
+          reason,
+          notes: returnNotes.trim() || undefined,
+          expectedVersion: order.__v
+        })
       });
       setReturnNotes('');
+      setRetLines({});
+      returnRequestKey.current = requestKey();
       await load();
       const fresh = await call('/purchase-orders/' + order._id);
       await openReceive(fresh);
+      setSuccess(`${result.purchaseReturn.returnNo} ${result.duplicate ? 'was already posted; no stock was removed again' : 'posted successfully'} for ${rs(result.purchaseReturn.total)} including VAT.`);
     } catch (e) {
       setError(e.message || 'Return failed');
     } finally {
@@ -653,6 +703,25 @@ export default function Purchasing({call, user, token}) {
         || (receivedQty > damagedQty && row.expiryDate && row.expiryDate < todayKathmandu())
     };
   }, {lineCount: 0, receivedQty: 0, damagedQty: 0, acceptedQty: 0, acceptedValue: 0, invalid: false});
+  const returnDraft = (returnOptions.items || []).reduce((summary, option) => {
+    const poLine = (open?.items || []).find(item => String(item._id) === String(option.poItem));
+    const selected = (option.batches || []).reduce((lineSummary, batch) => {
+      const qty = Number(retLines[returnLotKey(option.poItem, batch.batchId)] || 0);
+      return {
+        qty: lineSummary.qty + Math.max(0, qty),
+        invalid: lineSummary.invalid || !Number.isFinite(qty) || qty < 0 || qty > Number(batch.availableQty || 0)
+      };
+    }, {qty: 0, invalid: false});
+    const subtotal = selected.qty * Number(poLine?.unitPrice || 0);
+    const vatRate = Number(poLine?.vatRate ?? 13);
+    return {
+      lineCount: summary.lineCount + (selected.qty > 0 ? 1 : 0),
+      qty: summary.qty + selected.qty,
+      subtotal: summary.subtotal + subtotal,
+      vat: summary.vat + subtotal * vatRate / 100,
+      invalid: summary.invalid || selected.invalid || selected.qty > Number(option.returnableQty || 0)
+    };
+  }, {lineCount: 0, qty: 0, subtotal: 0, vat: 0, invalid: false});
   const catalogReady = Boolean(form.supplier) && catalogLoadedFor === form.supplier && !catalogLoading;
   const activeCatalog = catalog.filter(item => item.active);
   const supplierUsesCatalog = catalogReady && catalog.length > 0;
@@ -920,48 +989,65 @@ export default function Purchasing({call, user, token}) {
           </>}
 
           {canManagePurchasing && (open.items || []).some(i => returnable(i) > 0) && open.status !== 'cancelled' && (
-            <div>
+            <div className="purchase-return-box">
               <h3>Return to supplier</h3>
-              <p>Returnable is accepted stock still on this PO (received − damaged − already returned). This deducts usable inventory.</p>
-              <table>
-                <thead><tr><th>Ingredient</th><th>Accepted</th><th>Already returned</th><th>Returnable</th><th>Return now</th><th>Batch</th></tr></thead>
-                <tbody>
-                  {(open.items || []).map(i => {
-                    const row = retLines[i._id] || {qty: 0};
-                    return (
-                      <tr key={'ret-' + i._id}>
-                        <td>{i.ingredient?.name || 'Ingredient'}</td>
-                        <td>{accepted(i)}</td>
-                        <td>{i.returnedQty || 0}</td>
-                        <td>{returnable(i)}</td>
-                        <td><input type="number" min="0" max={returnable(i)} value={row.qty} onChange={e => setRetLines(s => ({...s, [i._id]: {...row, qty: e.target.value}}))}/></td>
-                        <td><input value={row.batchNumber || ''} onChange={e => setRetLines(s => ({...s, [i._id]: {...row, batchNumber: e.target.value}}))} placeholder="Batch"/></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              <select className="receive-notes" value={reason} onChange={e => setReason(e.target.value)}>
-                {['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'].map(x => <option key={x} value={x}>{x.replace('_', ' ')}</option>)}
-              </select>
-              <input className="receive-notes" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} placeholder="Return notes"/>
-              <button className="receive" disabled={!!busy} onClick={() => postReturn(open)}>{String(busy).startsWith('ret-') ? 'Posting…' : 'Post return'}</button>
+              <p>Select the exact received stock lot being sent back. The server uses the original PO price and VAT for the supplier credit, while inventory is removed at the recorded lot cost.</p>
+              {returnOptionsLoading && <p className="empty">Loading currently returnable stock lots…</p>}
+              {!returnOptionsLoading && Number(returnOptions.summary?.legacyLines || 0) > 0 && <p className="po-short-close-note">Some older receipts predate durable receipt-lot links. Those rows are clearly recorded as legacy allocations and never presented as exact receipt provenance.</p>}
+              {!returnOptionsLoading && !(Number(returnOptions.summary?.availableQty || 0) > 0) && <p className="danger" role="alert">This PO has accepted quantity left, but none remains in eligible on-hand lots. Stock already sold, wasted, transferred, adjusted, or returned cannot be sent back again.</p>}
+              {!returnOptionsLoading && Number(returnOptions.summary?.availableQty || 0) > 0 && <>
+                <table className="return-entry-table">
+                  <thead><tr><th>Ingredient</th><th>PO returnable</th><th>Lot available</th><th>Return now</th><th>Batch / receipt</th><th>Expiry</th><th>Evidence</th><th>Supplier cost</th></tr></thead>
+                  <tbody>
+                    {(returnOptions.items || []).filter(option => Number(option.returnableQty || 0) > 0).flatMap(option => {
+                      const poLine = (open.items || []).find(item => String(item._id) === String(option.poItem));
+                      if (!(option.batches || []).length) return [<tr key={'ret-empty-' + option.poItem}>
+                        <td>{poLine?.ingredient?.name || 'Ingredient'}</td><td>{option.returnableQty} {poLine?.unit}</td><td colSpan="6">No eligible on-hand lot remains</td>
+                      </tr>];
+                      return option.batches.map(batch => <tr key={'ret-batch-' + batch.batchId}>
+                        <td>{poLine?.ingredient?.name || 'Ingredient'}<small>{poLine?.ingredient?.code || poLine?.unit}</small></td>
+                        <td>{option.returnableQty} {poLine?.unit}</td>
+                        <td>{batch.availableQty} {batch.unit || poLine?.unit}</td>
+                        <td><input aria-label={`Return ${poLine?.ingredient?.name || 'ingredient'} from ${batch.batchNumber || batch.batchId}`} type="number" min="0" max={Math.min(Number(option.returnableQty || 0), Number(batch.availableQty || 0))} value={retLines[returnLotKey(option.poItem, batch.batchId)] || ''} onChange={e => setRetLines(current => ({...current, [returnLotKey(option.poItem, batch.batchId)]: e.target.value}))} placeholder="0"/></td>
+                        <td><strong>{batch.batchNumber || 'Unnumbered lot'}</strong><small>{batch.receiptNo || `Lot ${String(batch.batchId).slice(-6)}`}</small></td>
+                        <td>{batch.expiryDate ? ymd(batch.expiryDate) : 'No expiry'}<small>{String(batch.expiryStatus || '').replaceAll('_', ' ')}</small></td>
+                        <td><span className={batch.allocationSource === 'receipt_batch' ? 'pill ok' : 'pill'}>{batch.allocationSource === 'receipt_batch' ? 'Receipt linked' : 'Legacy allocation'}</span></td>
+                        <td>{rs(poLine?.unitPrice)} / {poLine?.unit}</td>
+                      </tr>);
+                    })}
+                  </tbody>
+                </table>
+                <div className={'receipt-summary return-summary' + (returnDraft.invalid ? ' invalid' : '')}>
+                  <span><small>Selected lines</small><strong>{returnDraft.lineCount}</strong></span>
+                  <span><small>Return quantity</small><strong>{returnDraft.qty}</strong></span>
+                  <span><small>Net credit</small><strong>{rs(returnDraft.subtotal)}</strong></span>
+                  <span><small>VAT credit</small><strong>{rs(returnDraft.vat)}</strong></span>
+                  <span><small>Total credit</small><strong>{rs(returnDraft.subtotal + returnDraft.vat)}</strong></span>
+                </div>
+                {returnDraft.invalid && <p className="danger" role="alert">Check each lot quantity and the total returnable amount for its PO line.</p>}
+                <select className="receive-notes" value={reason} onChange={e => setReason(e.target.value)}>
+                  {['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'].map(x => <option key={x} value={x}>{x.replace('_', ' ')}</option>)}
+                </select>
+                <input className="receive-notes" maxLength="1000" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} placeholder={reason === 'other' ? 'Return details (required)' : 'Return notes (optional)'}/>
+                <button className="receive receipt-post" disabled={!!busy || !returnDraft.lineCount || returnDraft.invalid || (reason === 'other' && returnNotes.trim().length < 3)} onClick={() => postReturn(open)}>{String(busy).startsWith('ret-') ? 'Posting return…' : 'Review and post return'}</button>
+              </>}
             </div>
           )}
 
           <h3>Return history</h3>
           {!returns.length && <p className="empty">No returns posted yet.</p>}
           {!!returns.length && (
-            <table>
-              <thead><tr><th>Return</th><th>Qty</th><th>Reason</th><th>Notes</th><th>When</th></tr></thead>
+            <table className="return-history-table">
+              <thead><tr><th>Return</th><th>Returned stock evidence</th><th>Reason</th><th>Credit</th><th>Posted by</th><th>When</th></tr></thead>
               <tbody>
                 {returns.map(r => (
                   <tr key={r._id}>
-                    <td>{r.returnNo}</td>
-                    <td>{r.items?.map(i => i.qty).join(', ')}</td>
-                    <td>{r.reason}</td>
-                    <td>{r.notes || '—'}</td>
-                    <td>{r.createdAt ? new Date(r.createdAt).toLocaleString('en-NP') : ''}</td>
+                    <td><strong>{r.returnNo}</strong><small>{r.status || 'posted'}</small></td>
+                    <td>{r.items?.map(item => `${item.ingredient?.name || 'Ingredient'}: ${item.qty} ${item.unit} · ${item.batchNumber || 'unnumbered lot'}${item.goodsReceipt?.receiptNo ? ` · ${item.goodsReceipt.receiptNo}` : ''} · ${item.allocationSource === 'receipt_batch' ? 'receipt linked' : 'legacy allocation'}`).join(' | ')}</td>
+                    <td>{String(r.reason || '').replaceAll('_', ' ')}<small>{r.notes || 'No additional note'}</small></td>
+                    <td><strong>{rs(r.total)}</strong><small>Net {rs(r.subtotal)} · VAT {rs(r.vat)}</small></td>
+                    <td>{r.returnedBy?.name || 'Recorded user'}<small>{r.returnedBy?.role || ''}</small></td>
+                    <td>{r.returnedAt ? new Date(r.returnedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}</td>
                   </tr>
                 ))}
               </tbody>

@@ -70,12 +70,20 @@ function receive(poId, items, extras = {}) {
   });
 }
 
-function postReturn(poId, items, extras = {}) {
+let returnRequestSequence = 0;
+async function postReturn(poId, items, extras = {}) {
+  const current = await PurchaseOrder.findById(poId).select('__v').lean();
+  const key = extras.key === null ? null : (extras.key || `test-pr-${++returnRequestSequence}`);
   return request('/api/purchase-orders/' + poId + '/returns', {
     method: 'POST',
     token: tokenFor(extras.user || world.manager),
-    headers: extras.key ? {'Idempotency-Key': extras.key} : {},
-    body: {items, reason: extras.reason || 'quality', notes: extras.notes}
+    headers: key ? {'Idempotency-Key': key} : {},
+    body: {
+      items,
+      reason: extras.reason || 'quality',
+      notes: extras.notes,
+      expectedVersion: extras.expectedVersion ?? current?.__v ?? 0
+    }
   });
 }
 

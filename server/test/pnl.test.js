@@ -79,14 +79,20 @@ describe('GET /api/reports/pnl', () => {
       method: 'POST',
       token: tokenFor(world.manager),
       headers: {'Idempotency-Key': 'pnl-gr'},
-      body: {items: [{itemId: String(po.items[0]._id), receivedQty: 400, damagedQty: 50, damageReason: 'quality'}]}
+      body: {
+        expectedVersion: po.__v,
+        items: [{itemId: String(po.items[0]._id), receivedQty: 400, damagedQty: 50, damageReason: 'quality'}]
+      }
     });
     assert.equal(rec.status, 201, rec.body?.message);
     const ret = await request('/api/purchase-orders/' + po._id + '/returns', {
       method: 'POST',
       token: tokenFor(world.manager),
       headers: {'Idempotency-Key': 'pnl-pr'},
-      body: {items: [{itemId: String(po.items[0]._id), qty: 100}]}
+      body: {
+        expectedVersion: rec.body.purchaseOrder.__v,
+        items: [{itemId: String(po.items[0]._id), qty: 100}]
+      }
     });
     assert.equal(ret.status, 201, ret.body?.message);
 

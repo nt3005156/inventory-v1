@@ -181,6 +181,58 @@ describe('socket purchasing events', () => {
     }
   });
 
+  it('emits a branch-scoped return update with durable return evidence', async () => {
+    const created = await createDraftPo();
+    const approved = await approvePo(created.body._id);
+    assert.equal(approved.status, 200, approved.body?.message);
+    const line = approved.body.items[0];
+    const rec = await request('/api/purchase-orders/' + created.body._id + '/receive', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'live-return-gr'},
+      body: {
+        expectedVersion: approved.body.__v,
+        items: [{itemId: String(line._id), receivedQty: 100, damagedQty: 0, batchNumber: 'LIVE-RETURN'}]
+      }
+    });
+    assert.equal(rec.status, 201, rec.body?.message);
+    const options = await request('/api/purchase-orders/' + created.body._id + '/return-options', {token: tokenFor(world.manager)});
+    assert.equal(options.status, 200, options.body?.message);
+    const batch = options.body.items[0].batches[0];
+
+    const socketA = await connectSocket(tokenFor(world.manager), world.branchA._id);
+    const socketB = await connectSocket(tokenFor(world.staffB), world.branchB._id);
+    try {
+      await joinBranch(socketA, world.branchA._id);
+      await joinBranch(socketB, world.branchB._id);
+      const leaked = [];
+      socketB.on('purchasing:update', payload => leaked.push(payload));
+      const pending = waitEvent(socketA, 'purchasing:update');
+      const returned = await request('/api/purchase-orders/' + created.body._id + '/returns', {
+        method: 'POST',
+        token: tokenFor(world.manager),
+        headers: {'Idempotency-Key': 'live-return-pr'},
+        body: {
+          expectedVersion: rec.body.purchaseOrder.__v,
+          reason: 'quality',
+          items: [{itemId: String(line._id), batchId: String(batch.batchId), qty: 10}]
+        }
+      });
+      assert.equal(returned.status, 201, returned.body?.message);
+      const payload = await pending;
+      assert.equal(payload.reason, 'return');
+      assert.equal(payload.poId, String(created.body._id));
+      assert.equal(payload.returnId, String(returned.body.purchaseReturn._id));
+      assert.equal(payload.returnNo, returned.body.purchaseReturn.returnNo);
+      assert.equal(String(payload.branch), String(world.branchA._id));
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.equal(leaked.length, 0);
+    } finally {
+      socketA.close();
+      socketB.close();
+    }
+  });
+
   it('emits a branch-scoped short-close update after partial receiving', async () => {
     const created = await createDraftPo();
     const approved = await approvePo(created.body._id);

@@ -95,7 +95,7 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   const [orders, receipts, returns, invoices, payments, purchaseTx, returnTx] = await Promise.all([
     PurchaseOrder.find({restaurant: context.restaurantId, ...match, status: {$in: REPORTABLE_PO_STATUSES}}).populate('supplier', 'name'),
     GoodsReceipt.find({restaurant: context.restaurantId, ...match}),
-    PurchaseReturn.find(match),
+    PurchaseReturn.find({restaurant: context.restaurantId, ...match}),
     SupplierInvoice.find({...match, status: {$ne: 'void'}}).populate('supplier', 'name'),
     SupplierPayment.find(dates),
     InventoryTransaction.find({...branchMatch, type: 'PURCHASE', ...dates}),
@@ -120,7 +120,14 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
       damageByReason.set(reason, current);
     }
   }
-  const returnedValue = money(returns.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.qty || 0) * Number(i.unitCost || 0), 0), 0));
+  const returnedValue = money(returns.reduce((sum, purchaseReturn) => {
+    if (purchaseReturn.subtotal !== undefined && purchaseReturn.subtotal !== null
+      && Number.isFinite(Number(purchaseReturn.subtotal))) return sum + Number(purchaseReturn.subtotal);
+    return sum + (purchaseReturn.items || []).reduce(
+      (lineSum, item) => lineSum + Number(item.qty || 0) * Number(item.unitCost || 0),
+      0
+    );
+  }, 0));
   const invoiced = money(invoices.reduce((s, i) => s + Number(i.total || 0), 0));
   const vat = money(invoices.reduce((s, i) => s + Number(i.vat || 0), 0));
   const paid = money(scopedPayments.reduce((s, p) => s + Number(p.amount || 0), 0));

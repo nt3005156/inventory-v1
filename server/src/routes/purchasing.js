@@ -3,10 +3,15 @@ import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
-import {GoodsReceipt, PurchaseReturn} from '../models/purchasing.js';
+import {GoodsReceipt} from '../models/purchasing.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {RECEIPT_DAMAGE_REASONS, receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
-import {returnPurchaseOrder} from '../services/returns.js';
+import {
+  listPurchaseReturnOptions,
+  listPurchaseReturns,
+  replayPurchaseReturn,
+  returnPurchaseOrder
+} from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {buildPnl} from '../services/pnl.js';
@@ -353,21 +358,32 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
   }
 });
 
+const returnLineSchema = z.object({
+  itemId: z.string().trim().min(1),
+  qty: z.number().finite().positive(),
+  batchId: z.string().trim().min(1).optional(),
+  batchNumber: z.string().trim().min(1).max(120).optional()
+}).strict().refine(row => !(row.batchId && row.batchNumber), {
+  message: 'Choose either batchId or batchNumber, not both'
+});
 const returnSchema = z.object({
   reason: z.enum(['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other']).optional(),
-  notes: z.string().optional(),
-  items: z.array(z.object({
-    itemId: z.string(),
-    qty: z.number(),
-    unitPrice: z.number().optional(),
-    batchNumber: z.string().optional()
-  })).min(1)
+  notes: z.string().trim().max(1000).optional(),
+  expectedVersion: z.number().int().nonnegative(),
+  items: z.array(returnLineSchema).min(1).max(100)
+}).strict();
+
+r.get('/purchase-orders/:id/return-options', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    res.json(await listPurchaseReturnOptions({poId: req.params.id, user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
 });
 
 r.get('/purchase-orders/:id/returns', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
-    const po = await getPurchaseOrder({poId: req.params.id, user: req.user});
-    res.json(await PurchaseReturn.find({purchaseOrder: po._id}).sort({createdAt: -1}).populate('items.ingredient returnedBy'));
+    res.json(await listPurchaseReturns({poId: req.params.id, user: req.user}));
   } catch (e) {
     fail(res, e);
   }
@@ -375,29 +391,52 @@ r.get('/purchase-orders/:id/returns', auth(['owner', 'manager', 'staff']), async
 
 r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, res) => {
   const session = await mongoose.startSession();
+  let body;
+  let idempotencyKey;
   try {
-    const body = returnSchema.parse(req.body);
-    const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
+    body = returnSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
     let result;
-    await session.withTransaction(async () => {
-      result = await returnPurchaseOrder({
-        poId: req.params.id,
-        items: body.items,
-        reason: body.reason,
-        notes: body.notes,
-        user: req.user,
-        session,
-        idempotencyKey
+    try {
+      await session.withTransaction(async () => {
+        result = await returnPurchaseOrder({
+          poId: req.params.id,
+          items: body.items,
+          reason: body.reason,
+          notes: body.notes,
+          expectedVersion: body.expectedVersion,
+          user: req.user,
+          session,
+          idempotencyKey
+        });
       });
-    });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = await replayPurchaseReturn({
+          poId: req.params.id,
+          items: body.items,
+          reason: body.reason,
+          notes: body.notes,
+          user: req.user,
+          idempotencyKey
+        });
+      } else {
+        throw error;
+      }
+    }
     if (!result.duplicate) {
-      publishPurchasingEvent(result.purchaseOrder.branch, {
+      const returnBranch = result.purchaseOrder.branch?._id || result.purchaseOrder.branch;
+      publishPurchasingEvent(returnBranch, {
         reason: 'return',
-        poId: String(result.purchaseOrder._id)
+        poId: String(result.purchaseOrder._id),
+        returnId: String(result.purchaseReturn._id),
+        returnNo: result.purchaseReturn.returnNo,
+        total: result.purchaseReturn.total
       });
-      publishInventoryEvent(result.purchaseOrder.branch, {
+      publishInventoryEvent(returnBranch, {
         reason: 'return',
-        poId: String(result.purchaseOrder._id)
+        poId: String(result.purchaseOrder._id),
+        returnId: String(result.purchaseReturn._id)
       });
     }
     res.status(result.duplicate ? 200 : 201).json(result);

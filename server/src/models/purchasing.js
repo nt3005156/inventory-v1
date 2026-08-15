@@ -107,21 +107,89 @@ goodsReceiptCounterSchema.index(
 );
 export const GoodsReceiptCounter = model('GoodsReceiptCounter', goodsReceiptCounterSchema);
 
-export const PurchaseReturn = model('PurchaseReturn', new Schema({
-  returnNo: {type: String, index: true},
-  purchaseOrder: {...oid, ref: 'PurchaseOrder', required: true, index: true},
-  branch: {...oid, ref: 'Branch', index: true},
-  supplier: {...oid, ref: 'Supplier'},
-  reason: {type: String, enum: ['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'], default: 'quality'},
-  notes: String,
-  idempotencyKey: {type: String, sparse: true, unique: true},
-  returnedBy: {...oid, ref: 'User'},
-  items: [{
-    poItem: oid,
-    ingredient: {...oid, ref: 'Ingredient'},
-    qty: n,
-    unit: String,
-    unitCost: n,
-    batchNumber: String
-  }]
-}, {timestamps: true}));
+const purchaseReturnLineSchema = new Schema({
+  poItem: {...oid, required: true, immutable: true},
+  ingredient: {...oid, ref: 'Ingredient', required: true, immutable: true},
+  goodsReceipt: {...oid, ref: 'GoodsReceipt', immutable: true},
+  inventoryBatch: {...oid, ref: 'InventoryBatch', immutable: true},
+  allocationSource: {type: String, enum: ['receipt_batch', 'legacy_allocation'], required: true, immutable: true},
+  qty: {type: Number, required: true, min: Number.EPSILON, immutable: true},
+  unit: {type: String, required: true, trim: true, maxlength: 30, immutable: true},
+  unitCost: {type: Number, required: true, min: 0, immutable: true},
+  inventoryUnitCost: {type: Number, required: true, min: 0, immutable: true},
+  stockValue: {type: Number, required: true, min: 0, immutable: true},
+  vatRate: {type: Number, required: true, min: 0, max: 100, immutable: true},
+  subtotal: {type: Number, required: true, min: 0, immutable: true},
+  vat: {type: Number, required: true, min: 0, immutable: true},
+  total: {type: Number, required: true, min: 0, immutable: true},
+  batchNumber: {type: String, trim: true, maxlength: 120, immutable: true},
+  expiryDate: {type: Date, immutable: true}
+}, {_id: true});
+purchaseReturnLineSchema.pre('validate', function requireDurableReceiptBatch(next) {
+  if (this.allocationSource === 'receipt_batch' && (!this.inventoryBatch || !this.goodsReceipt)) {
+    return next(new Error('Receipt-batch purchase return lines require both a goods receipt and inventory batch'));
+  }
+  return next();
+});
+
+const purchaseReturnSchema = new Schema({
+  restaurant: {...oid, ref: 'Restaurant', required: true, immutable: true},
+  returnNo: {type: String, required: true, trim: true, maxlength: 40, immutable: true},
+  numberVersion: {type: Number, default: 2, immutable: true},
+  purchaseOrder: {...oid, ref: 'PurchaseOrder', required: true, immutable: true},
+  branch: {...oid, ref: 'Branch', required: true, immutable: true},
+  supplier: {...oid, ref: 'Supplier', required: true, immutable: true},
+  returnedAt: {type: Date, required: true, default: Date.now, immutable: true},
+  reason: {type: String, enum: ['quality', 'wrong_item', 'expired', 'overstock', 'damaged', 'other'], default: 'quality', immutable: true},
+  notes: {type: String, trim: true, maxlength: 1000, immutable: true},
+  status: {type: String, enum: ['posted'], default: 'posted', immutable: true},
+  idempotencyKey: {type: String, trim: true, maxlength: 120, select: false, immutable: true},
+  requestHash: {type: String, select: false, immutable: true},
+  requestHashVersion: {type: Number, default: 2, select: false, immutable: true},
+  returnedBy: {...oid, ref: 'User', required: true, immutable: true},
+  subtotal: {type: Number, required: true, min: 0, immutable: true},
+  vat: {type: Number, required: true, min: 0, immutable: true},
+  total: {type: Number, required: true, min: 0, immutable: true},
+  items: {
+    type: [purchaseReturnLineSchema],
+    validate: [items => Array.isArray(items) && items.length > 0, 'At least one return item is required']
+  }
+}, {timestamps: true, autoIndex: false});
+purchaseReturnSchema.set('toJSON', {
+  transform: (_document, result) => {
+    delete result.idempotencyKey;
+    delete result.requestHash;
+    delete result.requestHashVersion;
+    return result;
+  }
+});
+purchaseReturnSchema.index(
+  {restaurant: 1, returnNo: 1},
+  {unique: true, name: 'pr_restaurant_number_v2', partialFilterExpression: {numberVersion: 2}}
+);
+purchaseReturnSchema.index(
+  {restaurant: 1, idempotencyKey: 1},
+  {unique: true, name: 'pr_restaurant_idempotency_key', partialFilterExpression: {idempotencyKey: {$type: 'string'}}}
+);
+purchaseReturnSchema.index(
+  {restaurant: 1, branch: 1, purchaseOrder: 1, createdAt: -1},
+  {name: 'pr_restaurant_branch_po_created'}
+);
+purchaseReturnSchema.index(
+  {restaurant: 1, branch: 1, supplier: 1, createdAt: -1},
+  {name: 'pr_restaurant_branch_supplier_created'}
+);
+export const PurchaseReturn = model('PurchaseReturn', purchaseReturnSchema);
+
+const purchaseReturnCounterSchema = new Schema({
+  restaurant: {...oid, ref: 'Restaurant', required: true, immutable: true},
+  branch: {...oid, ref: 'Branch', required: true, immutable: true},
+  branchCode: {type: String, required: true, trim: true, uppercase: true, maxlength: 8, immutable: true},
+  year: {type: Number, required: true, immutable: true},
+  value: {type: Number, default: 0, min: 0}
+}, {timestamps: true, autoIndex: false});
+purchaseReturnCounterSchema.index(
+  {restaurant: 1, branchCode: 1, year: 1},
+  {unique: true, name: 'pr_counter_scope'}
+);
+export const PurchaseReturnCounter = model('PurchaseReturnCounter', purchaseReturnCounterSchema);
