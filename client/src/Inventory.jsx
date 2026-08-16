@@ -62,6 +62,10 @@ export default function Inventory({call, branches = [], user, token}) {
   const [adjustBatch, setAdjustBatch] = useState('');
   const [adjustExpiry, setAdjustExpiry] = useState('');
   const adjustmentKey = useRef(requestKey());
+  const [valuationMethod, setValuationMethod] = useState('weighted_average');
+  const [valuation, setValuation] = useState(null);
+  const [priceHistory, setPriceHistory] = useState(null);
+  const [selectedValuationIngredient, setSelectedValuationIngredient] = useState('');
   const loadSequence = useRef(0);
   const loadRef = useRef(null);
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
@@ -110,6 +114,32 @@ export default function Inventory({call, branches = [], user, token}) {
     setSuccess('');
     load();
   }, [branchId, batchStatus, batchPage, ledgerType]);
+
+  useEffect(() => {
+    if (!branchId) { setValuation(null); return; }
+    let active = true;
+    (async () => {
+      try {
+        const data = await call(`/inventory/valuation?branch=${encodeURIComponent(branchId)}&method=${valuationMethod}`);
+        if (active) setValuation(data);
+      } catch (e) {
+        // silent
+      }
+    })();
+    return () => { active = false; };
+  }, [branchId, valuationMethod]);
+
+  useEffect(() => {
+    if (!branchId || !selectedValuationIngredient) { setPriceHistory(null); return; }
+    let active = true;
+    (async () => {
+      try {
+        const data = await call(`/inventory/purchase-price-history?branch=${encodeURIComponent(branchId)}&ingredient=${encodeURIComponent(selectedValuationIngredient)}&limit=10`);
+        if (active) setPriceHistory(data);
+      } catch (e) {}
+    })();
+    return () => { active = false; };
+  }, [branchId, selectedValuationIngredient]);
 
   useEffect(() => {
     if (!branchId || !authToken) return undefined;
@@ -201,6 +231,60 @@ export default function Inventory({call, branches = [], user, token}) {
             <span className={Number(batchSummary.expiredQty || 0) > 0 ? 'danger-card' : ''}><small>Expired qty</small><strong>{Number(batchSummary.expiredQty || 0).toLocaleString('en-NP')}</strong></span>
             <span className={Number(batchSummary.expiringQty || 0) > 0 ? 'warning-card' : ''}><small>Due in 30 days</small><strong>{Number(batchSummary.expiringQty || 0).toLocaleString('en-NP')}</strong></span>
           </div>
+          {valuation && (
+            <div className="inventory-valuation-panel" style={{margin:'16px 0', padding:'12px', border:'1px solid #e5e7eb', borderRadius:'8px', background:'#f9fafb'}}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:'12px', flexWrap:'wrap'}}>
+                <div>
+                  <h3 style={{margin:'0 0 4px'}}>Inventory Valuation — Phase 2E</h3>
+                  <small>Weighted average is canonical. FIFO/FEFO projected from remaining batches (strategy-ready).</small>
+                  <div style={{marginTop:'8px', display:'flex', gap:'8px', flexWrap:'wrap', fontSize:'13px'}}>
+                    <span>Method:</span>
+                    <select value={valuationMethod} onChange={e=>setValuationMethod(e.target.value)} style={{padding:'4px 8px'}}>
+                      <option value="weighted_average">Weighted Average</option>
+                      <option value="fifo">FIFO</option>
+                      <option value="fefo">FEFO</option>
+                    </select>
+                    <span style={{opacity:0.7}}>Branch: {valuation.branchName || 'All'} • {valuation.summary.ingredientCount} ingredients • {valuation.summary.batchCount} active lots</span>
+                  </div>
+                </div>
+                <div style={{display:'flex', gap:'12px', textAlign:'right', flexWrap:'wrap'}}>
+                  <span><small>Wtd Avg</small><strong style={{display:'block'}}>{rs(valuation.summary.totalValueWeighted)}</strong><small>{valuation.summary.totalQuantity.toLocaleString('en-NP')} units</small></span>
+                  <span><small>FIFO</small><strong style={{display:'block'}}>{rs(valuation.summary.totalValueFifo)}</strong><small>{valuation.valuation.fifo.quantity.toLocaleString('en-NP')} units</small></span>
+                  <span><small>FEFO</small><strong style={{display:'block'}}>{rs(valuation.summary.totalValueFefo)}</strong><small>{valuation.valuation.fefo.quantity.toLocaleString('en-NP')} units</small></span>
+                </div>
+              </div>
+              <div style={{marginTop:'12px', display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap'}}>
+                <small>Ingredient cost & purchase price changes:</small>
+                <select value={selectedValuationIngredient} onChange={e=>setSelectedValuationIngredient(e.target.value)} style={{minWidth:'220px', padding:'4px 8px'}}>
+                  <option value="">Select ingredient to inspect</option>
+                  {valuation.ingredients.map(ing=> <option key={String(ing.ingredientId)} value={String(ing.ingredientId)}>{ing.name} — {rs(ing.averageCost)}/{ing.unit} • {qtyLabel(ing.quantity, ing.unit)} • {rs(ing.weightedAverageValue)}</option>)}
+                </select>
+                {selectedValuationIngredient && priceHistory && (
+                  <span style={{fontSize:'13px', opacity:0.8}}>
+                    {priceHistory.priceChange ? (
+                      priceHistory.priceChange.trend === 'up' ? '↑ ' :
+                      priceHistory.priceChange.trend === 'down' ? '↓ ' : '→ '
+                    ) : ''}
+                    {priceHistory.priceChange && <>Price {priceHistory.priceChange.trend}: {rs(priceHistory.priceChange.previousCost)} → {rs(priceHistory.priceChange.currentCost)} ({priceHistory.priceChange.deltaPercent}%)</>}
+                  </span>
+                )}
+              </div>
+              {selectedValuationIngredient && priceHistory && !!priceHistory.items.length && (
+                <div style={{marginTop:'10px', maxHeight:'160px', overflow:'auto', fontSize:'12px', background:'white', border:'1px solid #e5e7eb', borderRadius:'6px', padding:'8px'}}>
+                  <b>Last {priceHistory.items.length} purchases – price change history</b>
+                  <div style={{marginTop:'6px', display:'grid', gap:'4px'}}>
+                    {priceHistory.items.map(row=> (
+                      <div key={String(row._id)} style={{display:'flex', justifyContent:'space-between', borderBottom:'1px dotted #eee', padding:'4px 0'}}>
+                        <span>{new Date(row.createdAt).toLocaleDateString('en-NP')} • {qtyLabel(row.quantity, row.unit)} @ {rs(row.unitCost)}/{row.unit}</span>
+                        <span>{rs(row.totalCost)} • {row.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <small style={{display:'block', marginTop:'8px', opacity:0.6}}>Valuation strategies are pluggable — add LIFO by extending VALUATION_STRATEGIES (sortBatches). Weighted average remains the ledger truth; FIFO/FEFO are projections for future COGS.</small>
+            </div>
+          )}
           <div className="table-scroll">
             <table>
               <thead>
