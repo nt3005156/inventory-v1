@@ -3,8 +3,42 @@ const {Schema,model}=mongoose;
 const n={type:Number,default:0}; const oid={type:Schema.Types.ObjectId};
 export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},phone:String,address:String},{timestamps:true}));
 export const Branch=model('Branch',new Schema({restaurant:{...oid,ref:'Restaurant',index:true},name:{type:String,required:true},code:{type:String,uppercase:true},address:String,phone:String,active:{type:Boolean,default:true}},{timestamps:true}));
-export const InventoryBalance=model('InventoryBalance',new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},quantity:n,reserved:n,averageCost:n,minLevel:n,reorderLevel:n,maxLevel:n,storageLocation:{type:String,default:'Main Store'}},{timestamps:true}));
-InventoryBalance.schema.index({branch:1,ingredient:1,storageLocation:1},{unique:true});
+const inventoryBalanceSchema=new Schema({
+  branch:{...oid,ref:'Branch',required:true,index:true},
+  ingredient:{...oid,ref:'Ingredient',required:true,index:true},
+  quantity:{type:Number,default:0,min:0},
+  reserved:n,
+  averageCost:{type:Number,default:0,min:0},
+  minLevel:n,
+  reorderLevel:n,
+  maxLevel:n,
+  storageLocation:{type:String,default:'Main Store'}
+},{timestamps:true});
+inventoryBalanceSchema.index({branch:1,ingredient:1,storageLocation:1},{unique:true});
+const stockFields=new Set(['quantity','averageCost']);
+function inventoryBalanceChangesStock(update={}){
+  return Object.entries(update).some(([operator,value])=>{
+    if(stockFields.has(operator))return true;
+    return operator.startsWith('$')&&value&&Object.keys(value).some(path=>stockFields.has(path.split('.')[0]));
+  });
+}
+inventoryBalanceSchema.pre('save',function preventSilentBalanceSave(next,options){
+  const changesStock=this.isNew?Number(this.quantity||0)!==0||Number(this.averageCost||0)!==0:['quantity','averageCost'].some(path=>this.isModified(path));
+  if(changesStock&&!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities and costs may only be changed by the inventory ledger service'),{status:409}));
+  next();
+});
+inventoryBalanceSchema.pre(['updateOne','updateMany','findOneAndUpdate','replaceOne'],function preventSilentBalanceUpdate(next){
+  if(inventoryBalanceChangesStock(this.getUpdate())&&!this.getOptions().inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities and costs may only be changed by the inventory ledger service'),{status:409}));
+  next();
+});
+inventoryBalanceSchema.pre(['deleteOne','deleteMany','findOneAndDelete'],function preventSilentBalanceDelete(next){
+  if(!this.getOptions().inventoryLedgerWrite)return next(Object.assign(new Error('Inventory balances may only be removed by an authorized inventory migration'),{status:409}));
+  next();
+});
+inventoryBalanceSchema.pre(['insertMany','bulkWrite'],function preventSilentBalanceBulkWrite(next){
+  next(Object.assign(new Error('Inventory balances may only be bulk-written by the inventory ledger service'),{status:409}));
+});
+export const InventoryBalance=model('InventoryBalance',inventoryBalanceSchema);
 const inventoryBatchSchema=new Schema({
   restaurant:{...oid,ref:'Restaurant',required:true,immutable:true,index:true},
   branch:{...oid,ref:'Branch',required:true,immutable:true,index:true},
@@ -26,6 +60,17 @@ const inventoryBatchSchema=new Schema({
 inventoryBatchSchema.index({restaurant:1,branch:1,ingredient:1,lotKey:1},{unique:true,name:'inventory_batch_lot_key'});
 inventoryBatchSchema.index({restaurant:1,branch:1,expiryDate:1,quantity:1},{name:'inventory_batch_expiry_quantity'});
 inventoryBatchSchema.index({restaurant:1,branch:1,ingredient:1,batchNumberNormalized:1,quantity:1},{name:'inventory_batch_lookup'});
+inventoryBatchSchema.pre('save',function preventSilentBatchSave(next,options){
+  if(!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory batches may only be changed by the inventory ledger service'),{status:409}));
+  next();
+});
+inventoryBatchSchema.pre(['updateOne','updateMany','findOneAndUpdate','replaceOne','deleteOne','deleteMany','findOneAndDelete'],function preventSilentBatchMutation(next){
+  if(!this.getOptions().inventoryLedgerWrite)return next(Object.assign(new Error('Inventory batches may only be changed by the inventory ledger service'),{status:409}));
+  next();
+});
+inventoryBatchSchema.pre(['insertMany','bulkWrite'],function preventSilentBatchBulkWrite(next){
+  next(Object.assign(new Error('Inventory batches may only be bulk-written by the inventory ledger service'),{status:409}));
+});
 export const InventoryBatch=model('InventoryBatch',inventoryBatchSchema);
 const inventoryBatchMovementSchema=new Schema({
   batch:{...oid,ref:'InventoryBatch',required:true,immutable:true},
@@ -36,9 +81,55 @@ const inventoryBatchMovementSchema=new Schema({
   newQty:{type:Number,required:true,immutable:true},
   unitCost:{type:Number,default:0,min:0,immutable:true}
 },{_id:false});
-const inventoryTransactionSchema=new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},type:{type:String,enum:['OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','RECIPE_REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT','RETURN'],required:true},previousQty:n,changeQty:n,newQty:n,unit:String,unitCost:n,totalCost:n,reason:String,referenceType:String,referenceId:oid,user:{...oid,ref:'User'},batchMovements:{type:[inventoryBatchMovementSchema],default:undefined,immutable:true},idempotencyKey:{type:String,trim:true},idempotencyHash:{type:String,trim:true,immutable:true}},{timestamps:true});
-inventoryTransactionSchema.index({branch:1,idempotencyKey:1},{unique:true,partialFilterExpression:{idempotencyKey:{$type:'string'}},name:'inventory_transaction_branch_idempotency'});
-inventoryTransactionSchema.index({branch:1,type:1,referenceType:1,createdAt:-1},{name:'inventory_transaction_purchasing_report'});
+export const INVENTORY_MOVEMENT_TYPES=Object.freeze([
+  'OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','RETURN','ADJUSTMENT'
+]);
+const immutableQuantity={type:Number,required:true,immutable:true,validate:{validator:Number.isFinite,message:'Inventory quantity must be finite'}};
+const inventoryTransactionSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true,immutable:true},
+  branch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
+  ingredient:{...oid,ref:'Ingredient',required:true,index:true,immutable:true},
+  type:{type:String,enum:INVENTORY_MOVEMENT_TYPES,required:true,immutable:true},
+  previousQty:immutableQuantity,
+  changeQty:{...immutableQuantity,validate:[
+    immutableQuantity.validate,
+    {validator:value=>Math.abs(Number(value))>1e-9,message:'Inventory movement quantity cannot be zero'}
+  ]},
+  newQty:{...immutableQuantity,min:0},
+  unit:{type:String,required:true,trim:true,maxlength:30,immutable:true},
+  unitCost:{type:Number,required:true,min:0,immutable:true},
+  totalCost:{type:Number,required:true,min:0,immutable:true},
+  reason:{type:String,required:true,trim:true,minlength:3,maxlength:500,immutable:true},
+  referenceType:{type:String,required:true,trim:true,minlength:2,maxlength:80,immutable:true},
+  referenceId:{...oid,required:true,immutable:true},
+  user:{...oid,ref:'User',required:true,immutable:true},
+  batchMovements:{type:[inventoryBatchMovementSchema],default:undefined,immutable:true},
+  idempotencyKey:{type:String,required:true,trim:true,minlength:3,maxlength:200,immutable:true},
+  idempotencyHash:{type:String,required:true,trim:true,match:/^[a-f0-9]{64}$/,immutable:true},
+  idempotencyHashVersion:{type:Number,required:true,default:2,enum:[1,2],immutable:true},
+  createdAt:{type:Date,default:Date.now,required:true,immutable:true}
+},{timestamps:true,autoIndex:false});
+inventoryTransactionSchema.pre('validate',function validateInventoryEquation(){
+  const previous=Number(this.previousQty),change=Number(this.changeQty),next=Number(this.newQty);
+  if([previous,change,next].every(Number.isFinite)&&Math.abs(previous+change-next)>1e-7)this.invalidate('newQty','New quantity must equal previous quantity plus change');
+  const expectedCost=Math.abs(change)*Number(this.unitCost);
+  if(Number.isFinite(expectedCost)&&Math.abs(expectedCost-Number(this.totalCost))>0.011)this.invalidate('totalCost','Total cost must equal absolute quantity change multiplied by unit cost');
+});
+inventoryTransactionSchema.pre('save',function preventLedgerRewrite(next,options){
+  if(this.isNew&&!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory ledger rows may only be created by the inventory ledger service'),{status:409}));
+  if(!this.isNew&&this.isModified())return next(Object.assign(new Error('Inventory ledger rows are immutable'),{status:409}));
+  next();
+});
+inventoryTransactionSchema.pre(['updateOne','updateMany','findOneAndUpdate','replaceOne','deleteOne','deleteMany','findOneAndDelete'],function preventLedgerMutation(next){
+  next(Object.assign(new Error('Inventory ledger rows are immutable'),{status:409}));
+});
+inventoryTransactionSchema.pre(['insertMany','bulkWrite'],function preventLedgerBulkWrite(next){
+  next(Object.assign(new Error('Inventory ledger rows may only be created by the inventory ledger service'),{status:409}));
+});
+inventoryTransactionSchema.index({restaurant:1,branch:1,idempotencyKey:1},{unique:true,name:'inventory_transaction_tenant_idempotency'});
+inventoryTransactionSchema.index({restaurant:1,branch:1,ingredient:1,createdAt:-1},{name:'inventory_transaction_tenant_ingredient_timeline'});
+inventoryTransactionSchema.index({restaurant:1,branch:1,type:1,referenceType:1,createdAt:-1},{name:'inventory_transaction_purchasing_report'});
+inventoryTransactionSchema.index({restaurant:1,referenceType:1,referenceId:1,createdAt:-1},{name:'inventory_transaction_reference_timeline'});
 export const InventoryTransaction=model('InventoryTransaction',inventoryTransactionSchema);
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
 export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));

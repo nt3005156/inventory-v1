@@ -193,7 +193,7 @@ describe('split items and close table after paid', () => {
       body: {status: 'cancelled'}
     });
     assert.equal(cancelled.status, 200, cancelled.body?.message);
-    const reversals = await InventoryTransaction.find({type: 'RECIPE_REVERSAL'});
+    const reversals = await InventoryTransaction.find({type: 'REVERSAL'});
     assert.equal(reversals.length, 1);
     assert.equal(reversals[0].changeQty, 250);
     assert.equal((await Order.findById(created.body._id)).status, 'pending');

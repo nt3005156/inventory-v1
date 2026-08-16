@@ -88,7 +88,7 @@ function lotKeyFor(entry, {branch, ingredient, sourceType, sourceId, fallback}) 
 
 async function saveBatch(batch, session) {
   try {
-    await batch.save({session: session || undefined});
+    await batch.save({session: session || undefined, inventoryLedgerWrite: true});
   } catch (error) {
     if (error?.name === 'VersionError') throw httpError('Inventory batch changed; retry the operation', 409);
     throw error;
@@ -103,35 +103,9 @@ export async function ensureBatchCoverage({balance, branch, ingredient, unit}, s
   const tracked = Number(totalRows[0]?.quantity || 0);
   const expected = Number(balance?.quantity || 0);
   const missing = expected - tracked;
-  if (missing < -EPSILON) throw httpError('Inventory batch quantities exceed the aggregate balance', 409);
-  if (!(missing > EPSILON)) return;
-
-  const restaurant = await branchRestaurant(branch, session);
-  const lotKey = `legacy:${balance._id}`;
-  let batch = await InventoryBatch.findOne({restaurant, branch, ingredient, lotKey}).session(session || null);
-  if (!batch) {
-    batch = new InventoryBatch({
-      restaurant,
-      branch,
-      ingredient,
-      lotKey,
-      sourceType: 'legacy',
-      receivedAt: balance.createdAt || new Date(),
-      unit: unit || 'g',
-      unitCost: Number(balance.averageCost || 0),
-      initialQuantity: missing,
-      quantity: missing
-    });
-  } else {
-    const beforeInitial = Number(batch.initialQuantity || 0);
-    const combined = beforeInitial + missing;
-    batch.unitCost = combined > 0
-      ? ((beforeInitial * Number(batch.unitCost || 0)) + (missing * Number(balance.averageCost || 0))) / combined
-      : Number(balance.averageCost || 0);
-    batch.initialQuantity = combined;
-    batch.quantity = Number(batch.quantity || 0) + missing;
+  if (Math.abs(missing) > EPSILON) {
+    throw httpError('Inventory batch quantities do not match the aggregate ledger balance; run the inventory migration before posting movements',409);
   }
-  await saveBatch(batch, session);
 }
 
 function normalizeIncoming(entry, defaults) {

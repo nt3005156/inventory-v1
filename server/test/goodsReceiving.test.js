@@ -75,7 +75,7 @@ async function seedOtherTenant() {
     restaurant: restaurant.name, restaurantId: restaurant._id
   });
   const ingredient = await Ingredient.create({
-    restaurant: restaurant._id, code: 'OTHER-RICE', name: 'Other Rice', unit: 'g', averageCost: 1
+    restaurant: restaurant._id, code: 'OTHER-RICE', name: 'Other Rice', unit: 'g'
   });
   await InventoryBalance.create({branch: branchA._id, ingredient: ingredient._id, quantity: 0, averageCost: 0});
   const currentSupplier = await Supplier.create({restaurant: restaurant._id, name: 'Other Supplier'});

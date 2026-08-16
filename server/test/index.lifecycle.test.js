@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 import net from 'node:net';
 import {after, before, describe, test} from 'node:test';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
+import jwt from 'jsonwebtoken';
 
 const productionSecret = '3f88962c111762160e8a97d2430c105272788ee32f2855fe';
 const children = new Set();
@@ -125,6 +126,17 @@ describe('production API process lifecycle', () => {
       const untrusted = await fetch(`http://127.0.0.1:${port}/health`, {headers: {Origin: 'https://untrusted.example'}});
       assert.equal(untrusted.status, 200);
       assert.equal(untrusted.headers.get('access-control-allow-origin'), null);
+
+      const token = jwt.sign({id: '507f1f77bcf86cd799439011', role: 'owner'}, productionSecret);
+      for (const path of ['/api/purchases', '/api/sales', '/api/waste']) {
+        const retired = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST',
+          headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
+          body: '{}'
+        });
+        assert.equal(retired.status, 410, `${path} must stay retired`);
+        assert.match((await retired.json()).message, /retired|no longer/i);
+      }
 
       child.kill('SIGTERM');
       const result = await waitForExit(child);

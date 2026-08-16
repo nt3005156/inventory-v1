@@ -245,6 +245,7 @@ describe('POST /api/purchase-orders/:id/returns', () => {
     await request('/api/inventory/adjustments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'clear-stock-for-return'},
       body: {branch: String(world.branchA._id), ingredient: String(world.ingredient._id), qty: -20080, reason: 'Clear stock for return test'}
     });
     const res = await postReturn(po.body._id, [{itemId: String(line._id), qty: 80}]);

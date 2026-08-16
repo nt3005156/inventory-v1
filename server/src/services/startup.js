@@ -4,6 +4,7 @@ import {ensureSupplierCatalogIndexes} from './supplierCatalogMigration.js';
 import {ensurePurchaseOrderIndexes} from './purchaseOrderMigration.js';
 import {ensureGoodsReceivingIndexes} from './goodsReceivingMigration.js';
 import {ensureInventoryBatchIndexes} from './inventoryBatchMigration.js';
+import {ensureInventoryLedgerIndexes} from './inventoryLedgerMigration.js';
 import {ensurePurchaseReturnIndexes} from './purchaseReturnMigration.js';
 import {ensureSupplierInvoiceIndexes} from './supplierInvoiceMigration.js';
 import {ensureSupplierPaymentIndexes} from './supplierPaymentMigration.js';
@@ -13,6 +14,7 @@ const OPERATIONAL_MIGRATIONS = [
   ensureSupplierCatalogIndexes,
   ensurePurchaseOrderIndexes,
   ensureGoodsReceivingIndexes,
+  ensureInventoryLedgerIndexes,
   ensureInventoryBatchIndexes,
   ensurePurchaseReturnIndexes,
   ensureSupplierInvoiceIndexes,

@@ -135,6 +135,7 @@ describe('GET /api/reports/pnl', () => {
     const waste = await request('/api/waste/record', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'pnl-waste-main'},
       body: {branch: String(world.branchA._id), ingredient: String(world.ingredient._id), qty: 1000, reason: 'spoiled'}
     });
     assert.equal(waste.status, 201, waste.body?.message);
@@ -142,6 +143,7 @@ describe('GET /api/reports/pnl', () => {
     const other = await request('/api/waste/record', {
       method: 'POST',
       token: tokenFor(world.owner),
+      headers: {'Idempotency-Key': 'pnl-waste-other'},
       body: {branch: String(world.branchB._id), ingredient: String(world.ingredient._id), qty: 2000, reason: 'expired'}
     });
     assert.equal(other.status, 201, other.body?.message);

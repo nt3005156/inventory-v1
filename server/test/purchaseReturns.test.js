@@ -253,8 +253,8 @@ describe('durable purchase returns', () => {
         initialQuantity: 100,
         quantity: 100
       }
-    ]);
-    await InventoryBalance.updateOne(
+    ], {inventoryLedgerWrite: true});
+    await InventoryBalance.collection.updateOne(
       {branch: world.branchA._id, ingredient: world.ingredient._id},
       {$inc: {quantity: 200}}
     );
@@ -397,7 +397,7 @@ describe('durable purchase returns', () => {
       createdAt: new Date('2026-01-15T00:00:00Z'),
       updatedAt: new Date('2026-01-15T00:00:00Z')
     });
-    const misleadingBatch = await InventoryBatch.create({
+    const misleadingBatch = await new InventoryBatch({
       restaurant: world.restaurant._id,
       branch: world.branchA._id,
       ingredient: world.ingredient._id,
@@ -411,8 +411,9 @@ describe('durable purchase returns', () => {
       unitCost: 3,
       initialQuantity: 2,
       quantity: 0
-    });
-    await InventoryTransaction.create({
+    }).save({inventoryLedgerWrite: true});
+    await new InventoryTransaction({
+      restaurant: world.restaurant._id,
       branch: world.branchA._id,
       ingredient: world.ingredient._id,
       type: 'RETURN',
@@ -422,9 +423,13 @@ describe('durable purchase returns', () => {
       unit: 'g',
       unitCost: 3,
       totalCost: 6,
+      reason: 'Historical purchase return fixture',
       referenceType: 'purchase_return',
       referenceId: legacyId,
       user: world.owner._id,
+      idempotencyKey: 'legacy-return-ledger-fixture',
+      idempotencyHash: 'a'.repeat(64),
+      idempotencyHashVersion: 2,
       batchMovements: [{
         batch: misleadingBatch._id,
         batchNumber: misleadingBatch.batchNumber,
@@ -433,7 +438,7 @@ describe('durable purchase returns', () => {
         newQty: 0,
         unitCost: 3
       }]
-    });
+    }).save({inventoryLedgerWrite: true});
 
     const result = await ensurePurchaseReturnIndexes();
     assert.equal(result.migrated, 1);

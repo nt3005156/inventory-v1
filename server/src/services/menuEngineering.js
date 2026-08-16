@@ -1,15 +1,8 @@
-import mongoose from 'mongoose';
-import {MenuItem} from '../models/index.js';
+import {Ingredient, MenuItem} from '../models/index.js';
 import {Order} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
 import {recipeCost} from './engine.js';
+import {resolveExpenseContext} from './expenses.js';
 import {money} from './statements.js';
-
-function httpError(message, status) {
-  const err = new Error(message);
-  err.status = status;
-  return err;
-}
 
 function createdAtRange(from, to) {
   if (!from && !to) return {};
@@ -29,19 +22,16 @@ export function classifyMenuItem(popularity, margin) {
 }
 
 export async function buildMenuEngineering({branchId, user, from, to}) {
-  if (branchId) {
-    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branchId);
-  }
-
+  const scope = await resolveExpenseContext({user, branchId});
+  const ingredientIds = await Ingredient.find({restaurant: scope.identity.restaurantId}).distinct('_id');
   const match = {
     status: {$nin: ['cancelled', 'refunded']},
-    ...(branchId ? {branch: branchId} : {}),
+    branch: {$in: scope.branchIds},
     ...createdAtRange(from, to)
   };
   const [orders, menu] = await Promise.all([
     Order.find(match).select('items'),
-    MenuItem.find({active: {$ne: false}}).sort({name: 1})
+    MenuItem.find({active: {$ne: false}, 'recipe.ingredient': {$in: ingredientIds}}).sort({name: 1})
   ]);
 
   const sold = {};
@@ -63,7 +53,9 @@ export async function buildMenuEngineering({branchId, user, from, to}) {
   for (const item of menu) {
     const stats = sold[String(item._id)];
     const soldQty = stats?.qty || 0;
-    const cost = soldQty > 0 ? money(stats.cost / soldQty) : money(await recipeCost(item));
+    const cost = soldQty > 0
+      ? money(stats.cost / soldQty)
+      : money(await recipeCost(item, {branches: scope.branchIds}));
     const margin = money(Number(item.price || 0) - cost);
     const popularity = soldQty / denom;
     rows.push({

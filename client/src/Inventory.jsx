@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {connectBranchSocket} from './socket.js';
 
+const MOVEMENT_TYPES = ['OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','RETURN','ADJUSTMENT'];
 const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {maximumFractionDigits: 2});
 const requestKey = () => globalThis.crypto?.randomUUID?.() || `inventory-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -44,6 +45,7 @@ export default function Inventory({call, branches = [], user, token}) {
   const [branchId, setBranchId] = useState(visibleBranches[0]?._id || assigned || '');
   const [rows, setRows] = useState([]);
   const [ledger, setLedger] = useState([]);
+  const [ledgerType, setLedgerType] = useState('');
   const [batches, setBatches] = useState([]);
   const [batchSummary, setBatchSummary] = useState({activeLots: 0, totalQty: 0, expiredQty: 0, expiringQty: 0, noExpiryQty: 0});
   const [batchStatus, setBatchStatus] = useState('');
@@ -83,7 +85,10 @@ export default function Inventory({call, branches = [], user, token}) {
     const balanceQuery = branchId ? '?branch=' + encodeURIComponent(branchId) : '';
     try {
       const jobs = [call('/inventory' + balanceQuery), call('/inventory/batches?' + query.toString())];
-      if (canManage) jobs.push(call('/inventory/transactions' + balanceQuery));
+      const movementQuery = new URLSearchParams();
+      if (branchId) movementQuery.set('branch', branchId);
+      if (ledgerType) movementQuery.set('type', ledgerType);
+      if (canManage) jobs.push(call('/inventory/transactions?' + movementQuery.toString()));
       const [balances, batchResult, txs = []] = await Promise.all(jobs);
       if (sequence !== loadSequence.current) return;
       setRows(Array.isArray(balances) ? balances : []);
@@ -104,7 +109,7 @@ export default function Inventory({call, branches = [], user, token}) {
     setIngredient('');
     setSuccess('');
     load();
-  }, [branchId, batchStatus, batchPage]);
+  }, [branchId, batchStatus, batchPage, ledgerType]);
 
   useEffect(() => {
     if (!branchId || !authToken) return undefined;
@@ -301,24 +306,32 @@ export default function Inventory({call, branches = [], user, token}) {
 
       {canManage && (
         <>
-          <h3>Ledger movements</h3>
-          {!ledger.length && !loading && <p className="empty">No ledger movements for this view.</p>}
+          <div className="inventory-section-heading">
+            <div><h3>Ledger movements</h3><p>Every quantity change includes its actor, reason, reference, cost, timestamp and idempotency key.</p></div>
+            <select aria-label="Movement type" value={ledgerType} onChange={event => setLedgerType(event.target.value)}>
+              <option value="">All movement types</option>
+              {MOVEMENT_TYPES.map(type => <option key={type} value={type}>{type.replaceAll('_', ' ')}</option>)}
+            </select>
+          </div>
+          {!ledger.length && !loading && <p className="empty">No ledger movements match this view.</p>}
           {!!ledger.length && (
             <div className="table-scroll">
               <table>
-                <thead><tr><th>When</th><th>Type</th><th>Ingredient</th>{!branchId && <th>Branch</th>}<th>Change</th><th>On hand after</th><th>Value</th><th>Batch allocation</th><th>Reason</th></tr></thead>
+                <thead><tr><th>When</th><th>Type</th><th>Ingredient</th>{!branchId && <th>Branch</th>}<th>Previous</th><th>Change</th><th>New</th><th>Cost</th><th>Actor &amp; reference</th><th>Batch allocation</th><th>Reason &amp; key</th></tr></thead>
                 <tbody>
                   {ledger.map(tx => (
                     <tr key={tx._id}>
-                      <td>{dateTimeLabel(tx.createdAt)}</td>
+                      <td>{dateTimeLabel(tx.timestamp || tx.createdAt)}</td>
                       <td><label className="pill">{String(tx.type || '').replaceAll('_', ' ')}</label></td>
                       <td>{tx.name}</td>
                       {!branchId && <td>{tx.branchName || '—'}</td>}
+                      <td>{qtyLabel(tx.previousQty, tx.unit)}</td>
                       <td>{signedQty(tx.changeQty, tx.unit)}</td>
                       <td>{qtyLabel(tx.newQty, tx.unit)}</td>
-                      <td>{rs(tx.totalCost)}</td>
-                      <td>{tx.batchMovements?.length ? tx.batchMovements.map((movement, index) => <small key={`${movement.batchId}-${index}`}>{movement.batchNumber || 'UNTRACKED'} · {signedQty(movement.changeQty, tx.unit)}{movement.expiryDate ? ` · ${dateLabel(movement.expiryDate)}` : ''}</small>) : 'Legacy movement'}</td>
-                      <td>{tx.reason || '—'}</td>
+                      <td>{rs(tx.totalCost)}<small>{rs(tx.unitCost)} / {tx.unit}</small></td>
+                      <td><b>{tx.userName || tx.userId || 'Unknown actor'}</b><small>{tx.userRole || 'user'} · {tx.referenceType}</small><small><code>{String(tx.referenceId || '')}</code></small></td>
+                      <td>{tx.batchMovements?.length ? tx.batchMovements.map((movement, index) => <small key={`${movement.batchId}-${index}`}>{movement.batchNumber || 'UNTRACKED'} · {signedQty(movement.changeQty, tx.unit)}{movement.expiryDate ? ` · ${dateLabel(movement.expiryDate)}` : ''}</small>) : 'No lot allocation'}</td>
+                      <td>{tx.reason}<small><code>{tx.idempotencyKey}</code></small></td>
                     </tr>
                   ))}
                 </tbody>

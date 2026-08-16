@@ -184,7 +184,7 @@ describe('order cancellation inventory reversal', () => {
     assert.equal(saved.inventoryDeducted, true);
     assert.equal(saved.inventoryReversed, true);
     assert.equal(await InventoryTransaction.countDocuments(), beforeCancel + deducted);
-    assert.equal(await InventoryTransaction.countDocuments({type: 'RECIPE_REVERSAL', referenceId: created.body._id}), deducted);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'REVERSAL', referenceId: created.body._id}), deducted);
 
     const again = await request('/api/orders/' + created.body._id + '/status', {
       method: 'PATCH',
@@ -192,7 +192,7 @@ describe('order cancellation inventory reversal', () => {
       body: {status: 'cancelled'}
     });
     assert.equal(again.status, 409);
-    assert.equal(await InventoryTransaction.countDocuments({type: 'RECIPE_REVERSAL', referenceId: created.body._id}), deducted);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'REVERSAL', referenceId: created.body._id}), deducted);
 
     const balanceAfter = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
     assert.equal(balanceAfter.quantity, balanceBefore.quantity + 500);

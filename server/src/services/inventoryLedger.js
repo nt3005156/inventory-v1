@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import {Ingredient, MenuItem} from '../models/index.js';
-import {InventoryBalance, InventoryTransaction, Notification, Order} from '../models/operations.js';
+import {Ingredient, MenuItem, User} from '../models/index.js';
+import {Branch, INVENTORY_MOVEMENT_TYPES, InventoryBalance, InventoryTransaction, Notification, Order} from '../models/operations.js';
 import {addBatchStock, removeBatchStock} from './inventoryBatches.js';
 
 function canonical(value) {
@@ -16,22 +16,59 @@ function canonical(value) {
   }));
 }
 
-function movementFingerprint(input) {
+export function inventoryMovementFingerprint(input) {
   return crypto.createHash('sha256').update(JSON.stringify(canonical(input))).digest('hex');
 }
 
-function assertIdempotentReplay(prior, hash, input) {
-  const sameLegacyShape = String(prior.branch) === String(input.branch)
-    && String(prior.ingredient) === String(input.ingredient)
-    && Number(prior.changeQty) === Number(input.qty)
-    && prior.type === input.type
-    && String(prior.referenceId || '') === String(input.referenceId || '');
-  if ((prior.idempotencyHash && prior.idempotencyHash !== hash) || (!prior.idempotencyHash && !sameLegacyShape)) {
-    throw Object.assign(new Error('Idempotency key was already used for a different inventory movement'), {status: 409});
+export function inventoryMovementId({restaurant, branch, idempotencyKey}) {
+  return new mongoose.Types.ObjectId(
+    inventoryMovementFingerprint({restaurant, branch, idempotencyKey: clean(idempotencyKey)}).slice(0, 24)
+  );
+}
+
+function httpError(message,status=400){
+  return Object.assign(new Error(message),{status});
+}
+
+const clean=value=>String(value??'').trim();
+const positiveTypes=new Set(['OPENING','PURCHASE','REVERSAL','TRANSFER_IN']);
+const negativeTypes=new Set(['SALE','RECIPE_DEDUCTION','WASTE','TRANSFER_OUT','RETURN']);
+
+function validateMovementInput(input,session){
+  if(!session?.inTransaction?.())throw httpError('Inventory movements require an active MongoDB transaction',500);
+  for(const [label,value] of [['branch',input.branch],['ingredient',input.ingredient],['user',input.user],['reference',input.referenceId]]){
+    if(!mongoose.isValidObjectId(value))throw httpError(`Invalid inventory movement ${label}`);
+  }
+  const amount=Number(input.qty);
+  const cost=Number(input.unitCost??0);
+  if(!Number.isFinite(amount)||Math.abs(amount)<=1e-9)throw httpError('Inventory movement quantity must be a non-zero finite number');
+  if(!Number.isFinite(cost)||cost<0||!Number.isFinite(Math.abs(amount)*cost))throw httpError('Inventory movement cost must be a non-negative finite number');
+  if(!INVENTORY_MOVEMENT_TYPES.includes(input.type))throw httpError('Invalid inventory movement type');
+  if(positiveTypes.has(input.type)&&amount<0)throw httpError(`${input.type} inventory movements must increase stock`);
+  if(negativeTypes.has(input.type)&&amount>0)throw httpError(`${input.type} inventory movements must decrease stock`);
+  if(clean(input.reason).length<3)throw httpError('Inventory movement reason must be at least 3 characters');
+  if(clean(input.reason).length>500)throw httpError('Inventory movement reason must be 500 characters or fewer');
+  if(clean(input.referenceType).length<2)throw httpError('Inventory movement reference type is required');
+  if(clean(input.referenceType).length>80)throw httpError('Inventory movement reference type must be 80 characters or fewer');
+  if(clean(input.idempotencyKey).length<3)throw httpError('Inventory movement idempotency key is required');
+  if(clean(input.idempotencyKey).length>200)throw httpError('Inventory movement idempotency key must be 200 characters or fewer');
+  return {amount,cost};
+}
+
+function assertIdempotentReplay(prior,hash,input) {
+  const legacyMatch=Number(prior.idempotencyHashVersion||1)===1
+    &&String(prior.branch)===String(input.branch)
+    &&String(prior.ingredient)===String(input.ingredient)
+    &&Number(prior.changeQty)===Number(input.qty)
+    &&prior.type===input.type
+    &&String(prior.referenceId)===String(input.referenceId)
+    &&String(prior.user)===String(input.user);
+  if(prior.idempotencyHash!==hash&&!legacyMatch){
+    throw httpError('Idempotency key was already used for a different inventory movement',409);
   }
 }
 
-/** Atomic, auditable aggregate and batch stock movement. Call inside a transaction for multi-item workflows. */
+/** Atomic, auditable aggregate and batch stock movement. */
 export async function moveStock({
   branch,
   ingredient,
@@ -50,137 +87,158 @@ export async function moveStock({
   batchNumber,
   allowExpired
 }, session) {
-  const idempotencyHash = movementFingerprint({
+  const {amount,cost}=validateMovementInput({
+    branch,ingredient,qty,type,reason,referenceType,referenceId,user,idempotencyKey,unitCost
+  },session);
+  const [branchRecord,ingredientRecord,userRecord]=await Promise.all([
+    Branch.findById(branch).select('restaurant active').session(session).lean(),
+    Ingredient.findById(ingredient).select('restaurant name unit').session(session).lean(),
+    User.findById(user).select('restaurantId').session(session).lean()
+  ]);
+  if(!branchRecord)throw httpError('Inventory movement branch was not found',404);
+  if(!ingredientRecord)throw httpError('Inventory movement ingredient was not found',404);
+  if(!userRecord)throw httpError('Inventory movement user was not found',404);
+  const restaurant=branchRecord.restaurant;
+  if(String(ingredientRecord.restaurant)!==String(restaurant))throw httpError('Inventory movement ingredient does not belong to the branch restaurant',403);
+  if(String(userRecord.restaurantId)!==String(restaurant))throw httpError('Inventory movement user does not belong to the branch restaurant',403);
+  const movementUnit=clean(unit||ingredientRecord.unit);
+  if(!movementUnit||movementUnit.length>30)throw httpError('Inventory movement unit is required');
+  const normalizedReason=clean(reason);
+  const normalizedReferenceType=clean(referenceType);
+  const normalizedKey=clean(idempotencyKey);
+  const idempotencyHash=inventoryMovementFingerprint({
+    restaurant,
     branch,
     ingredient,
-    qty: Number(qty),
+    qty:amount,
     type,
-    reason,
-    referenceType,
+    reason:normalizedReason,
+    referenceType:normalizedReferenceType,
     referenceId,
     user,
-    unit,
-    unitCost: Number(unitCost || 0),
+    unit:movementUnit,
+    unitCost:cost,
     incomingBatches,
     restoredMovements,
     batchId,
     batchNumber,
     allowExpired
   });
-  const transactionId = idempotencyKey
-    ? new mongoose.Types.ObjectId(movementFingerprint({branch, idempotencyKey}).slice(0, 24))
-    : new mongoose.Types.ObjectId();
-  if (idempotencyKey) {
-    const prior = await InventoryTransaction.findOne({branch, idempotencyKey}).session(session || null);
-    if (prior) {
-      assertIdempotentReplay(prior, idempotencyHash, {branch, ingredient, qty, type, referenceId});
-      return prior;
-    }
+  const transactionId=inventoryMovementId({restaurant,branch,idempotencyKey:normalizedKey});
+  const prior=await InventoryTransaction.findOne({restaurant,branch,idempotencyKey:normalizedKey}).session(session);
+  if(prior){
+    assertIdempotentReplay(prior,idempotencyHash,{branch,ingredient,qty:amount,type,referenceId,user});
+    return prior;
   }
 
-  let balance = await InventoryBalance.findOne({branch, ingredient}).session(session || null);
-  if (!balance) {
-    if (qty < 0) throw Object.assign(new Error('Insufficient inventory'), {status: 409});
-    balance = new InventoryBalance({branch, ingredient, quantity: 0, averageCost: unitCost, unit});
+  let balance=await InventoryBalance.findOne({branch,ingredient}).session(session);
+  if(!balance){
+    if(amount<0)throw httpError('Insufficient inventory',409);
+    balance=new InventoryBalance({branch,ingredient,quantity:0,averageCost:0});
   }
-
-  const before = Number(balance.quantity || 0);
-  const amount = Number(qty);
-  const after = before + amount;
-  if (after < -1e-9) throw Object.assign(new Error('Insufficient inventory for this order'), {status: 409});
+  const before=Number(balance.quantity||0);
+  const previousCost=Number(balance.averageCost||0);
+  const after=before+amount;
+  if(!Number.isFinite(before)||before<0||!Number.isFinite(previousCost)||previousCost<0||!Number.isFinite(after)){
+    throw httpError('Inventory aggregate balance is invalid; run the inventory migration before posting movements',409);
+  }
+  if(after<-1e-9)throw httpError('Insufficient inventory for this movement',409);
+  if(type==='OPENING'&&before>1e-9)throw httpError('Opening stock requires a zero inventory balance',409);
 
   let batchMovements;
-  if (amount < 0) {
-    batchMovements = await removeBatchStock({
+  if(amount<0){
+    batchMovements=await removeBatchStock({
       balance,
       branch,
       ingredient,
-      quantity: Math.abs(amount),
-      unit,
+      quantity:Math.abs(amount),
+      unit:movementUnit,
       batchId,
       batchNumber,
-      allowExpired: allowExpired ?? ['WASTE', 'ADJUSTMENT', 'RETURN'].includes(type)
-    }, session);
-  } else if (amount > 0) {
-    let restore = restoredMovements;
-    if (type === 'RECIPE_REVERSAL' && !restore?.length && !incomingBatches?.length && referenceId) {
-      const originals = await InventoryTransaction.find({
+      allowExpired:allowExpired??['WASTE','ADJUSTMENT','RETURN'].includes(type)
+    },session);
+  }else{
+    let restore=restoredMovements;
+    if(type==='REVERSAL'&&!restore?.length&&!incomingBatches?.length){
+      const originals=await InventoryTransaction.find({
+        restaurant,
         branch,
         ingredient,
         referenceId,
-        type: 'RECIPE_DEDUCTION'
-      }).select('batchMovements').session(session || null);
-      restore = originals.flatMap(row => (row.batchMovements || []).map(movement => ({
-        batch: movement.batch,
-        quantity: Math.abs(Number(movement.changeQty || 0))
+        type:'RECIPE_DEDUCTION'
+      }).select('batchMovements').session(session);
+      restore=originals.flatMap(row=>(row.batchMovements||[]).map(movement=>({
+        batch:movement.batch,
+        quantity:Math.abs(Number(movement.changeQty||0))
       })));
-      const restoreTotal = restore.reduce((sum, row) => sum + row.quantity, 0);
-      if (Math.abs(restoreTotal - amount) > 1e-9) {
-        throw Object.assign(new Error('Original batch allocation is unavailable for reversal'), {status: 409});
-      }
+      const restoreTotal=restore.reduce((sum,row)=>sum+row.quantity,0);
+      if(Math.abs(restoreTotal-amount)>1e-9)throw httpError('Original batch allocation is unavailable for reversal',409);
     }
-    batchMovements = await addBatchStock({
+    batchMovements=await addBatchStock({
       balance,
       branch,
       ingredient,
-      quantity: amount,
-      unit,
-      unitCost,
+      quantity:amount,
+      unit:movementUnit,
+      unitCost:cost,
       incomingBatches,
-      restoredMovements: restore,
-      sourceType: referenceType === 'goods_receipt'
-        ? 'goods_receipt'
-        : type === 'TRANSFER_IN'
-          ? 'transfer'
-          : type === 'RECIPE_REVERSAL'
-            ? 'reversal'
-            : type === 'OPENING'
-              ? 'opening'
-              : type === 'ADJUSTMENT'
-                ? 'adjustment'
-                : 'untracked',
-      sourceId: referenceId || transactionId,
-      receivedAt: new Date()
-    }, session);
+      restoredMovements:restore,
+      sourceType:normalizedReferenceType==='goods_receipt'
+        ?'goods_receipt'
+        :type==='TRANSFER_IN'
+          ?'transfer'
+          :type==='REVERSAL'
+            ?'reversal'
+            :type==='OPENING'
+              ?'opening'
+              :type==='ADJUSTMENT'
+                ?'adjustment'
+                :'untracked',
+      sourceId:referenceId,
+      receivedAt:new Date()
+    },session);
   }
 
-  if (amount > 0 && unitCost) balance.averageCost = after
-    ? ((before * Number(balance.averageCost || 0)) + (amount * unitCost)) / after
-    : unitCost;
-  balance.quantity = Math.max(0, after);
-  await balance.save({session: session || undefined});
+  if(amount>0&&cost>0){
+    balance.averageCost=after
+      ?((before*previousCost)+(amount*cost))/after
+      :cost;
+  }
+  balance.quantity=Math.max(0,after);
+  await balance.save({session,inventoryLedgerWrite:true});
 
-  const effectiveUnitCost = Number(unitCost || balance.averageCost || 0);
-  const tx = (await InventoryTransaction.create([{
-    _id: transactionId,
+  const effectiveUnitCost=Number(cost||balance.averageCost||0);
+  const tx=(await InventoryTransaction.create([{
+    _id:transactionId,
+    restaurant,
     branch,
     ingredient,
     type,
-    previousQty: before,
-    changeQty: amount,
-    newQty: Math.max(0, after),
-    unit,
-    unitCost: effectiveUnitCost,
-    totalCost: Math.abs(amount) * effectiveUnitCost,
-    reason,
-    referenceType,
+    previousQty:before,
+    changeQty:amount,
+    newQty:Math.max(0,after),
+    unit:movementUnit,
+    unitCost:effectiveUnitCost,
+    totalCost:Math.abs(amount)*effectiveUnitCost,
+    reason:normalizedReason,
+    referenceType:normalizedReferenceType,
     referenceId,
     user,
     batchMovements,
-    idempotencyKey,
-    idempotencyHash
-  }], {session: session || undefined}))[0];
+    idempotencyKey:normalizedKey,
+    idempotencyHash,
+    idempotencyHashVersion:2
+  }],{session,inventoryLedgerWrite:true}))[0];
 
-  if (after <= Number(balance.reorderLevel || 0)) {
-    const ing = await Ingredient.findById(ingredient).session(session || null);
-    const name = ing?.name || 'Ingredient';
+  if(after<=Number(balance.reorderLevel||0)){
+    const name=ingredientRecord.name||'Ingredient';
     await Notification.create([{
       branch,
-      type: after <= 0 ? 'out_of_stock' : 'low_stock',
-      title: after <= 0 ? 'Out of stock' : 'Low stock',
-      body: `${name} is ${after <= 0 ? 'out of stock' : 'at reorder level'}`,
-      referenceId: ingredient
-    }], {session: session || undefined});
+      type:after<=0?'out_of_stock':'low_stock',
+      title:after<=0?'Out of stock':'Low stock',
+      body:`${name} is ${after<=0?'out of stock':'at reorder level'}`,
+      referenceId:ingredient
+    }],{session});
   }
   return tx;
 }
@@ -244,8 +302,8 @@ export async function reverseOrderStock({order, status, user, restaurantId}, ses
   }).select('_id').session(session || null);
   const relatedIds = relatedOrders.map(row => row._id);
   const [originals, reversals] = await Promise.all([
-    InventoryTransaction.find({branch: order.branch, referenceId: {$in: sourceOrders}, type: 'RECIPE_DEDUCTION'}).sort({createdAt: 1, _id: 1}).session(session || null),
-    InventoryTransaction.find({branch: order.branch, referenceId: {$in: relatedIds}, type: 'RECIPE_REVERSAL'}).session(session || null)
+    InventoryTransaction.find({restaurant: restaurantId, branch: order.branch, referenceId: {$in: sourceOrders}, type: 'RECIPE_DEDUCTION'}).sort({createdAt: 1, _id: 1}).session(session || null),
+    InventoryTransaction.find({restaurant: restaurantId, branch: order.branch, referenceId: {$in: relatedIds}, type: 'REVERSAL'}).session(session || null)
   ]);
   if (!originals.length) {
     const legacyResults = [];
@@ -255,7 +313,7 @@ export async function reverseOrderStock({order, status, user, restaurantId}, ses
         ingredient: requirement.ingredient,
         qty: requirement.quantity,
         unit: requirement.unit,
-        type: 'RECIPE_REVERSAL',
+        type: 'REVERSAL',
         reason: `${status} ${order.orderNo} (legacy allocation)`,
         referenceType: 'order_reversal',
         referenceId: order._id,
@@ -306,7 +364,7 @@ export async function reverseOrderStock({order, status, user, restaurantId}, ses
       ingredient: requirement.ingredient,
       qty: requirement.quantity,
       unit: requirement.unit,
-      type: 'RECIPE_REVERSAL',
+      type: 'REVERSAL',
       reason: `${status} ${order.orderNo}`,
       referenceType: 'order_reversal',
       referenceId: order._id,

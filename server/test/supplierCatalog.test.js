@@ -283,7 +283,6 @@ describe('supplier catalog API', () => {
       name: 'Mustard Oil',
       category: 'Oils',
       unit: 'ml',
-      averageCost: 0.25,
       active: true
     });
     await createEntry({ingredient: String(secondIngredient._id), supplierSku: 'KFS-OIL-5', purchaseUnit: 'jar', conversionFactor: 5000, currentPrice: 1250});

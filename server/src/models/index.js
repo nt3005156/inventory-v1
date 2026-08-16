@@ -24,7 +24,7 @@ supplierSchema.index(
   {unique:true,name:'supplier_restaurant_name',partialFilterExpression:{restaurant:{$type:'objectId'},nameNormalized:{$type:'string'}}}
 );
 export const Supplier=model('Supplier',supplierSchema);
-const ingredientSchema=new Schema({restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},code:String,name:{type:String,required:true},nameNp:String,category:String,unit:{type:String,default:'g'},active:{type:Boolean,default:true},minimumStock:money,reorderQty:money,stockQty:money,averageCost:money,lastPurchasePrice:money,supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},expiryDate:Date},{timestamps:true});
+const ingredientSchema=new Schema({restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},code:String,name:{type:String,required:true},nameNp:String,category:String,unit:{type:String,default:'g'},active:{type:Boolean,default:true},minimumStock:money,reorderQty:money,lastPurchasePrice:money,supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},expiryDate:Date},{timestamps:true,strict:'throw'});
 ingredientSchema.index({restaurant:1,code:1},{unique:true,name:'ingredient_restaurant_code',partialFilterExpression:{restaurant:{$type:'objectId'},code:{$type:'string'}}});
 export const Ingredient=model('Ingredient',ingredientSchema);
 export const PriceHistory=model('PriceHistory',new Schema({ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},price:money,qty:money,unit:String,effectiveAt:{type:Date,default:Date.now},purchase:{type:Schema.Types.ObjectId,ref:'Purchase'},user:{type:Schema.Types.ObjectId,ref:'User'}}));

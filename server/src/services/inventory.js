@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import {Ingredient} from '../models/index.js';
 import {Branch, InventoryBalance, InventoryBatch, InventoryTransaction} from '../models/operations.js';
-import {moveStock} from './inventoryLedger.js';
+import {inventoryMovementId, moveStock} from './inventoryLedger.js';
 import {money} from './statements.js';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {userRestaurantContext} from './supplierCatalog.js';
@@ -120,7 +120,7 @@ export async function listInventoryLedger({branchId, user, type, limit = 200}) {
   const scope = await inventoryScope({branchId, user});
   const allowedTypes = InventoryTransaction.schema.path('type').enumValues;
   if (type && !allowedTypes.includes(type)) throw httpError('Invalid inventory transaction type', 400);
-  const match = {...branchMatch(scope), ...(type ? {type} : {})};
+  const match = {restaurant:scope.restaurantId,...branchMatch(scope), ...(type ? {type} : {})};
   const rows = await InventoryTransaction.find(match)
     .populate(LEDGER_POPULATE)
     .populate('batchMovements.batch', 'batchNumber expiryDate')
@@ -129,6 +129,7 @@ export async function listInventoryLedger({branchId, user, type, limit = 200}) {
 
   return rows.filter(row => row.ingredient && row.branch).map(t => ({
     _id: t._id,
+    restaurant: t.restaurant,
     type: t.type,
     ingredientId: t.ingredient?._id || t.ingredient,
     name: t.ingredient?.name || 'Ingredient',
@@ -139,12 +140,17 @@ export async function listInventoryLedger({branchId, user, type, limit = 200}) {
     newQty: t.newQty,
     unitCost: t.unitCost,
     totalCost: money(t.totalCost),
-    reason: t.reason || '',
-    referenceType: t.referenceType || '',
-    referenceId: t.referenceId || null,
+    reason: t.reason,
+    referenceType: t.referenceType,
+    referenceId: t.referenceId,
+    reference: {type:t.referenceType,id:t.referenceId},
     branch: t.branch?._id || t.branch,
     branchName: t.branch?.name || '',
+    userId: t.user?._id || t.user,
     userName: t.user?.name || '',
+    userRole: t.user?.role || '',
+    user: {id:t.user?._id || t.user,name:t.user?.name || '',role:t.user?.role || ''},
+    idempotencyKey: t.idempotencyKey,
     batchMovements: (t.batchMovements || []).map(row => ({
       batchId: row.batch?._id || row.batch,
       batchNumber: row.batchNumber || row.batch?.batchNumber || '',
@@ -155,6 +161,7 @@ export async function listInventoryLedger({branchId, user, type, limit = 200}) {
       unitCost: row.unitCost
     })),
     createdAt: t.createdAt,
+    timestamp: t.createdAt,
     source: 'live'
   }));
 }
@@ -284,6 +291,7 @@ export async function adjustStock({branch, ingredient, qty, reason, unit, user, 
     type: 'ADJUSTMENT',
     reason: note,
     referenceType: 'adjustment',
+    referenceId: inventoryMovementId({restaurant: context.restaurantId, branch, idempotencyKey}),
     user: context.userId,
     idempotencyKey,
     ...(amount > 0 ? {

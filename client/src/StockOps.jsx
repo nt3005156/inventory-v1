@@ -1,5 +1,6 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 
+const requestKey = () => globalThis.crypto?.randomUUID?.() || `waste-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const WASTE_REASONS = ['expired', 'spoiled', 'burned', 'spilled', 'damaged', 'wrong_preparation', 'customer_return', 'other'];
 
 function qtyLabel(qty, unit) {
@@ -32,6 +33,7 @@ export default function StockOps({call, branches = [], user}) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const wasteKey = useRef(requestKey());
 
   useEffect(() => {
     if (locked && assigned && branchId !== assigned) setBranchId(assigned);
@@ -67,8 +69,10 @@ export default function StockOps({call, branches = [], user}) {
     try {
       await call('/waste/record', {
         method: 'POST',
+        headers: {'Idempotency-Key': wasteKey.current},
         body: JSON.stringify({branch: branchId, ingredient, qty: Number(qty), reason})
       });
+      wasteKey.current = requestKey();
       setMessage('Waste recorded and inventory ledger updated.');
       load();
     } catch (err) {

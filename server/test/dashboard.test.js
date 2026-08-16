@@ -76,10 +76,18 @@ describe('GET /api/dashboard', () => {
   });
 
   it('lists live low stock from inventory balances', async () => {
-    await InventoryBalance.updateOne(
-      {branch: world.branchA._id, ingredient: world.ingredient._id},
-      {quantity: 500, reorderLevel: 4000}
-    );
+    const adjusted = await request('/api/inventory/adjustments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'dashboard-low-stock'},
+      body: {
+        branch: String(world.branchA._id),
+        ingredient: String(world.ingredient._id),
+        qty: -19500,
+        reason: 'Set dashboard low-stock fixture'
+      }
+    });
+    assert.equal(adjusted.status, 201, adjusted.body?.message);
     const dash = await request('/api/dashboard?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(dash.status, 200, dash.body?.message);
     assert.equal(dash.body.lowStock.length, 1);

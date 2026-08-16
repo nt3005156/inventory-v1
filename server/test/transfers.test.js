@@ -1,7 +1,9 @@
 import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import {InventoryBalance, InventoryTransaction, StockTransfer} from '../src/models/operations.js';
+import {moveStock} from '../src/services/inventoryLedger.js';
 import {canTransitionTransfer} from '../src/services/transfers.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
@@ -93,10 +95,29 @@ describe('POST /api/transfers', () => {
 
 describe('PATCH /api/transfers/:id/status', () => {
   it('ships and receives against the ledger and carries source average cost', async () => {
-    await InventoryBalance.updateOne(
-      {branch: world.branchB._id, ingredient: world.ingredient._id},
-      {averageCost: 0.10}
-    );
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        for (const movement of [
+          {qty: -20000, unitCost: 0.045, idempotencyKey: 'transfer-cost-reset-out'},
+          {qty: 20000, unitCost: 0.10, idempotencyKey: 'transfer-cost-reset-in'}
+        ]) {
+          await moveStock({
+            ...movement,
+            branch: world.branchB._id,
+            ingredient: world.ingredient._id,
+            unit: 'g',
+            type: 'ADJUSTMENT',
+            reason: 'Prepare destination valuation fixture',
+            referenceType: 'test_adjustment',
+            referenceId: world.ingredient._id,
+            user: world.owner._id
+          }, session);
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
     const created = await createTransfer({qty: 5000});
     assert.equal(created.status, 201, created.body?.message);
 

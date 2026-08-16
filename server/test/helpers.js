@@ -9,6 +9,7 @@ import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
 import {Ingredient, MenuItem} from '../src/models/index.js';
+import {moveStock} from '../src/services/inventoryLedger.js';
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'kds-core-test-secret';
 
@@ -87,15 +88,40 @@ export async function seedWorld() {
   const manager = await User.create({name: 'Manager', email: 'manager@test.com', password: 'hashed', role: 'manager', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchA._id});
   const staffA = await User.create({name: 'Staff A', email: 'staffa@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchA._id});
   const staffB = await User.create({name: 'Staff B', email: 'staffb@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchB._id});
-  const ingredient = await Ingredient.create({restaurant: restaurant._id, code: 'ING-T1', name: 'Basmati Rice', unit: 'g', averageCost: 0.045, stockQty: 20000, minimumStock: 2000});
+  const ingredient = await Ingredient.create({restaurant: restaurant._id, code: 'ING-T1', name: 'Basmati Rice', unit: 'g', minimumStock: 2000});
   const menu = await MenuItem.create({
     name: 'Chicken Biryani',
     price: 350,
     vatInclusive: true,
     recipe: [{ingredient: ingredient._id, qty: 250, unit: 'g'}]
   });
-  await InventoryBalance.create({branch: branchA._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
-  await InventoryBalance.create({branch: branchB._id, ingredient: ingredient._id, quantity: 20000, averageCost: 0.045, reorderLevel: 4000});
+  const openingSession=await mongoose.startSession();
+  try{
+    await openingSession.withTransaction(async()=>{
+      for(const branch of [branchA,branchB]){
+        await moveStock({
+          branch:branch._id,
+          ingredient:ingredient._id,
+          qty:20000,
+          unit:'g',
+          unitCost:0.045,
+          type:'OPENING',
+          reason:'Test opening stock',
+          referenceType:'test_fixture',
+          referenceId:ingredient._id,
+          user:owner._id,
+          idempotencyKey:`test-opening:${branch._id}:${ingredient._id}`
+        },openingSession);
+        await InventoryBalance.updateOne(
+          {branch:branch._id,ingredient:ingredient._id},
+          {$set:{reorderLevel:4000}},
+          {session:openingSession}
+        );
+      }
+    });
+  }finally{
+    await openingSession.endSession();
+  }
   const table = await RestaurantTable.create({branch: branchA._id, name: 'T1', area: 'Main Hall', seats: 4});
   const tableB = await RestaurantTable.create({branch: branchB._id, name: 'L1', area: 'Patio', seats: 4});
   return {restaurant, branchA, branchB, owner, manager, staffA, staffB, ingredient, menu, table, tableB};

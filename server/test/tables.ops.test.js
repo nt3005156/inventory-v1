@@ -158,7 +158,7 @@ describe('POST /api/tables/:id/merge', () => {
     const res = await merge(world.table, table2);
     assert.equal(res.status, 200, res.body?.message);
     assert.equal(await InventoryTransaction.countDocuments(), beforeTx);
-    assert.equal(await InventoryTransaction.countDocuments({type: 'RECIPE_REVERSAL'}), 0);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'REVERSAL'}), 0);
 
     const surviving = await Order.findById(dest.body._id);
     const closed = await Order.findById(source.body._id);
@@ -201,9 +201,9 @@ describe('POST /api/tables/:id/merge', () => {
       body: {status: 'cancelled'}
     });
     assert.equal(cancelled.status, 200, cancelled.body?.message);
-    assert.equal(await InventoryTransaction.countDocuments({type: 'RECIPE_REVERSAL'}), 1);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'REVERSAL'}), 1);
     assert.equal(await InventoryTransaction.countDocuments(), before + 1);
-    const reversal = await InventoryTransaction.findOne({type: 'RECIPE_REVERSAL', referenceId: dest.body._id});
+    const reversal = await InventoryTransaction.findOne({type: 'REVERSAL', referenceId: dest.body._id});
     assert.equal(reversal.changeQty, 500);
   });
 

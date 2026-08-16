@@ -20,21 +20,17 @@ after(async () => {
 beforeEach(async () => {
   await clearDb();
   world = await seedWorld();
-  await InventoryTransaction.create({
+  const opening = await InventoryTransaction.findOne({
+    restaurant: world.restaurant._id,
     branch: world.branchA._id,
     ingredient: world.ingredient._id,
-    type: 'OPENING',
-    previousQty: 0,
-    changeQty: 20000,
-    newQty: 20000,
-    unit: 'g',
-    unitCost: 0.045,
-    totalCost: 900,
-    reason: 'Opening stock',
-    user: world.owner._id,
-    createdAt: new Date('2019-12-31T18:15:00.000Z'),
-    updatedAt: new Date('2019-12-31T18:15:00.000Z')
-  });
+    type: 'OPENING'
+  }).lean();
+  const openingAt = new Date('2019-12-31T18:15:00.000Z');
+  await InventoryTransaction.collection.updateOne(
+    {_id: opening._id},
+    {$set: {createdAt: openingAt, updatedAt: openingAt}}
+  );
 });
 
 async function addClosedOrder(overrides = {}) {
@@ -297,18 +293,27 @@ describe('month-close tenant identity', () => {
       category: 'foreign rent', amount: 777, vat: 101.01,
       createdBy: foreign.owner._id, date: invoiceDate
     });
-    await InventoryTransaction.create({
+    await new InventoryTransaction({
+      restaurant: foreign.restaurant._id,
       branch: foreign.branch._id,
       ingredient: world.ingredient._id,
       type: 'WASTE',
       previousQty: 100,
       changeQty: -1,
       newQty: 99,
+      unit: 'g',
       unitCost: 10,
       totalCost: 10,
+      reason: 'Foreign tenant waste fixture',
+      referenceType: 'test_fixture',
+      referenceId: foreign.branch._id,
+      user: foreign.owner._id,
+      idempotencyKey: 'foreign-month-close-waste',
+      idempotencyHash: 'f'.repeat(64),
+      idempotencyHashVersion: 2,
       createdAt: invoiceDate,
       updatedAt: invoiceDate
-    });
+    }).save({inventoryLedgerWrite: true});
     const preview = await request(`/api/month-close/preview?month=${MONTH}`, {token: tokenFor(world.owner)});
     assert.equal(preview.status, 200, preview.body?.message);
     assert.equal(preview.body.reconciliation.unpaidInvoices, baseline.body.reconciliation.unpaidInvoices);

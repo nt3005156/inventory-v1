@@ -38,9 +38,9 @@ beforeEach(async () => {
 
 async function zeroInventory() {
   await Promise.all([
-    InventoryBalance.updateMany({}, {$set: {quantity: 0, averageCost: 0}}),
-    InventoryBatch.deleteMany({}),
-    InventoryTransaction.deleteMany({})
+    InventoryBalance.collection.updateMany({}, {$set: {quantity: 0, averageCost: 0}}),
+    InventoryBatch.collection.deleteMany({}),
+    InventoryTransaction.collection.deleteMany({})
   ]);
 }
 
@@ -244,7 +244,7 @@ describe('durable batch and expiry inventory', () => {
       ingredient: world.ingredient._id,
       qty: 80,
       unit: 'g',
-      type: 'RECIPE_REVERSAL',
+      type: 'REVERSAL',
       reason: 'Order cancellation reversal',
       referenceType: 'order',
       referenceId,
@@ -307,7 +307,7 @@ describe('durable batch and expiry inventory', () => {
     const late = await InventoryBatch.findOne({batchNumberNormalized: 'ORDER-LATE'});
     assert.equal(early.quantity, 300);
     assert.equal(late.quantity, 300);
-    assert.equal(await InventoryTransaction.countDocuments({type: 'RECIPE_REVERSAL'}), 2);
+    assert.equal(await InventoryTransaction.countDocuments({type: 'REVERSAL'}), 2);
   });
 
   it('binds inventory idempotency keys to payload and avoids duplicate lots and quantities', async () => {
@@ -466,7 +466,7 @@ describe('durable batch and expiry inventory', () => {
     assert.equal(String(transaction.batchMovements[0].batch), String(lot._id));
   });
 
-  it('backfills and reconciles legacy balances idempotently while removing singleton metadata', async () => {
+  it('backfills legacy balances idempotently, removes singleton metadata, and rejects later lot mismatches', async () => {
     await zeroInventory();
     const balance = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
     await InventoryBalance.collection.updateOne({_id: balance._id}, {$set: {
@@ -493,22 +493,24 @@ describe('durable batch and expiry inventory', () => {
     assert.equal(second.backfilled, 0);
     assert.equal(await InventoryBatch.countDocuments({lotKey: `legacy:${balance._id}`}), 1);
 
-    await InventoryBatch.updateOne({_id: legacy._id}, {$set: {quantity: 125}});
-    const reconciled = await ensureInventoryBatchIndexes();
-    assert.equal(reconciled.backfilled, 1);
-    assert.equal((await InventoryBatch.findById(legacy._id)).quantity, 500);
+    await InventoryBatch.collection.updateOne({_id: legacy._id}, {$set: {quantity: 125}});
+    await assert.rejects(
+      ensureInventoryBatchIndexes(),
+      /will not silently rewrite lot/
+    );
+    assert.equal((await InventoryBatch.findById(legacy._id)).quantity, 125);
 
-    await InventoryBalance.updateOne({_id: balance._id}, {$set: {quantity: 0}});
-    const reconciledToZero = await ensureInventoryBatchIndexes();
-    assert.equal(reconciledToZero.backfilled, 1);
-    assert.equal((await InventoryBatch.findById(legacy._id)).quantity, 0);
+    await InventoryBalance.collection.updateOne({_id: balance._id}, {$set: {quantity: 0}});
+    await assert.rejects(
+      ensureInventoryBatchIndexes(),
+      /will not silently rewrite lot/
+    );
+    assert.equal((await InventoryBatch.findById(legacy._id)).quantity, 125);
     assert.equal((await InventoryBatch.findById(legacy._id)).initialQuantity, 500);
     const indexes = await InventoryBatch.collection.indexes();
     for (const name of ['inventory_batch_lot_key', 'inventory_batch_expiry_quantity', 'inventory_batch_lookup']) {
       assert.ok(indexes.some(index => index.name === name), `missing ${name}`);
     }
-    const transactionIndexes = await InventoryTransaction.collection.indexes();
-    assert.ok(transactionIndexes.some(index => index.name === 'inventory_transaction_purchasing_report'));
     const orderIndexes = await mongoose.connection.db.collection('orders').indexes();
     assert.ok(orderIndexes.some(index => index.name === 'order_inventory_source_orders'));
   });

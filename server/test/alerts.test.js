@@ -27,6 +27,7 @@ async function hitReorder(branch = world.branchA, token = tokenFor(world.manager
   return request('/api/inventory/adjustments', {
     method: 'POST',
     token,
+    headers: {'Idempotency-Key': `alert-adjustment-${branch._id}`},
     body: {
       branch: String(branch._id),
       ingredient: String(world.ingredient._id),

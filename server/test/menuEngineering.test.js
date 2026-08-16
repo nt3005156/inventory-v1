@@ -1,8 +1,10 @@
 import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import {MenuItem, Sale} from '../src/models/index.js';
 import {classifyMenuItem} from '../src/services/menuEngineering.js';
+import {moveStock} from '../src/services/inventoryLedger.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
 let world;
@@ -88,7 +90,24 @@ describe('GET /api/analytics/menu-engineering', () => {
     const sold = await createLiveOrder(world.branchA, 1);
     assert.equal(sold.status, 201, sold.body?.message);
     assert.equal(sold.body.items[0].foodCost, 11.25);
-    await world.ingredient.updateOne({averageCost: 2});
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(() => moveStock({
+        branch: world.branchA._id,
+        ingredient: world.ingredient._id,
+        qty: 19750,
+        unit: 'g',
+        unitCost: 1.955,
+        type: 'PURCHASE',
+        reason: 'Later recipe-cost test purchase',
+        referenceType: 'test_purchase',
+        referenceId: world.ingredient._id,
+        user: world.owner._id,
+        idempotencyKey: 'menu-engineering-later-cost'
+      }, session));
+    } finally {
+      await session.endSession();
+    }
 
     const rows = await request('/api/analytics/menu-engineering?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(rows.status, 200, rows.body?.message);

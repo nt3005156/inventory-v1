@@ -3,13 +3,14 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import {User, Supplier, Ingredient, MenuItem} from './models/index.js';
 import {SupplierIngredient, SupplierPriceHistory} from './models/supplierCatalog.js';
-import {Restaurant, Branch, InventoryBalance, InventoryTransaction, RestaurantTable} from './models/operations.js';
+import {Restaurant, Branch, InventoryBalance, InventoryBatch, InventoryTransaction, RestaurantTable} from './models/operations.js';
+import {moveStock} from './services/inventoryLedger.js';
 
 await mongoose.connect(process.env.MONGODB_URI);
 await Promise.all([
   User.deleteMany(), Supplier.deleteMany(), Ingredient.deleteMany(), MenuItem.deleteMany(),
   SupplierIngredient.deleteMany(), SupplierPriceHistory.deleteMany(), Restaurant.deleteMany(),
-  Branch.deleteMany(), InventoryBalance.deleteMany(), InventoryTransaction.deleteMany(), RestaurantTable.deleteMany()
+  Branch.deleteMany(), InventoryBalance.collection.deleteMany({}), InventoryBatch.collection.deleteMany({}), InventoryTransaction.collection.deleteMany({}), RestaurantTable.deleteMany()
 ]);
 
 const business = await Restaurant.create({
@@ -45,8 +46,8 @@ const raw = [
 const ings = [];
 for (const [code, name, category, cost, stock, min] of raw) {
   ings.push(await Ingredient.create({
-    restaurant: business._id, code, name, category, unit: 'g', averageCost: cost / 1000,
-    lastPurchasePrice: cost, stockQty: stock * 1000, minimumStock: min * 1000, reorderQty: min * 2000,
+    restaurant: business._id, code, name, category, unit: 'g',
+    lastPurchasePrice: cost, minimumStock: min * 1000, reorderQty: min * 2000,
     supplier: supplier._id
   }));
 }
@@ -80,19 +81,37 @@ for (let index = 0; index < ings.length; index += 1) {
     changedBy: owner._id
   });
 }
-for (const branch of [ktm, lalitpur, bhaktapur]) {
-  for (const ingredient of ings) {
-    const qty = Math.round(ingredient.stockQty * (branch._id.equals(ktm._id) ? 1 : 0.55));
-    await InventoryBalance.create({
-      branch: branch._id, ingredient: ingredient._id, quantity: qty, averageCost: ingredient.averageCost,
-      minLevel: ingredient.minimumStock, reorderLevel: ingredient.reorderQty, unit: ingredient.unit
-    });
-    await InventoryTransaction.create({
-      branch: branch._id, ingredient: ingredient._id, type: 'OPENING', previousQty: 0,
-      changeQty: qty, newQty: qty, unit: ingredient.unit, unitCost: ingredient.averageCost,
-      totalCost: qty * ingredient.averageCost, reason: 'Demo opening stock', user: owner._id
-    });
-  }
+const openingSession=await mongoose.startSession();
+try{
+  await openingSession.withTransaction(async()=>{
+    for(const branch of [ktm,lalitpur,bhaktapur]){
+      for(let index=0;index<ings.length;index+=1){
+        const ingredient=ings[index];
+        const qty=Math.round(raw[index][4]*1000*(branch._id.equals(ktm._id)?1:0.55));
+        const unitCost=raw[index][3]/1000;
+        await moveStock({
+          branch:branch._id,
+          ingredient:ingredient._id,
+          qty,
+          unit:ingredient.unit,
+          unitCost,
+          type:'OPENING',
+          reason:'Demo opening stock',
+          referenceType:'demo_seed',
+          referenceId:ingredient._id,
+          user:owner._id,
+          idempotencyKey:`demo-opening:${branch._id}:${ingredient._id}`
+        },openingSession);
+        await InventoryBalance.updateOne(
+          {branch:branch._id,ingredient:ingredient._id},
+          {$set:{minLevel:ingredient.minimumStock,reorderLevel:ingredient.reorderQty}},
+          {session:openingSession}
+        );
+      }
+    }
+  });
+}finally{
+  await openingSession.endSession();
 }
 await RestaurantTable.create([
   {branch: ktm._id, name: 'T1', area: 'Main Hall', seats: 4},

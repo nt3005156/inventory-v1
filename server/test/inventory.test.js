@@ -30,8 +30,11 @@ describe('stockStatus', () => {
 });
 
 describe('GET /api/inventory', () => {
-  it('lists live branch ledger balances instead of Ingredient.stockQty', async () => {
-    await Ingredient.findByIdAndUpdate(world.ingredient._id, {stockQty: 99999});
+  it('lists live branch ledger balances and rejects obsolete Ingredient.stockQty writes', async () => {
+    await assert.rejects(
+      Ingredient.findByIdAndUpdate(world.ingredient._id, {stockQty: 99999}),
+      /stockQty.*not in schema/
+    );
     const sold = await request('/api/orders', {
       method: 'POST',
       token: tokenFor(world.owner),
@@ -51,14 +54,22 @@ describe('GET /api/inventory', () => {
     assert.equal(list.body[0].stockQty, 19750);
     assert.equal(list.body[0].stockValue, 888.75);
     assert.equal(list.body[0].status, 'ok');
-    assert.equal((await Ingredient.findById(world.ingredient._id)).stockQty, 99999);
+    assert.equal((await Ingredient.findById(world.ingredient._id)).stockQty, undefined);
   });
 
   it('marks reorder when on-hand is at or below the ledger minimum', async () => {
-    await InventoryBalance.updateOne(
-      {branch: world.branchA._id, ingredient: world.ingredient._id},
-      {quantity: 500, reorderLevel: 4000}
-    );
+    const adjusted = await request('/api/inventory/adjustments', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'inventory-reorder-threshold'},
+      body: {
+        branch: String(world.branchA._id),
+        ingredient: String(world.ingredient._id),
+        qty: -19500,
+        reason: 'Set test stock to reorder threshold'
+      }
+    });
+    assert.equal(adjusted.status, 201, adjusted.body?.message);
     const list = await request('/api/inventory?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(list.status, 200, list.body?.message);
     assert.equal(list.body[0].status, 'reorder');
@@ -115,6 +126,7 @@ describe('POST /api/inventory/adjustments', () => {
     const adj = await request('/api/inventory/adjustments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'cycle-count-shrink'},
       body: {
         branch: String(world.branchA._id),
         ingredient: String(world.ingredient._id),
@@ -140,6 +152,7 @@ describe('POST /api/inventory/adjustments', () => {
     const over = await request('/api/inventory/adjustments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'over-shrink'},
       body: {branch: String(world.branchA._id), ingredient: String(world.ingredient._id), qty: -999999, reason: 'too much'}
     });
     assert.equal(over.status, 409);
