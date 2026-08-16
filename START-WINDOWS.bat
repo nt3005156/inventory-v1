@@ -6,8 +6,8 @@ cd /d "%~dp0"
 echo.
 echo ==========================================================
 echo   Mittho OPS - Restaurant Inventory and Costing System
- echo  Docker startup for Windows
- echo ==========================================================
+echo   Docker startup for Windows
+echo ==========================================================
 echo.
 
 REM Confirm Docker Desktop / Docker Engine is running.
@@ -27,7 +27,15 @@ REM Make a local environment file on first start.
 if not exist ".env" (
   copy /Y ".env.example" ".env" >nul
   echo [OK] Created .env from .env.example
-  echo [IMPORTANT] Change JWT_SECRET in .env before public deployment.
+)
+
+REM Replace the documented placeholder with a cryptographically random local
+REM secret. Production startup deliberately rejects the placeholder.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$path=Join-Path (Get-Location) '.env'; $content=[IO.File]::ReadAllText($path); if ($content.Contains('JWT_SECRET=replace-with-a-long-random-secret')) { $bytes=New-Object byte[] 32; $rng=[Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }; $secret=[BitConverter]::ToString($bytes).Replace('-','').ToLowerInvariant(); $content=$content.Replace('JWT_SECRET=replace-with-a-long-random-secret','JWT_SECRET='+$secret); [IO.File]::WriteAllText($path,$content,(New-Object Text.UTF8Encoding($false))); Write-Host '[OK] Generated a random JWT secret in .env' }"
+if errorlevel 1 (
+  echo [ERROR] Could not validate or generate JWT_SECRET in .env.
+  pause
+  exit /b 1
 )
 
 echo.
@@ -36,30 +44,34 @@ docker compose up -d --build
 if errorlevel 1 (
   echo.
   echo [ERROR] Docker could not start the project. Read the errors above.
+  echo Check that CLIENT_URL contains the exact browser origin and that any
+  echo custom COMPOSE_MONGODB_URI points to a writable replica set or cluster.
   pause
   exit /b 1
 )
 
 echo.
-echo Waiting for the API to connect to MongoDB...
-set API_READY=
-for /L %%i in (1,1,30) do (
-  curl -fsS http://localhost:4000/health >nul 2>&1
-  if not errorlevel 1 set API_READY=1
-  if defined API_READY goto api_ready
+echo Waiting for the same-origin web and API health endpoint...
+set APP_READY=
+for /L %%i in (1,1,60) do (
+  curl -fsS http://localhost:8080/health >nul 2>&1
+  if not errorlevel 1 set APP_READY=1
+  if defined APP_READY goto app_ready
   timeout /t 2 /nobreak >nul
 )
 
-:api_ready
-if not defined API_READY (
-  echo [WARNING] The API is still starting. Check its logs with:
-  echo docker compose logs -f api
+:app_ready
+if not defined APP_READY (
+  echo [ERROR] The application did not become ready within two minutes.
+  echo Check container state and logs with:
+  echo docker compose ps
+  echo docker compose logs api mongo-init web
   echo.
   pause
   exit /b 1
 )
 
-echo [OK] API and database are ready.
+echo [OK] Web, API, migrations, and database are ready.
 echo.
 choice /C YN /M "Load or RESET the sample Mittho Biryani House demo data?"
 if errorlevel 2 goto open_app
@@ -76,9 +88,9 @@ if errorlevel 1 (
 :open_app
 echo.
 echo ==========================================================
-echo   Mittho OPS is running: http://localhost:8080
- echo  API health check:          http://localhost:4000/health
- echo ==========================================================
+echo   Mittho OPS is running:  http://localhost:8080
+echo   Same-origin health:     http://localhost:8080/health
+echo ==========================================================
 echo.
 start "" http://localhost:8080
 pause

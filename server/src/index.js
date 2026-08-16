@@ -1,6 +1,7 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import cors from 'cors';import rateLimit from 'express-rate-limit';import bcrypt from 'bcryptjs';import jwt from 'jsonwebtoken';
-import {User,Ingredient,MenuItem,Purchase,PriceHistory,Sale,Waste,Expense,MonthlySnapshot,Audit} from './models/index.js';import {auth} from './middleware/auth.js';import {recipeCost,consumeRecipe,inventoryValue,audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime} from './services/realtime.js';import {ensureMonthCloseIndexes} from './services/monthCloseMigration.js';import {ensureSupplierCatalogIndexes} from './services/supplierCatalogMigration.js';import {ensurePurchaseOrderIndexes} from './services/purchaseOrderMigration.js';import {ensureGoodsReceivingIndexes} from './services/goodsReceivingMigration.js';import {ensureInventoryBatchIndexes} from './services/inventoryBatchMigration.js';import {ensurePurchaseReturnIndexes} from './services/purchaseReturnMigration.js';import {ensureSupplierInvoiceIndexes} from './services/supplierInvoiceMigration.js';import {ensureSupplierPaymentIndexes} from './services/supplierPaymentMigration.js';
-const app=express();app.use(cors({origin:process.env.CLIENT_URL?.split(',')||true}));app.use(express.json());app.use('/api',operations);app.use('/api',supplierCatalog);
+import {User,Ingredient,MenuItem,Purchase,PriceHistory,Sale,Waste,Expense,MonthlySnapshot,Audit} from './models/index.js';import {auth} from './middleware/auth.js';import {recipeCost,consumeRecipe,inventoryValue,audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {configuredClientOrigins,ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';
+const allowedOrigins=configuredClientOrigins();const corsOrigin=allowedOrigins.length?allowedOrigins:true;
+const app=express();app.set('trust proxy',1);app.use(cors({origin:corsOrigin}));app.use(express.json());app.use('/api',operations);app.use('/api',supplierCatalog);
 const sign=u=>jwt.sign({id:u._id,name:u.name,role:u.role,restaurantId:u.restaurantId||null,branch:u.branch||null},process.env.JWT_SECRET,{expiresIn:'12h'});
 app.post('/api/auth/login',rateLimit({windowMs:900000,max:10}),async(req,res)=>{const u=await User.findOne({email:req.body.email});if(!u||!await bcrypt.compare(req.body.password,u.password))return res.status(401).json({message:'Invalid email or password'});res.json({token:sign(u),user:{id:u._id,name:u.name,role:u.role,restaurantId:u.restaurantId||null,branch:u.branch||null}})});
 app.post('/api/auth/register',auth(['owner']),async(req,res)=>{const password=await bcrypt.hash(req.body.password,12);res.status(201).json(await User.create({...req.body,password}))});
@@ -12,5 +13,36 @@ app.get('/api/inventory',auth(),async(req,res)=>{const items=await Ingredient.fi
 app.get('/api/dashboard',auth(),async(req,res)=>{const start=new Date();start.setHours(0,0,0,0);const [sales,ingredients,expenses]=await Promise.all([Sale.find({date:{$gte:start}}),Ingredient.find(),Expense.find({date:{$gte:start}})]);const revenue=sales.reduce((s,x)=>s+x.total,0),cogs=sales.reduce((s,x)=>s+x.cogs,0),expense=expenses.reduce((s,x)=>s+x.amount,0);res.json({revenue,cogs,expense,profit:revenue-cogs-expense,orders:sales.length,lowStock:ingredients.filter(x=>x.stockQty<=x.minimumStock),inventoryValue:await inventoryValue()})});
 app.get('/api/analytics/menu-engineering',auth(['owner','manager']),async(req,res)=>{const [menu,sales]=await Promise.all([MenuItem.find(),Sale.find()]);const count={};sales.forEach(s=>s.items.forEach(x=>count[x.menuItem]=(count[x.menuItem]||0)+x.qty));const total=Object.values(count).reduce((a,b)=>a+b,0)||1;const rows=[];for(const m of menu){const cost=await recipeCost(m),pop=(count[m._id]||0)/total,margin=m.price-cost;rows.push({id:m._id,name:m.name,popularity:pop,margin,classification:pop>=.15?(margin>=100?'Star':'Plow-horse'):(margin>=100?'Puzzle':'Dog')})}res.json(rows)});
 app.get('/api/reports/pnl',auth(['owner','manager']),async(req,res)=>{const [sales,buys,expenses]=await Promise.all([Sale.find(),Purchase.find(),Expense.find()]);const revenue=sales.reduce((s,x)=>s+x.total,0),cogs=sales.reduce((s,x)=>s+x.cogs,0),expense=expenses.reduce((s,x)=>s+x.amount,0);res.json({revenue,cogs,grossProfit:revenue-cogs,purchases:buys.reduce((s,x)=>s+x.total,0),expenses:expense,netProfit:revenue-cogs-expense})});
-app.get('/api/audit',auth(['owner']),async(req,res)=>res.json(await Audit.find().sort({at:-1}).limit(300).populate('user')));app.get('/health',(_,res)=>res.json({ok:true}));
-app.use((e,req,res,next)=>{console.error(e);res.status(500).json({message:e.message||'Server error'})});const httpServer=http.createServer(app);attachRealtime(httpServer);mongoose.connect(process.env.MONGODB_URI).then(async()=>{await ensureMonthCloseIndexes();await ensureSupplierCatalogIndexes();await ensurePurchaseOrderIndexes();await ensureGoodsReceivingIndexes();await ensureInventoryBatchIndexes();await ensurePurchaseReturnIndexes();await ensureSupplierInvoiceIndexes();await ensureSupplierPaymentIndexes();httpServer.listen(process.env.PORT||4000,'0.0.0.0',()=>console.log('API ready'))});
+app.get('/api/audit',auth(['owner']),async(req,res)=>res.json(await Audit.find().sort({at:-1}).limit(300).populate('user')));
+let startupReady=false;
+app.get('/health',(_,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting'})});
+app.use((e,req,res,next)=>{console.error(e);res.status(e.status||500).json({message:e.message||'Server error'})});
+
+const httpServer=http.createServer(app);attachRealtime(httpServer,{corsOrigin});
+let shuttingDown=false;
+async function shutdown(signal){
+  if(shuttingDown)return;
+  shuttingDown=true;startupReady=false;
+  console.log(`${signal} received; shutting down`);
+  const force=setTimeout(()=>process.exit(1),10000);force.unref();
+  try{
+    await closeRealtime();
+    if(httpServer.listening)await new Promise((resolve,reject)=>httpServer.close(error=>error?reject(error):resolve()));
+    if(mongoose.connection.readyState)await mongoose.disconnect();
+    clearTimeout(force);
+    process.exit(0);
+  }catch(error){console.error('Graceful shutdown failed',error);process.exit(1)}
+}
+process.once('SIGTERM',()=>shutdown('SIGTERM'));process.once('SIGINT',()=>shutdown('SIGINT'));
+
+async function start(){
+  validateRuntimeEnvironment();
+  await mongoose.connect(process.env.MONGODB_URI);
+  await verifyTransactionCapableDatabase();
+  await ensureOperationalIndexes();
+  startupReady=true;
+  const port=Number(process.env.PORT||4000);
+  await new Promise((resolve,reject)=>{httpServer.once('error',reject);httpServer.listen(port,'0.0.0.0',()=>{httpServer.off('error',reject);resolve()})});
+  console.log(`API ready on port ${port}`);
+}
+start().catch(async error=>{console.error('API startup failed',error);startupReady=false;if(mongoose.connection.readyState)await mongoose.disconnect().catch(()=>{});process.exit(1)});

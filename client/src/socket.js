@@ -1,9 +1,9 @@
 import {io} from 'socket.io-client';
 
 export function socketOrigin() {
-  const api = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
-  if (String(api).startsWith('http')) return String(api).replace(/\/api\/?$/, '');
-  return typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000';
+  const configured = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL;
+  if (configured && String(configured).startsWith('http')) return String(configured).replace(/\/api\/?$/, '');
+  return typeof window !== 'undefined' ? window.location.origin : undefined;
 }
 
 export function connectBranchSocket(token, branchId) {

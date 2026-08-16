@@ -14,7 +14,7 @@ import Expenses from './Expenses.jsx';
 import MonthClose from './MonthClose.jsx';
 import './style.css';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
 
 function App() {
   const [token, setToken] = useState(localStorage.token);
