@@ -114,7 +114,9 @@ describe('canonical inventory ledger contract', () => {
     assert.equal(saved.idempotencyHashVersion, 2);
     assert.ok(saved.createdAt instanceof Date);
     assert.equal(saved.batchMovements.reduce((sum, item) => sum + item.changeQty, 0), -100);
-    assert.equal((await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id})).quantity, 19900);
+    const aggregateBalance = await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
+    assert.equal(aggregateBalance.quantity, 19900);
+    assert.equal(aggregateBalance.ledgerVersion, 2);
     const batchQty = await InventoryBatch.aggregate([
       {$match: {branch: world.branchA._id, ingredient: world.ingredient._id}},
       {$group: {_id: null, quantity: {$sum: '$quantity'}}}
@@ -216,6 +218,9 @@ describe('no silent inventory model writes', () => {
     );
     balance.quantity += 1;
     await assert.rejects(balance.save(), /only be changed by the inventory ledger service/);
+    const versionOnly = await InventoryBalance.findById(balance._id);
+    versionOnly.ledgerVersion += 1;
+    await assert.rejects(versionOnly.save(), /only be changed by the inventory ledger service/);
 
     const batch = await InventoryBatch.findOne({branch: world.branchA._id, ingredient: world.ingredient._id});
     await assert.rejects(

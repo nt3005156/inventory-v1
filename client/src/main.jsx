@@ -137,7 +137,7 @@ function Login({onLogin}) {
 function Page({page, data, call, user, token}) {
   const branches = data.branches || [];
   if (page === 'Dashboard') return <Dashboard call={call} branches={branches} user={user}/>;
-  if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user}/>;
+  if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Inventory') return <Inventory call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Tables') return <Tables call={call} branches={branches} user={user} token={token}/>;
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;

@@ -9,13 +9,14 @@ const inventoryBalanceSchema=new Schema({
   quantity:{type:Number,default:0,min:0},
   reserved:n,
   averageCost:{type:Number,default:0,min:0},
+  ledgerVersion:{type:Number,default:0,min:0,validate:{validator:Number.isSafeInteger,message:'Inventory ledger version must be a nonnegative safe integer'}},
   minLevel:n,
   reorderLevel:n,
   maxLevel:n,
   storageLocation:{type:String,default:'Main Store'}
 },{timestamps:true});
 inventoryBalanceSchema.index({branch:1,ingredient:1,storageLocation:1},{unique:true});
-const stockFields=new Set(['quantity','averageCost']);
+const stockFields=new Set(['quantity','averageCost','ledgerVersion']);
 function inventoryBalanceChangesStock(update={}){
   return Object.entries(update).some(([operator,value])=>{
     if(stockFields.has(operator))return true;
@@ -23,12 +24,14 @@ function inventoryBalanceChangesStock(update={}){
   });
 }
 inventoryBalanceSchema.pre('save',function preventSilentBalanceSave(next,options){
-  const changesStock=this.isNew?Number(this.quantity||0)!==0||Number(this.averageCost||0)!==0:['quantity','averageCost'].some(path=>this.isModified(path));
-  if(changesStock&&!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities and costs may only be changed by the inventory ledger service'),{status:409}));
+  const changesStock=this.isNew
+    ? ['quantity','averageCost','ledgerVersion'].some(path=>Number(this[path]||0)!==0)
+    : ['quantity','averageCost','ledgerVersion'].some(path=>this.isModified(path));
+  if(changesStock&&!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities, costs, and revisions may only be changed by the inventory ledger service'),{status:409}));
   next();
 });
 inventoryBalanceSchema.pre(['updateOne','updateMany','findOneAndUpdate','replaceOne'],function preventSilentBalanceUpdate(next){
-  if(inventoryBalanceChangesStock(this.getUpdate())&&!this.getOptions().inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities and costs may only be changed by the inventory ledger service'),{status:409}));
+  if(inventoryBalanceChangesStock(this.getUpdate())&&!this.getOptions().inventoryLedgerWrite)return next(Object.assign(new Error('Inventory quantities, costs, and revisions may only be changed by the inventory ledger service'),{status:409}));
   next();
 });
 inventoryBalanceSchema.pre(['deleteOne','deleteMany','findOneAndDelete'],function preventSilentBalanceDelete(next){
@@ -131,6 +134,85 @@ inventoryTransactionSchema.index({restaurant:1,branch:1,ingredient:1,createdAt:-
 inventoryTransactionSchema.index({restaurant:1,branch:1,type:1,referenceType:1,createdAt:-1},{name:'inventory_transaction_purchasing_report'});
 inventoryTransactionSchema.index({restaurant:1,referenceType:1,referenceId:1,createdAt:-1},{name:'inventory_transaction_reference_timeline'});
 export const InventoryTransaction=model('InventoryTransaction',inventoryTransactionSchema);
+
+const finiteNumber={type:Number,required:true,validate:{validator:Number.isFinite,message:'Stock count quantities must be finite'}};
+const stockCountLineSchema=new Schema({
+  ingredient:{...oid,ref:'Ingredient',required:true,immutable:true},
+  ingredientName:{type:String,required:true,trim:true,maxlength:160,immutable:true},
+  ingredientCode:{type:String,trim:true,maxlength:80,immutable:true},
+  unit:{type:String,required:true,trim:true,maxlength:30,immutable:true},
+  systemQty:{...finiteNumber,min:0,immutable:true},
+  systemUnitCost:{type:Number,required:true,min:0,validate:{validator:Number.isFinite,message:'Stock count cost must be finite'},immutable:true},
+  balanceVersion:{type:Number,required:true,min:0,validate:{validator:Number.isSafeInteger,message:'Stock count balance version must be a nonnegative safe integer'},immutable:true},
+  physicalQty:{type:Number,min:0,validate:{validator:value=>value==null||Number.isFinite(value),message:'Physical quantity must be finite'}},
+  varianceQty:{type:Number,validate:{validator:value=>value==null||Number.isFinite(value),message:'Variance quantity must be finite'}},
+  varianceValue:{type:Number,validate:{validator:value=>value==null||Number.isFinite(value),message:'Variance value must be finite'}},
+  countedBy:{...oid,ref:'User'},
+  countedAt:Date
+},{_id:true});
+stockCountLineSchema.pre('validate',function validateCountVariance(){
+  if(this.physicalQty==null){
+    if(this.countedBy||this.countedAt)this.invalidate('physicalQty','Uncounted lines cannot retain count evidence');
+    this.varianceQty=undefined;
+    this.varianceValue=undefined;
+    return;
+  }
+  if(!this.countedBy||!this.countedAt)this.invalidate('physicalQty','Physical quantities require count actor and timestamp evidence');
+  this.varianceQty=Number(this.physicalQty)-Number(this.systemQty);
+  this.varianceValue=this.varianceQty*Number(this.systemUnitCost||0);
+});
+
+const stockCountSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true,immutable:true},
+  branch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
+  countNo:{type:String,required:true,trim:true,maxlength:80,immutable:true},
+  scope:{type:String,enum:['full','cycle'],required:true,immutable:true},
+  status:{type:String,enum:['draft','submitted','approved','rejected'],default:'draft',index:true},
+  activeKey:{type:String,trim:true,maxlength:24},
+  lines:{type:[stockCountLineSchema],validate:{validator:rows=>Array.isArray(rows)&&rows.length>0,message:'A stock count requires at least one ingredient'}},
+  notes:{type:String,trim:true,maxlength:2000},
+  submissionNote:{type:String,trim:true,maxlength:2000},
+  decisionNote:{type:String,trim:true,maxlength:2000},
+  countedLineCount:{type:Number,default:0,min:0},
+  varianceLineCount:{type:Number,default:0,min:0},
+  totalVarianceValue:{type:Number,default:0,validate:{validator:Number.isFinite,message:'Total variance value must be finite'}},
+  createdBy:{...oid,ref:'User',required:true,immutable:true},
+  submittedBy:{...oid,ref:'User'},
+  submittedAt:Date,
+  approvedBy:{...oid,ref:'User'},
+  approvedAt:Date,
+  rejectedBy:{...oid,ref:'User'},
+  rejectedAt:Date,
+  adjustmentTransactions:[{...oid,ref:'InventoryTransaction'}],
+  requestKey:{type:String,required:true,trim:true,maxlength:200,select:false,immutable:true},
+  requestHash:{type:String,required:true,match:/^[a-f0-9]{64}$/,select:false,immutable:true},
+  decisionKey:{type:String,trim:true,maxlength:200,select:false},
+  decisionHash:{type:String,match:/^[a-f0-9]{64}$/,select:false}
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+stockCountSchema.pre('validate',function validateStockCount(){
+  const lines=this.lines||[];
+  const ingredientIds=lines.map(line=>String(line.ingredient));
+  if(new Set(ingredientIds).size!==ingredientIds.length)this.invalidate('lines','A stock count cannot contain duplicate ingredients');
+  this.countedLineCount=lines.filter(line=>line.physicalQty!=null).length;
+  this.varianceLineCount=lines.filter(line=>line.physicalQty!=null&&Math.abs(Number(line.physicalQty)-Number(line.systemQty))>1e-9).length;
+  this.totalVarianceValue=lines.reduce((sum,line)=>line.physicalQty==null?sum:sum+(Number(line.physicalQty)-Number(line.systemQty))*Number(line.systemUnitCost||0),0);
+  if(['draft','submitted'].includes(this.status)&&!this.activeKey)this.invalidate('activeKey','Active stock counts require a branch lock');
+  if(['approved','rejected'].includes(this.status)&&this.activeKey)this.invalidate('activeKey','Completed stock counts cannot retain a branch lock');
+  if(this.status!=='draft'&&this.countedLineCount!==lines.length)this.invalidate('lines','Every ingredient requires a physical quantity before submission');
+  if(this.status!=='draft'&&(!this.submittedBy||!this.submittedAt))this.invalidate('status','Submitted stock counts require submission evidence');
+  if(['approved','rejected'].includes(this.status)&&(!this.decisionKey||!this.decisionHash))this.invalidate('status','Completed stock counts require idempotent decision evidence');
+  if(this.status==='approved'&&(!this.approvedBy||!this.approvedAt))this.invalidate('status','Approved stock counts require approval evidence');
+  const adjustmentCount=this.adjustmentTransactions?.length||0;
+  if(this.status==='approved'&&adjustmentCount!==this.varianceLineCount)this.invalidate('adjustmentTransactions','Approved non-zero variances require one ledger movement each');
+  if(this.status!=='approved'&&adjustmentCount)this.invalidate('adjustmentTransactions','Only approved stock counts may reference variance movements');
+  if(this.status==='rejected'&&(!this.rejectedBy||!this.rejectedAt||!this.decisionNote))this.invalidate('status','Rejected stock counts require rejection evidence');
+});
+stockCountSchema.index({restaurant:1,countNo:1},{unique:true,name:'stock_count_restaurant_number'});
+stockCountSchema.index({restaurant:1,branch:1,requestKey:1},{unique:true,name:'stock_count_request_key'});
+stockCountSchema.index({restaurant:1,activeKey:1},{unique:true,name:'stock_count_active_branch',partialFilterExpression:{activeKey:{$type:'string'}}});
+stockCountSchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'stock_count_branch_status_created'});
+export const StockCount=model('StockCount',stockCountSchema);
+
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
 export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));
 export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,foodCost:n,notes:String,modifiers:[{name:String,price:n}],inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],subtotal:n,discount:n,vatRate:{type:Number,default:13},vat:n,serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));

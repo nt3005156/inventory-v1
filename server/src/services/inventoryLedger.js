@@ -138,8 +138,9 @@ export async function moveStock({
   }
   const before=Number(balance.quantity||0);
   const previousCost=Number(balance.averageCost||0);
+  const previousLedgerVersion=Number(balance.ledgerVersion||0);
   const after=before+amount;
-  if(!Number.isFinite(before)||before<0||!Number.isFinite(previousCost)||previousCost<0||!Number.isFinite(after)){
+  if(!Number.isFinite(before)||before<0||!Number.isFinite(previousCost)||previousCost<0||!Number.isSafeInteger(previousLedgerVersion)||previousLedgerVersion<0||!Number.isFinite(after)){
     throw httpError('Inventory aggregate balance is invalid; run the inventory migration before posting movements',409);
   }
   if(after<-1e-9)throw httpError('Insufficient inventory for this movement',409);
@@ -205,6 +206,7 @@ export async function moveStock({
       :cost;
   }
   balance.quantity=Math.max(0,after);
+  balance.ledgerVersion=previousLedgerVersion+1;
   await balance.save({session,inventoryLedgerWrite:true});
 
   const effectiveUnitCost=Number(cost||balance.averageCost||0);

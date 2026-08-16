@@ -97,5 +97,13 @@ describe('operational database startup', () => {
     assert.ok(names.has('goodsreceipts'));
     assert.ok(names.has('supplierinvoices'));
     assert.ok(names.has('supplierpayments'));
+    assert.ok(names.has('stockcounts'));
+    const stockCountIndexes = new Set((await mongoose.connection.db.collection('stockcounts').indexes()).map(index => index.name));
+    for (const name of [
+      'stock_count_restaurant_number',
+      'stock_count_request_key',
+      'stock_count_active_branch',
+      'stock_count_branch_status_created'
+    ]) assert.ok(stockCountIndexes.has(name), `missing ${name}`);
   });
 });

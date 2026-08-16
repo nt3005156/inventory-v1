@@ -166,7 +166,7 @@ export default function Inventory({call, branches = [], user, token}) {
       setAdjustBatch('');
       setAdjustExpiry('');
       adjustmentKey.current = requestKey();
-      setSuccess('Count adjustment posted to the aggregate and batch ledgers.');
+      setSuccess('Immediate manual adjustment posted to the aggregate and batch ledgers.');
       await load();
     } catch (err) {
       setError(err.message || 'Could not post adjustment');
@@ -288,8 +288,8 @@ export default function Inventory({call, branches = [], user, token}) {
 
       {canManage && branchId && (
         <>
-          <h3>Count adjustment</h3>
-          <p>Positive stock can carry a batch and expiry. Negative stock uses the named batch when supplied; otherwise it removes FEFO and may include expired lots for count reconciliation.</p>
+          <h3>Immediate manual adjustment</h3>
+          <p>This owner/manager action posts now and does not use count approval. Use Stock Ops for full or cycle physical counts. Positive stock can carry a batch and expiry; negative stock removes the named batch or FEFO lots.</p>
           <form className="purchaseform inventory-adjustment" onSubmit={adjust}>
             <select required value={ingredient} onChange={event => setIngredient(event.target.value)}>
               <option value="">Ingredient</option>
