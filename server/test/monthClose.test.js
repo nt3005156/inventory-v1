@@ -298,6 +298,7 @@ describe('month-close tenant identity', () => {
       branch: foreign.branch._id,
       ingredient: world.ingredient._id,
       type: 'WASTE',
+      wasteCategory: 'other',
       previousQty: 100,
       changeQty: -1,
       newQty: 99,

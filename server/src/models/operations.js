@@ -87,6 +87,9 @@ const inventoryBatchMovementSchema=new Schema({
 export const INVENTORY_MOVEMENT_TYPES=Object.freeze([
   'OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','RETURN','ADJUSTMENT'
 ]);
+export const WASTE_CATEGORY_TYPES=Object.freeze([
+  'expired','spoiled','damaged','burned','spilled','wrong_preparation','customer_return','other'
+]);
 const immutableQuantity={type:Number,required:true,immutable:true,validate:{validator:Number.isFinite,message:'Inventory quantity must be finite'}};
 const inventoryTransactionSchema=new Schema({
   restaurant:{...oid,ref:'Restaurant',required:true,index:true,immutable:true},
@@ -106,6 +109,9 @@ const inventoryTransactionSchema=new Schema({
   referenceType:{type:String,required:true,trim:true,minlength:2,maxlength:80,immutable:true},
   referenceId:{...oid,required:true,immutable:true},
   user:{...oid,ref:'User',required:true,immutable:true},
+  wasteCategory:{type:String,enum:WASTE_CATEGORY_TYPES,immutable:true},
+  wasteNotes:{type:String,trim:true,maxlength:2000,immutable:true},
+  wasteBatch:{...oid,ref:'InventoryBatch',immutable:true},
   batchMovements:{type:[inventoryBatchMovementSchema],default:undefined,immutable:true},
   idempotencyKey:{type:String,required:true,trim:true,minlength:3,maxlength:200,immutable:true},
   idempotencyHash:{type:String,required:true,trim:true,match:/^[a-f0-9]{64}$/,immutable:true},
@@ -117,6 +123,8 @@ inventoryTransactionSchema.pre('validate',function validateInventoryEquation(){
   if([previous,change,next].every(Number.isFinite)&&Math.abs(previous+change-next)>1e-7)this.invalidate('newQty','New quantity must equal previous quantity plus change');
   const expectedCost=Math.abs(change)*Number(this.unitCost);
   if(Number.isFinite(expectedCost)&&Math.abs(expectedCost-Number(this.totalCost))>0.011)this.invalidate('totalCost','Total cost must equal absolute quantity change multiplied by unit cost');
+  if(this.type==='WASTE'&&!this.wasteCategory)this.invalidate('wasteCategory','Waste movements require a structured waste category');
+  if(this.type!=='WASTE'&&(this.wasteCategory||this.wasteNotes||this.wasteBatch))this.invalidate('wasteCategory','Waste evidence is only valid for WASTE movements');
 });
 inventoryTransactionSchema.pre('save',function preventLedgerRewrite(next,options){
   if(this.isNew&&!options?.inventoryLedgerWrite)return next(Object.assign(new Error('Inventory ledger rows may only be created by the inventory ledger service'),{status:409}));
@@ -132,6 +140,7 @@ inventoryTransactionSchema.pre(['insertMany','bulkWrite'],function preventLedger
 inventoryTransactionSchema.index({restaurant:1,branch:1,idempotencyKey:1},{unique:true,name:'inventory_transaction_tenant_idempotency'});
 inventoryTransactionSchema.index({restaurant:1,branch:1,ingredient:1,createdAt:-1},{name:'inventory_transaction_tenant_ingredient_timeline'});
 inventoryTransactionSchema.index({restaurant:1,branch:1,type:1,referenceType:1,createdAt:-1},{name:'inventory_transaction_purchasing_report'});
+inventoryTransactionSchema.index({restaurant:1,branch:1,type:1,wasteCategory:1,createdAt:-1},{name:'inventory_transaction_waste_report'});
 inventoryTransactionSchema.index({restaurant:1,referenceType:1,referenceId:1,createdAt:-1},{name:'inventory_transaction_reference_timeline'});
 export const InventoryTransaction=model('InventoryTransaction',inventoryTransactionSchema);
 

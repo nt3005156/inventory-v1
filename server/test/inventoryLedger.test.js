@@ -335,6 +335,7 @@ describe('inventory ledger and batch migrations', () => {
       'inventory_transaction_tenant_idempotency',
       'inventory_transaction_tenant_ingredient_timeline',
       'inventory_transaction_purchasing_report',
+      'inventory_transaction_waste_report',
       'inventory_transaction_reference_timeline'
     ]) assert.ok(names.has(name), `missing ${name}`);
   });

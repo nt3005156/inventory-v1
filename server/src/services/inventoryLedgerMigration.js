@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import {Branch, INVENTORY_MOVEMENT_TYPES, InventoryTransaction} from '../models/operations.js';
+import {Branch, INVENTORY_MOVEMENT_TYPES, WASTE_CATEGORY_TYPES, InventoryTransaction} from '../models/operations.js';
 import {Ingredient, User} from '../models/index.js';
 
 const id=value=>value?String(value):'';
@@ -8,6 +8,21 @@ const finite=value=>Number.isFinite(Number(value));
 const validHash=value=>/^[a-f0-9]{64}$/.test(String(value||''));
 const positiveTypes=new Set(['OPENING','PURCHASE','REVERSAL','TRANSFER_IN']);
 const negativeTypes=new Set(['SALE','RECIPE_DEDUCTION','WASTE','TRANSFER_OUT','RETURN']);
+
+function legacyWasteCategory(document){
+  if(WASTE_CATEGORY_TYPES.includes(document.wasteCategory))return document.wasteCategory;
+  const evidence=String(document.reason||'').toLowerCase();
+  return WASTE_CATEGORY_TYPES.find(category=>category!=='other'&&(
+    evidence.includes(category)||evidence.includes(category.replaceAll('_',' '))
+  ))||'other';
+}
+
+function legacyWasteNotes(document){
+  if(document.wasteNotes!=null)return String(document.wasteNotes).trim().slice(0,2000);
+  const reason=String(document.reason||'');
+  const separator=reason.indexOf('—');
+  return separator<0?'':reason.slice(separator+1).trim().slice(0,2000);
+}
 
 function legacyHash(document){
   return crypto.createHash('sha256').update(JSON.stringify({
@@ -72,6 +87,7 @@ async function normalizedUpdates(documents){
     }
     const type=document.type==='RECIPE_REVERSAL'?'REVERSAL':document.type;
     if(!INVENTORY_MOVEMENT_TYPES.includes(type))throw new Error(`Inventory ledger transaction ${document._id} has unsupported type ${document.type}`);
+    const upgradesLegacyWaste=type==='WASTE'&&!WASTE_CATEGORY_TYPES.includes(document.wasteCategory);
     const quantity=quantities(document,type);
     const unitCost=finite(document.unitCost)&&Number(document.unitCost)>=0
       ?Number(document.unitCost)
@@ -97,10 +113,16 @@ async function normalizedUpdates(documents){
       user:document.user,
       idempotencyKey:String(document.idempotencyKey||`ledger-migration:${document._id}`).trim().slice(0,200),
       idempotencyHash:validHash(document.idempotencyHash)?document.idempotencyHash:legacyHash({...document,type,...quantity}),
-      idempotencyHashVersion:Number(document.idempotencyHashVersion)===2?2:1,
+      idempotencyHashVersion:upgradesLegacyWaste?1:Number(document.idempotencyHashVersion)===2?2:1,
       createdAt,
       updatedAt:document.updatedAt instanceof Date?document.updatedAt:createdAt
     };
+    if(type==='WASTE'){
+      normalized.wasteCategory=legacyWasteCategory(document);
+      const wasteNotes=legacyWasteNotes(document);
+      if(wasteNotes)normalized.wasteNotes=wasteNotes;
+      if(mongoose.isValidObjectId(document.wasteBatch))normalized.wasteBatch=document.wasteBatch;
+    }
     if(normalized.reason.length<3)normalized.reason=`Imported ${type.toLowerCase()} movement`;
     if(normalized.referenceType.length<2)normalized.referenceType='legacy';
     if(normalized.idempotencyKey.length<3)normalized.idempotencyKey=`ledger-migration:${document._id}`;
@@ -117,6 +139,7 @@ async function replaceIndexes(collection){
     inventory_transaction_tenant_idempotency:{key:{restaurant:1,branch:1,idempotencyKey:1},unique:true},
     inventory_transaction_tenant_ingredient_timeline:{key:{restaurant:1,branch:1,ingredient:1,createdAt:-1}},
     inventory_transaction_purchasing_report:{key:{restaurant:1,branch:1,type:1,referenceType:1,createdAt:-1}},
+    inventory_transaction_waste_report:{key:{restaurant:1,branch:1,type:1,wasteCategory:1,createdAt:-1}},
     inventory_transaction_reference_timeline:{key:{restaurant:1,referenceType:1,referenceId:1,createdAt:-1}}
   };
   const indexes=await collection.indexes();

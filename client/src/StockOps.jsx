@@ -2,7 +2,11 @@ import React, {useEffect, useRef, useState} from 'react';
 import {connectBranchSocket} from './socket.js';
 
 const requestKey = prefix => globalThis.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const WASTE_REASONS = ['expired', 'spoiled', 'burned', 'spilled', 'damaged', 'wrong_preparation', 'customer_return', 'other'];
+const WASTE_REASONS = ['expired', 'spoiled', 'damaged', 'burned', 'spilled', 'wrong_preparation', 'customer_return', 'other'];
+const WASTE_LABELS = {
+  expired: 'Expired', spoiled: 'Spoiled', damaged: 'Damaged', burned: 'Burned', spilled: 'Spilled',
+  wrong_preparation: 'Wrong preparation', customer_return: 'Customer return', other: 'Other'
+};
 const COUNT_STATUSES = ['draft', 'submitted', 'approved', 'rejected'];
 
 function qtyLabel(qty, unit) {
@@ -45,7 +49,20 @@ export default function StockOps({call, branches = [], user, token}) {
   const [transfers, setTransfers] = useState([]);
   const [ingredient, setIngredient] = useState('');
   const [qty, setQty] = useState(1);
+  const [wasteIngredient, setWasteIngredient] = useState('');
+  const [wasteQty, setWasteQty] = useState(1);
   const [reason, setReason] = useState('spoiled');
+  const [wasteNotes, setWasteNotes] = useState('');
+  const [wasteBatch, setWasteBatch] = useState('');
+  const [batches, setBatches] = useState([]);
+  const [wasteEvents, setWasteEvents] = useState([]);
+  const [wasteSummary, setWasteSummary] = useState({eventCount: 0, totalQuantity: 0, totalValue: 0, categories: []});
+  const [wasteFilter, setWasteFilter] = useState('');
+  const [wasteFrom, setWasteFrom] = useState('');
+  const [wasteTo, setWasteTo] = useState('');
+  const [wastePage, setWastePage] = useState(1);
+  const [wastePagination, setWastePagination] = useState({page: 1, pages: 1, total: 0});
+  const [wasteLoading, setWasteLoading] = useState(false);
   const [destination, setDestination] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -68,7 +85,9 @@ export default function StockOps({call, branches = [], user, token}) {
   const countCreateKey = useRef(requestKey('stock-count'));
   const decisionKey = useRef(requestKey('stock-count-decision'));
   const loadSequence = useRef(0);
+  const wasteLoadSequence = useRef(0);
   const loadRef = useRef(null);
+  const wasteLoadRef = useRef(null);
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
 
   useEffect(() => {
@@ -109,18 +128,40 @@ export default function StockOps({call, branches = [], user, token}) {
     }
   };
 
+  const loadWaste = async () => {
+    if (!branchId) return;
+    const sequence = ++wasteLoadSequence.current;
+    setWasteLoading(true);
+    try {
+      const params = new URLSearchParams({branch: branchId, page: String(wastePage), limit: '50'});
+      if (wasteFilter) params.set('category', wasteFilter);
+      if (wasteFrom) params.set('from', wasteFrom);
+      if (wasteTo) params.set('to', wasteTo);
+      const result = await call('/waste/events?' + params.toString());
+      if (sequence !== wasteLoadSequence.current) return;
+      setWasteEvents(Array.isArray(result?.items) ? result.items : []);
+      setWasteSummary(result?.summary || {eventCount: 0, totalQuantity: 0, totalValue: 0, categories: []});
+      setWastePagination(result?.pagination || {page: 1, pages: 1, total: 0});
+    } catch (err) {
+      if (sequence === wasteLoadSequence.current) setError(err.message || 'Could not load waste history');
+    } finally {
+      if (sequence === wasteLoadSequence.current) setWasteLoading(false);
+    }
+  };
+
   const load = async ({preserveCount = true} = {}) => {
     if (!branchId) return;
     const sequence = ++loadSequence.current;
     setLoading(true);
     setError('');
     try {
-      const [balances, allBranches, rows, countResult, options] = await Promise.all([
+      const [balances, allBranches, rows, countResult, options, batchResult] = await Promise.all([
         call('/inventory/balances?branch=' + encodeURIComponent(branchId)),
         call('/branches'),
         call('/transfers?branch=' + encodeURIComponent(branchId)),
         call('/stock-counts?branch=' + encodeURIComponent(branchId)),
-        call('/supplier-catalog/options')
+        call('/supplier-catalog/options'),
+        call('/inventory/batches?branch=' + encodeURIComponent(branchId) + '&limit=250')
       ]);
       if (sequence !== loadSequence.current) return;
       setItems(Array.isArray(balances) ? balances : []);
@@ -129,6 +170,7 @@ export default function StockOps({call, branches = [], user, token}) {
       setCounts(Array.isArray(countResult?.items) ? countResult.items : []);
       setCountSummary(countResult?.summary || {pending: 0});
       setIngredients(Array.isArray(options?.ingredients) ? options.ingredients : []);
+      setBatches(Array.isArray(batchResult?.items) ? batchResult.items : []);
       if (preserveCount && selectedCount?._id) {
         const current = countResult?.items?.find(count => String(count._id) === String(selectedCount._id));
         if (current) hydrateCount(current);
@@ -141,9 +183,13 @@ export default function StockOps({call, branches = [], user, token}) {
   };
 
   loadRef.current = load;
+  wasteLoadRef.current = loadWaste;
 
   useEffect(() => {
     setIngredient('');
+    setWasteIngredient('');
+    setWasteBatch('');
+    setWastePage(1);
     setDestination('');
     setMessage('');
     setSelectedCount(null);
@@ -154,11 +200,18 @@ export default function StockOps({call, branches = [], user, token}) {
   }, [branchId]);
 
   useEffect(() => {
+    if (branchId) loadWaste();
+  }, [branchId, wasteFilter, wasteFrom, wasteTo, wastePage]);
+
+  useEffect(() => {
     if (!branchId || !authToken) return undefined;
     let active = true;
     const socket = connectBranchSocket(authToken, branchId);
     const refresh = event => {
-      if (String(event?.branch || '') === String(branchId)) loadRef.current?.();
+      if (String(event?.branch || '') === String(branchId)) {
+        loadRef.current?.();
+        wasteLoadRef.current?.();
+      }
     };
     socket.on('connect', () => {
       socket.timeout(5000).emit('join:branch', branchId, (joinError, ack) => {
@@ -177,18 +230,38 @@ export default function StockOps({call, branches = [], user, token}) {
 
   const waste = async event => {
     event.preventDefault();
+    const item = items.find(row => String(row.ingredient?._id) === String(wasteIngredient));
+    const lot = batches.find(row => String(row._id) === String(wasteBatch));
+    const confirmation = [
+      `Record ${qtyLabel(wasteQty, item?.ingredient?.unit)} of ${item?.ingredient?.name || 'this ingredient'} as ${WASTE_LABELS[reason]} waste?`,
+      lot ? `Lot: ${lot.batchNumber || 'unlabeled'} (${qtyLabel(lot.quantity, lot.unit)} available).` : 'No lot selected; stock will be removed using the canonical batch allocation order.',
+      `Estimated ledger value: ${rs(Number(wasteQty) * Number(lot?.unitCost ?? item?.averageCost ?? 0))}. This posts immediately and cannot be edited.`
+    ].join('\n');
+    if (typeof globalThis.confirm === 'function' && !globalThis.confirm(confirmation)) return;
     setBusy('waste');
     setError('');
     setMessage('');
     try {
-      await call('/waste/record', {
+      const recorded = await call('/waste/record', {
         method: 'POST',
         headers: {'Idempotency-Key': wasteKey.current},
-        body: JSON.stringify({branch: branchId, ingredient, qty: Number(qty), reason})
+        body: JSON.stringify({
+          branch: branchId,
+          ingredient: wasteIngredient,
+          qty: Number(wasteQty),
+          reason,
+          ...(wasteNotes.trim() ? {notes: wasteNotes.trim()} : {}),
+          ...(wasteBatch ? {batchId: wasteBatch} : {})
+        })
       });
       wasteKey.current = requestKey('waste');
-      setMessage('Waste recorded and inventory ledger updated.');
+      setWasteNotes('');
+      setWasteBatch('');
+      setWasteQty(1);
+      setMessage(`Waste recorded as ${WASTE_LABELS[reason]}. Ledger ${String(recorded?._id || '').slice(-8)} posted at ${rs(recorded?.totalCost)}.`);
       await load();
+      if (wastePage === 1) await loadWaste();
+      else setWastePage(1);
     } catch (err) {
       setError(err.message || 'Could not record waste');
     } finally {
@@ -355,6 +428,9 @@ export default function StockOps({call, branches = [], user, token}) {
   const canEditSelected = selectedCount?.status === 'draft'
     && (user?.role === 'owner' || String(selectedCount?.createdBy?._id || selectedCount?.createdBy || '') === userId);
   const allCounted = selectedCount?.lines?.every(line => line.physicalQty != null);
+  const selectedWasteItem = items.find(row => String(row.ingredient?._id) === String(wasteIngredient));
+  const wasteLots = batches.filter(batch => String(batch.ingredient) === String(wasteIngredient) && Number(batch.quantity) > 0);
+  const selectedWasteLot = wasteLots.find(batch => String(batch._id) === String(wasteBatch));
 
   return (
     <section className="panel stock-ops-workspace">
@@ -558,28 +634,66 @@ export default function StockOps({call, branches = [], user, token}) {
       )}
 
       <div className="stock-direct-heading">
-        <h3>Direct stock operations</h3>
-        <p>Waste posts immediately. Transfers move ledger quantity after approve → ship → receive.</p>
+        <h3>Waste management & direct stock operations</h3>
+        <p>Waste is valued from canonical inventory cost and posts one immutable ledger movement immediately. Transfers move stock after approve → ship → receive.</p>
       </div>
-      <div className="stockforms">
-        <form onSubmit={waste}>
-          <h3>Record waste</h3>
-          <select required value={ingredient} onChange={event => setIngredient(event.target.value)}>
-            <option value="">Ingredient</option>
-            {items.map(item => (
-              <option key={item._id} value={item.ingredient?._id}>
-                {item.ingredient?.name} — {item.quantity} {item.ingredient?.unit}
-              </option>
-            ))}
-          </select>
-          <input required type="number" min=".01" step=".01" value={qty} onChange={event => setQty(event.target.value)} />
-          <select value={reason} onChange={event => setReason(event.target.value)}>
-            {WASTE_REASONS.map(item => <option key={item}>{item}</option>)}
-          </select>
-          <button disabled={!!busy}>{busy === 'waste' ? 'Recording…' : 'Record waste'}</button>
+
+      <div className="waste-summary-grid" aria-label="Waste summary">
+        <article><small>Waste events</small><strong>{wasteSummary.eventCount || 0}</strong><span>Current date filters</span></article>
+        <article><small>Total quantity</small><strong>{Number(wasteSummary.totalQuantity || 0).toLocaleString('en-NP', {maximumFractionDigits: 2})}</strong><span>Across ingredient units</span></article>
+        <article className="waste-value"><small>Inventory value lost</small><strong>{rs(wasteSummary.totalValue)}</strong><span>Canonical weighted cost</span></article>
+      </div>
+      <div className="waste-category-summary">
+        {(wasteSummary.categories || []).map(category => (
+          <button key={category.category} type="button" className={wasteFilter === category.category ? 'active' : ''} onClick={() => { setWastePage(1); setWasteFilter(current => current === category.category ? '' : category.category); }}>
+            <span>{category.label}</span><b>{category.eventCount}</b><small>{rs(category.value)}</small>
+          </button>
+        ))}
+      </div>
+
+      <div className="stockforms waste-forms">
+        <form onSubmit={waste} className="waste-form">
+          <div><h3>Record waste</h3><p>Review the confirmation carefully. Posted waste cannot be edited or deleted.</p></div>
+          <label>Ingredient & available stock
+            <select required value={wasteIngredient} onChange={event => { setWasteIngredient(event.target.value); setWasteBatch(''); }}>
+              <option value="">Select ingredient</option>
+              {items.map(item => (
+                <option key={item._id} value={item.ingredient?._id} disabled={Number(item.quantity) <= 0}>
+                  {item.ingredient?.name} — {qtyLabel(item.quantity, item.ingredient?.unit)} available
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>Waste quantity <small>Enter in {selectedWasteItem?.ingredient?.unit || 'the ingredient stock unit'}.</small>
+            <input required type="number" min=".01" max={selectedWasteLot?.quantity || selectedWasteItem?.quantity || undefined} step=".01" value={wasteQty} onChange={event => setWasteQty(event.target.value)} />
+          </label>
+          <label>Category
+            <select value={reason} onChange={event => setReason(event.target.value)}>
+              {WASTE_REASONS.map(category => <option key={category} value={category}>{WASTE_LABELS[category]}</option>)}
+            </select>
+          </label>
+          <label>Inventory lot <small>Optional. Select a lot for exact batch disposal.</small>
+            <select value={wasteBatch} disabled={!wasteIngredient || !wasteLots.length} onChange={event => setWasteBatch(event.target.value)}>
+              <option value="">Automatic canonical allocation</option>
+              {wasteLots.map(batch => (
+                <option key={batch._id} value={batch._id}>
+                  {batch.batchNumber || 'Unlabeled lot'} · {qtyLabel(batch.quantity, batch.unit)} · {batch.status.replace('_', ' ')}{batch.expiryDate ? ` · expires ${new Date(batch.expiryDate).toLocaleDateString('en-NP', {timeZone: 'UTC'})}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>Operational notes <small>{wasteNotes.length}/2000</small>
+            <textarea maxLength="2000" value={wasteNotes} onChange={event => setWasteNotes(event.target.value)} placeholder="What happened, station, shift, corrective action, or customer-return context" />
+          </label>
+          <div className="waste-preview">
+            <b>{WASTE_LABELS[reason]}</b>
+            <span>{wasteIngredient ? `${qtyLabel(wasteQty, items.find(row => String(row.ingredient?._id) === String(wasteIngredient))?.ingredient?.unit)} will be removed` : 'Select an ingredient to preview the posting'}</span>
+            <small>{selectedWasteLot ? `Exact lot: ${selectedWasteLot.batchNumber || 'unlabeled'}` : 'Lot allocation: automatic'}</small>
+          </div>
+          <button disabled={!!busy || !wasteIngredient}>{busy === 'waste' ? 'Posting immutable ledger event…' : 'Review & record waste'}</button>
         </form>
         <form onSubmit={requestTransfer}>
-          <h3>Request transfer</h3>
+          <div><h3>Request transfer</h3><p>Choose the source ingredient and destination branch.</p></div>
           <select required value={ingredient} onChange={event => setIngredient(event.target.value)}>
             <option value="">Ingredient</option>
             {items.map(item => (
@@ -590,10 +704,54 @@ export default function StockOps({call, branches = [], user, token}) {
             <option value="">Destination branch</option>
             {destinations.map(item => <option key={item._id} value={item._id}>{item.name}</option>)}
           </select>
-          <input required type="number" min=".01" step=".01" value={qty} onChange={event => setQty(event.target.value)} />
+          <input required aria-label="Transfer quantity" type="number" min=".01" step=".01" value={qty} onChange={event => setQty(event.target.value)} />
           <button disabled={!!busy}>{busy === 'transfer' ? 'Requesting…' : 'Request transfer'}</button>
         </form>
       </div>
+
+      <div className="waste-history-heading">
+        <div><h3>Waste ledger history</h3><p>Branch-scoped category, lot, actor, value, notes, and immutable ledger evidence.</p></div>
+        <div className="waste-filters">
+          <select aria-label="Waste category filter" value={wasteFilter} onChange={event => { setWastePage(1); setWasteFilter(event.target.value); }}>
+            <option value="">All categories</option>
+            {WASTE_REASONS.map(category => <option key={category} value={category}>{WASTE_LABELS[category]}</option>)}
+          </select>
+          <label>From<input aria-label="Waste from date" type="date" value={wasteFrom} onChange={event => { setWastePage(1); setWasteFrom(event.target.value); }} /></label>
+          <label>To<input aria-label="Waste to date" type="date" value={wasteTo} onChange={event => { setWastePage(1); setWasteTo(event.target.value); }} /></label>
+          <button type="button" className="po-secondary" disabled={!wasteFilter && !wasteFrom && !wasteTo} onClick={() => { setWastePage(1); setWasteFilter(''); setWasteFrom(''); setWasteTo(''); }}>Clear</button>
+        </div>
+      </div>
+      {wasteLoading && <p className="empty">Loading waste ledger history…</p>}
+      {!wasteLoading && !wasteEvents.length && <p className="empty">No waste events match this branch and filter range.</p>}
+      {!wasteLoading && !!wasteEvents.length && (
+        <div className="table-scroll">
+          <table className="waste-register">
+            <thead><tr><th>Date & actor</th><th>Ingredient</th><th>Category</th><th>Quantity</th><th>Value</th><th>Lot evidence</th><th>Notes & ledger</th></tr></thead>
+            <tbody>
+              {wasteEvents.map(event => (
+                <tr key={event._id}>
+                  <td>{dateTime(event.createdAt)}<small>{event.actor?.name || 'Unknown actor'} · {event.actor?.role || 'user'}</small></td>
+                  <td><b>{event.ingredient?.name || 'Ingredient'}</b><small>{event.ingredient?.code || 'No code'}</small></td>
+                  <td><span className={'pill waste-' + event.category}>{event.categoryLabel || WASTE_LABELS[event.category]}</span></td>
+                  <td>{qtyLabel(event.quantity, event.unit)}<small>{qtyLabel(event.previousQty, event.unit)} → {qtyLabel(event.newQty, event.unit)}</small></td>
+                  <td><b>{rs(event.value)}</b><small>{rs(event.unitCost)} / {event.unit}</small></td>
+                  <td>{event.batches?.length ? event.batches.map(batch => batch.batchNumber || 'Unlabeled lot').join(', ') : 'No lot evidence'}<small>{event.batches?.length ? event.batches.map(batch => `${qtyLabel(batch.quantity, event.unit)}${batch.expiryDate ? ` · exp ${new Date(batch.expiryDate).toLocaleDateString('en-NP', {timeZone: 'UTC'})}` : ''}`).join(' | ') : '—'}</small></td>
+                  <td>{event.notes || 'No operational note'}<small>Ledger …{String(event.ledgerTransactionId || event._id).slice(-8)}</small></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!wasteLoading && wastePagination.pages > 1 && (
+        <div className="waste-pagination">
+          <span>{wastePagination.total} events · page {wastePagination.page} of {wastePagination.pages}</span>
+          <div>
+            <button type="button" className="po-secondary" disabled={wastePage <= 1} onClick={() => setWastePage(page => Math.max(1, page - 1))}>Previous</button>
+            <button type="button" className="po-secondary" disabled={wastePage >= wastePagination.pages} onClick={() => setWastePage(page => Math.min(wastePagination.pages, page + 1))}>Next</button>
+          </div>
+        </div>
+      )}
 
       <h3>Branch transfers</h3>
       {!transfers.length && <p className="empty">No transfer requests for this branch.</p>}

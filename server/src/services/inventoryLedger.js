@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import {Ingredient, MenuItem, User} from '../models/index.js';
-import {Branch, INVENTORY_MOVEMENT_TYPES, InventoryBalance, InventoryTransaction, Notification, Order} from '../models/operations.js';
+import {Branch, INVENTORY_MOVEMENT_TYPES, WASTE_CATEGORY_TYPES, InventoryBalance, InventoryTransaction, Notification, Order} from '../models/operations.js';
 import {addBatchStock, removeBatchStock} from './inventoryBatches.js';
 
 function canonical(value) {
@@ -52,17 +52,29 @@ function validateMovementInput(input,session){
   if(clean(input.referenceType).length>80)throw httpError('Inventory movement reference type must be 80 characters or fewer');
   if(clean(input.idempotencyKey).length<3)throw httpError('Inventory movement idempotency key is required');
   if(clean(input.idempotencyKey).length>200)throw httpError('Inventory movement idempotency key must be 200 characters or fewer');
+  const hasWasteEvidence=Boolean(input.wasteCategory||clean(input.wasteNotes)||input.wasteBatch);
+  if(input.type==='WASTE'&&!WASTE_CATEGORY_TYPES.includes(input.wasteCategory))throw httpError('Waste inventory movements require a valid structured category');
+  if(input.type!=='WASTE'&&hasWasteEvidence)throw httpError('Waste evidence is only valid for WASTE inventory movements');
+  if(clean(input.wasteNotes).length>2000)throw httpError('Waste notes must be 2000 characters or fewer');
+  if(input.wasteBatch&&!mongoose.isValidObjectId(input.wasteBatch))throw httpError('Invalid waste batch');
+  if(input.type==='WASTE'&&clean(input.wasteBatch)!==clean(input.batchId))throw httpError('Waste batch evidence must match the requested inventory batch');
   return {amount,cost};
 }
 
 function assertIdempotentReplay(prior,hash,input) {
+  const legacyWasteMatch=prior.type!=='WASTE'||(!prior.wasteCategory||(
+    prior.wasteCategory===input.wasteCategory
+    &&clean(prior.wasteNotes)===clean(input.wasteNotes)
+    &&(!prior.wasteBatch||clean(prior.wasteBatch)===clean(input.wasteBatch))
+  ));
   const legacyMatch=Number(prior.idempotencyHashVersion||1)===1
     &&String(prior.branch)===String(input.branch)
     &&String(prior.ingredient)===String(input.ingredient)
     &&Number(prior.changeQty)===Number(input.qty)
     &&prior.type===input.type
     &&String(prior.referenceId)===String(input.referenceId)
-    &&String(prior.user)===String(input.user);
+    &&String(prior.user)===String(input.user)
+    &&legacyWasteMatch;
   if(prior.idempotencyHash!==hash&&!legacyMatch){
     throw httpError('Idempotency key was already used for a different inventory movement',409);
   }
@@ -85,10 +97,14 @@ export async function moveStock({
   restoredMovements,
   batchId,
   batchNumber,
-  allowExpired
+  allowExpired,
+  wasteCategory,
+  wasteNotes,
+  wasteBatch
 }, session) {
   const {amount,cost}=validateMovementInput({
-    branch,ingredient,qty,type,reason,referenceType,referenceId,user,idempotencyKey,unitCost
+    branch,ingredient,qty,type,reason,referenceType,referenceId,user,idempotencyKey,unitCost,
+    wasteCategory,wasteNotes,wasteBatch,batchId
   },session);
   const [branchRecord,ingredientRecord,userRecord]=await Promise.all([
     Branch.findById(branch).select('restaurant active').session(session).lean(),
@@ -106,6 +122,7 @@ export async function moveStock({
   const normalizedReason=clean(reason);
   const normalizedReferenceType=clean(referenceType);
   const normalizedKey=clean(idempotencyKey);
+  const normalizedWasteNotes=clean(wasteNotes);
   const idempotencyHash=inventoryMovementFingerprint({
     restaurant,
     branch,
@@ -122,12 +139,18 @@ export async function moveStock({
     restoredMovements,
     batchId,
     batchNumber,
-    allowExpired
+    allowExpired,
+    wasteCategory,
+    wasteNotes:normalizedWasteNotes,
+    wasteBatch
   });
   const transactionId=inventoryMovementId({restaurant,branch,idempotencyKey:normalizedKey});
   const prior=await InventoryTransaction.findOne({restaurant,branch,idempotencyKey:normalizedKey}).session(session);
   if(prior){
-    assertIdempotentReplay(prior,idempotencyHash,{branch,ingredient,qty:amount,type,referenceId,user});
+    assertIdempotentReplay(prior,idempotencyHash,{
+      branch,ingredient,qty:amount,type,referenceId,user,wasteCategory,wasteNotes:normalizedWasteNotes,wasteBatch
+    });
+    prior.$locals.idempotentReplay=true;
     return prior;
   }
 
@@ -226,6 +249,11 @@ export async function moveStock({
     referenceType:normalizedReferenceType,
     referenceId,
     user,
+    ...(type==='WASTE'?{
+      wasteCategory,
+      ...(normalizedWasteNotes?{wasteNotes:normalizedWasteNotes}:{}),
+      ...(wasteBatch?{wasteBatch}: {})
+    }:{}),
     batchMovements,
     idempotencyKey:normalizedKey,
     idempotencyHash,
