@@ -1,9 +1,10 @@
 import mongoose from 'mongoose';
-import {Audit, Expense} from '../models/index.js';
+import {Audit, Expense, User} from '../models/index.js';
 import {Branch} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
 import {vatOf} from './invoices.js';
 import {money} from './statements.js';
+import {purchaseBranchContext} from './purchaseOrders.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
   const err = new Error(message);
@@ -29,15 +30,39 @@ export function expenseVat(amount, vat) {
   return vatOf(amount);
 }
 
-export function expenseQuery({branchId, from, to, toExclusive} = {}) {
+export function expenseQuery({branchId, branchIds = [], userIds = [], from, to, toExclusive} = {}) {
   const match = dateRange(from, to, toExclusive);
-  if (!branchId) return match;
+  const ownedBranches = branchId ? [branchId] : branchIds;
   match.$or = [
-    {branch: branchId},
-    {branch: null},
-    {branch: {$exists: false}}
+    {branch: {$in: ownedBranches}},
+    {
+      $and: [
+        {$or: [{branch: null}, {branch: {$exists: false}}]},
+        {createdBy: {$in: userIds}}
+      ]
+    }
   ];
   return match;
+}
+
+export async function resolveExpenseContext({user, branchId, session} = {}) {
+  const identity = await userRestaurantContext(user, {session});
+  let branch = branchId || null;
+  if (!branch && identity.role !== 'owner') {
+    if (!identity.branchId) throw httpError('User is not assigned to a branch', 403);
+    branch = identity.branchId;
+  }
+  let branchIds;
+  if (branch) {
+    if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
+    const context = await purchaseBranchContext({user, branchId: branch, session, allowInactive: true});
+    branch = context.branch._id;
+    branchIds = [context.branch._id];
+  } else {
+    branchIds = await Branch.find({restaurant: identity.restaurantId}).session(session || null).distinct('_id');
+  }
+  const userIds = await User.find({restaurantId: identity.restaurantId}).session(session || null).distinct('_id');
+  return {identity, branch, branchIds, userIds};
 }
 
 export function expenseScope(rows, branchId) {
@@ -49,31 +74,28 @@ function populateExpense(doc) {
   return Expense.findById(doc._id).populate('createdBy', 'name role').populate('branch', 'name code');
 }
 
-function resolveExpenseBranch(user, branchId) {
-  if (branchId) return String(branchId);
-  if (user?.role !== 'owner' && user?.branch) return String(user.branch);
-  return null;
+function expenseOwnedByScope(expense, scope) {
+  if (expense.branch) return scope.branchIds.some(branchId => String(branchId) === String(expense.branch));
+  return scope.userIds.some(userId => String(userId) === String(expense.createdBy));
 }
 
-async function resolveBranchId(user, branchId) {
-  const branch = resolveExpenseBranch(user, branchId || null);
-  if (branch) {
-    if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branch);
-    if (!await Branch.findById(branch)) throw httpError('Branch not found', 404);
-  }
-  return branch;
-}
-
-function assertCanMutate(user, expense) {
+function assertCanMutate(user, expense, scope) {
+  if (!expenseOwnedByScope(expense, scope)) throw httpError('Expense not found', 404);
   if (user?.role === 'owner') return;
   if (!expense.branch) throw httpError('Cannot change a restaurant-wide expense', 403);
-  assertBranchAccess(user, expense.branch);
+  if (String(expense.branch) !== String(scope.branch)) throw httpError('Branch access denied', 403);
 }
 
 export async function listExpenses({branchId, user, from, to} = {}) {
-  const branch = await resolveBranchId(user, branchId);
-  const rows = await Expense.find(expenseQuery({branchId: branch, from, to}))
+  const scope = await resolveExpenseContext({user, branchId});
+  const branch = scope.branch;
+  const rows = await Expense.find(expenseQuery({
+    branchId: branch,
+    branchIds: scope.branchIds,
+    userIds: scope.userIds,
+    from,
+    to
+  }))
     .populate('createdBy', 'name role')
     .populate('branch', 'name code')
     .sort({date: -1, createdAt: -1});
@@ -102,14 +124,9 @@ export async function createExpense({category, description, amount, vat, date, b
   const vatAmt = expenseVat(amt, vat);
   if (vatAmt < 0) throw httpError('VAT cannot be negative', 400);
 
-  let branchId = branch || null;
-  if (branchId === '') branchId = null;
-  if (!branchId && user?.role !== 'owner' && user?.branch) branchId = String(user.branch);
-  if (branchId) {
-    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branchId);
-    if (!await Branch.findById(branchId)) throw httpError('Branch not found', 404);
-  }
+  const requestedBranch = branch === '' ? null : branch || null;
+  const scope = await resolveExpenseContext({user, branchId: requestedBranch});
+  const branchId = scope.branch;
 
   const saved = await Expense.create({
     category: label,
@@ -123,6 +140,8 @@ export async function createExpense({category, description, amount, vat, date, b
   await Audit.create([{
     entity: 'expense',
     entityId: saved._id,
+    restaurant: scope.identity.restaurantId,
+    branch: saved.branch,
     action: 'create',
     after: {category: saved.category, amount: saved.amount, vat: saved.vat, date: saved.date, branch: saved.branch},
     user: user.id
@@ -132,9 +151,10 @@ export async function createExpense({category, description, amount, vat, date, b
 
 export async function updateExpense({expenseId, patch = {}, user}) {
   if (!mongoose.isValidObjectId(expenseId)) throw httpError('Invalid expense', 400);
+  const scope = await resolveExpenseContext({user});
   const expense = await Expense.findById(expenseId);
   if (!expense) throw httpError('Expense not found', 404);
-  assertCanMutate(user, expense);
+  assertCanMutate(user, expense, scope);
 
   const before = {
     category: expense.category,
@@ -167,9 +187,8 @@ export async function updateExpense({expenseId, patch = {}, user}) {
     if (!patch.branch) {
       expense.branch = undefined;
     } else {
-      if (!mongoose.isValidObjectId(patch.branch)) throw httpError('Invalid branch', 400);
-      if (!await Branch.findById(patch.branch)) throw httpError('Branch not found', 404);
-      expense.branch = patch.branch;
+      const targetScope = await resolveExpenseContext({user, branchId: patch.branch});
+      expense.branch = targetScope.branch;
     }
   }
 
@@ -177,6 +196,8 @@ export async function updateExpense({expenseId, patch = {}, user}) {
   await Audit.create([{
     entity: 'expense',
     entityId: expense._id,
+    restaurant: scope.identity.restaurantId,
+    branch: expense.branch,
     action: 'update',
     before,
     after: {
@@ -194,13 +215,16 @@ export async function updateExpense({expenseId, patch = {}, user}) {
 
 export async function deleteExpense({expenseId, user}) {
   if (!mongoose.isValidObjectId(expenseId)) throw httpError('Invalid expense', 400);
+  const scope = await resolveExpenseContext({user});
   const expense = await Expense.findById(expenseId);
   if (!expense) throw httpError('Expense not found', 404);
-  assertCanMutate(user, expense);
+  assertCanMutate(user, expense, scope);
   await expense.deleteOne();
   await Audit.create([{
     entity: 'expense',
     entityId: expense._id,
+    restaurant: scope.identity.restaurantId,
+    branch: expense.branch,
     action: 'delete',
     before: {category: expense.category, amount: expense.amount, vat: expense.vat, date: expense.date, branch: expense.branch},
     user: user.id

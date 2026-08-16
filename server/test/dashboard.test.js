@@ -53,7 +53,7 @@ describe('GET /api/dashboard', () => {
       body: {status: 'cancelled'}
     })).status, 200);
     await createLiveOrder(world.branchB);
-    await Expense.create({category: 'rent', description: 'Kalanki shop', amount: 500, vat: 0, date: new Date()});
+    await Expense.create({category: 'rent', description: 'Kalanki shop', amount: 500, vat: 0, date: new Date(), createdBy: world.owner._id});
     await Sale.create({items: [{name: 'Legacy', qty: 1, unitPrice: 999, foodCost: 1}], subtotal: 999, vat: 0, total: 999, cogs: 1, grossProfit: 998});
 
     const dash = await request('/api/dashboard', {token: tokenFor(world.manager)});

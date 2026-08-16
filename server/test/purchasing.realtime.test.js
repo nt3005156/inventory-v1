@@ -285,6 +285,7 @@ describe('socket purchasing events', () => {
       const inv = await request('/api/supplier-invoices', {
         method: 'POST',
         token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.realtime.test-1' },
         body: {
           branch: String(world.branchA._id),
           supplier: String(supplier._id),

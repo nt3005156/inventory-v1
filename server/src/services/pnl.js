@@ -1,8 +1,7 @@
 import mongoose from 'mongoose';
 import {Expense} from '../models/index.js';
 import {InventoryTransaction, Order} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
-import {expenseQuery, expenseScope} from './expenses.js';
+import {expenseQuery, expenseScope, resolveExpenseContext} from './expenses.js';
 import {buildPurchasingReport} from './purchasingReport.js';
 import {money} from './statements.js';
 
@@ -26,22 +25,20 @@ function createdAtRange(from, to, toExclusive) {
 }
 
 export async function buildPnl({branchId, user, from, to, toExclusive}) {
-  if (branchId) {
-    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branchId);
-  }
-
-  const purchasing = await buildPurchasingReport({branchId, user, from, to, toExclusive});
+  const scope = await resolveExpenseContext({user, branchId});
+  const effectiveBranchId = scope.branch;
+  const branchMatch = {branch: {$in: scope.branchIds.map(id => new mongoose.Types.ObjectId(id))}};
+  const purchasing = await buildPurchasingReport({branchId: effectiveBranchId, user, from, to, toExclusive});
   const dates = createdAtRange(from, to, toExclusive);
   const orderMatch = {
-    ...(branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {}),
+    ...branchMatch,
     ...dates,
     status: {$nin: ['cancelled', 'refunded']}
   };
 
   const wasteMatch = {
     type: 'WASTE',
-    ...(branchId ? {branch: new mongoose.Types.ObjectId(branchId)} : {}),
+    ...branchMatch,
     ...dates
   };
 
@@ -61,7 +58,14 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
         }}}}
       }}
     ]),
-    Expense.find(expenseQuery({branchId, from, to, toExclusive})),
+    Expense.find(expenseQuery({
+      branchId: effectiveBranchId,
+      branchIds: scope.branchIds,
+      userIds: scope.userIds,
+      from,
+      to,
+      toExclusive
+    })),
     InventoryTransaction.find(wasteMatch)
   ]);
 
@@ -81,7 +85,7 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     source: 'live',
     currency: 'NPR',
     vatRate: 13,
-    branch: branchId || null,
+    branch: effectiveBranchId ? String(effectiveBranchId) : null,
     from: from || null,
     to: to || null,
     revenue,
@@ -112,7 +116,7 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
       amount: expenseAmount,
       vat: expenseVat,
       count: expenseRows.length,
-      scope: expenseScope(expenseRows, branchId)
+      scope: expenseScope(expenseRows, effectiveBranchId)
     },
     wasteDetail: {
       amount: wasteAmount,

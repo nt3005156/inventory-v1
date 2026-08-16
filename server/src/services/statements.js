@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
 import {Supplier} from '../models/index.js';
 import {SupplierInvoice, SupplierPayment} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {purchaseBranchContext} from './purchaseOrders.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
   const err = new Error(message);
@@ -52,18 +53,21 @@ export function buildStatementLines(invoices, payments) {
 
 export async function buildSupplierStatement({supplierId, branchId, user}) {
   if (!mongoose.isValidObjectId(supplierId)) throw httpError('Invalid supplier', 400);
-  const supplier = await Supplier.findById(supplierId);
+  const identity = await userRestaurantContext(user);
+  const supplier = await Supplier.findOne({_id: supplierId, restaurant: identity.restaurantId});
   if (!supplier) throw httpError('Supplier not found', 404);
-  if (branchId) {
-    if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branchId);
+  let effectiveBranch = branchId;
+  if (!effectiveBranch && identity.role !== 'owner') effectiveBranch = identity.branchId;
+  if (effectiveBranch) {
+    if (!mongoose.isValidObjectId(effectiveBranch)) throw httpError('Invalid branch', 400);
+    const context = await purchaseBranchContext({user, branchId: effectiveBranch, allowInactive: true});
+    effectiveBranch = context.branch._id;
   }
 
-  const invMatch = {supplier: supplier._id, status: {$ne: 'void'}};
-  if (branchId) invMatch.branch = branchId;
+  const invMatch = {restaurant: identity.restaurantId, supplier: supplier._id, status: {$ne: 'void'}};
+  if (effectiveBranch) invMatch.branch = effectiveBranch;
   const invoices = await SupplierInvoice.find(invMatch).populate('purchaseOrder', 'poNo').sort({invoiceDate: 1, createdAt: 1});
-  const payMatch = {supplier: supplier._id};
-  if (branchId) payMatch.invoice = {$in: invoices.map(i => i._id)};
+  const payMatch = {supplier: supplier._id, invoice: {$in: invoices.map(i => i._id)}};
   const payments = await SupplierPayment.find(payMatch).populate('invoice', 'invoiceNo total').sort({paidAt: 1, createdAt: 1});
 
   const lines = buildStatementLines(invoices, payments);
@@ -71,7 +75,7 @@ export async function buildSupplierStatement({supplierId, branchId, user}) {
   const paid = money(payments.reduce((s, p) => s + Number(p.amount || 0), 0));
   return {
     supplier: {_id: supplier._id, name: supplier.name, contact: supplier.contact},
-    branch: branchId || null,
+    branch: effectiveBranch || null,
     invoiced,
     paid,
     balance: money(invoiced - paid),

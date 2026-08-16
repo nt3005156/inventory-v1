@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
 import {Audit, MonthlySnapshot} from '../models/index.js';
 import {Branch, InventoryBalance, InventoryTransaction, Order, PurchaseOrder, SupplierInvoice} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
 import {buildPnl} from './pnl.js';
 import {money} from './statements.js';
 import {ensureMonthCloseIndexes} from './monthCloseMigration.js';
+import {userRestaurantContext} from './supplierCatalog.js';
+import {purchaseBranchContext} from './purchaseOrders.js';
 
 const NEPAL_OFFSET_MINUTES = 5 * 60 + 45;
 const OPEN_ORDER_STATUSES = ['draft', 'held', 'pending', 'confirmed', 'accepted', 'preparing', 'ready', 'out_for_delivery'];
@@ -33,27 +34,34 @@ function currentMonth(now = new Date()) {
 }
 
 async function resolveScope(user, branchId) {
+  const identity = await userRestaurantContext(user);
   let branch = branchId ? String(branchId) : null;
-  if (user?.role !== 'owner') {
-    if (!user?.branch) throw httpError('An assigned branch is required', 403);
-    branch = branch || String(user.branch);
-    assertBranchAccess(user, branch);
+  if (identity.role !== 'owner') {
+    if (!identity.branchId) throw httpError('An assigned branch is required', 403);
+    branch = branch || String(identity.branchId);
   }
+  let branchIds;
   if (branch) {
     if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branch);
-    if (!await Branch.exists({_id: branch})) throw httpError('Branch not found', 404);
+    const context = await purchaseBranchContext({user, branchId: branch, allowInactive: true});
+    branch = String(context.branch._id);
+    branchIds = [context.branch._id];
+  } else {
+    branchIds = await Branch.find({restaurant: identity.restaurantId}).distinct('_id');
   }
-  return {branch, scopeKey: branch || 'all'};
+  return {restaurantId: identity.restaurantId, branch, branchIds, scopeKey: branch || 'all'};
 }
 
 /**
  * Replays the append-only ledger up to a point in time. Positive movements
  * carry their acquisition cost; negative movements retain weighted average.
  */
-export async function inventoryValueAt({at, branchId}) {
-  const match = {createdAt: {$lt: new Date(at)}};
-  if (branchId) match.branch = new mongoose.Types.ObjectId(branchId);
+export async function inventoryValueAt({at, branchIds}) {
+  if (!Array.isArray(branchIds)) throw new Error('Restaurant branch scope is required for inventory valuation');
+  const match = {
+    branch: {$in: branchIds.map(id => new mongoose.Types.ObjectId(id))},
+    createdAt: {$lt: new Date(at)}
+  };
   const transactions = await InventoryTransaction.find(match)
     .sort({createdAt: 1, _id: 1})
     .select('branch ingredient type previousQty changeQty newQty unitCost createdAt')
@@ -97,13 +105,14 @@ export async function inventoryValueAt({at, branchId}) {
   return {value: money(value), quantity, items: states.size, negativeItems, ledgerGaps};
 }
 
-async function countUntrackedBalances({branchId, toExclusive}) {
-  const balanceMatch = {quantity: {$ne: 0}, ...(branchId ? {branch: branchId} : {})};
+async function countUntrackedBalances({branchIds, toExclusive}) {
+  if (!Array.isArray(branchIds)) throw new Error('Restaurant branch scope is required for inventory reconciliation');
+  const balanceMatch = {quantity: {$ne: 0}, branch: {$in: branchIds}};
   const balances = await InventoryBalance.find(balanceMatch).select('branch ingredient').lean();
   if (!balances.length) return 0;
   const txMatch = {
+    branch: {$in: branchIds},
     createdAt: {$lt: toExclusive},
-    ...(branchId ? {branch: branchId} : {}),
     $or: balances.map(b => ({branch: b.branch, ingredient: b.ingredient}))
   };
   const tracked = await InventoryTransaction.find(txMatch).select('branch ingredient').lean();
@@ -115,7 +124,7 @@ export async function previewMonthClose({month, branchId, user, now = new Date()
   const range = monthRange(month);
   if (range.month > currentMonth(now)) throw httpError('Future months cannot be reconciled', 400);
   const scope = await resolveScope(user, branchId);
-  const branchMatch = scope.branch ? {branch: scope.branch} : {};
+  const branchMatch = {branch: {$in: scope.branchIds}};
   const beforePeriodEnd = {createdAt: {$lt: range.toExclusive}};
 
   const [pnl, opening, closing, openOrders, openPurchaseOrders, unpaidInvoices, untrackedBalances, activeSnapshot] = await Promise.all([
@@ -125,13 +134,13 @@ export async function previewMonthClose({month, branchId, user, now = new Date()
       from: range.from,
       toExclusive: range.toExclusive
     }),
-    inventoryValueAt({at: range.from, branchId: scope.branch}),
-    inventoryValueAt({at: range.toExclusive, branchId: scope.branch}),
+    inventoryValueAt({at: range.from, branchIds: scope.branchIds}),
+    inventoryValueAt({at: range.toExclusive, branchIds: scope.branchIds}),
     Order.countDocuments({...branchMatch, ...beforePeriodEnd, status: {$in: OPEN_ORDER_STATUSES}}),
     PurchaseOrder.countDocuments({...branchMatch, ...beforePeriodEnd, status: {$in: OPEN_PO_STATUSES}}),
-    SupplierInvoice.countDocuments({...branchMatch, ...beforePeriodEnd, status: {$in: ['unpaid', 'partial']}}),
-    countUntrackedBalances({branchId: scope.branch, toExclusive: range.toExclusive}),
-    MonthlySnapshot.findOne({scopeKey: scope.scopeKey, month: range.month, status: 'closed'}).select('_id revision closedAt')
+    SupplierInvoice.countDocuments({restaurant: scope.restaurantId, ...branchMatch, ...beforePeriodEnd, status: {$in: ['unpaid', 'partial']}}),
+    countUntrackedBalances({branchIds: scope.branchIds, toExclusive: range.toExclusive}),
+    MonthlySnapshot.findOne({restaurant: scope.restaurantId, scopeKey: scope.scopeKey, month: range.month, status: 'closed'}).select('_id revision closedAt')
   ]);
 
   const blockers = [];
@@ -175,7 +184,10 @@ function snapshotResponse(query) {
 
 export async function listMonthCloses({branchId, user, limit = 60}) {
   const scope = await resolveScope(user, branchId);
-  const match = user?.role === 'owner' && !branchId ? {} : {scopeKey: scope.scopeKey};
+  const match = {
+    restaurant: scope.restaurantId,
+    ...(user?.role === 'owner' && !branchId ? {} : {scopeKey: scope.scopeKey})
+  };
   return snapshotResponse(MonthlySnapshot.find(match)
     .sort({month: -1, revision: -1})
     .limit(Math.min(Math.max(Number(limit) || 60, 1), 120)));
@@ -188,12 +200,14 @@ export async function closeMonth({month, branchId, notes, user}) {
   if (preview.blockers.length) throw httpError(preview.blockers.join('; '), 409);
 
   await ensureMonthCloseIndexes();
-  const latest = await MonthlySnapshot.findOne({scopeKey: preview.scopeKey, month: preview.month}).sort({revision: -1});
+  const scope = await resolveScope(user, branchId);
+  const latest = await MonthlySnapshot.findOne({restaurant: scope.restaurantId, scopeKey: preview.scopeKey, month: preview.month}).sort({revision: -1});
   const revision = Number(latest?.revision || 0) + 1;
   const pnl = preview.pnl;
   let saved;
   try {
     saved = await MonthlySnapshot.create({
+      restaurant: scope.restaurantId,
       month: preview.month,
       branch: preview.branch,
       scopeKey: preview.scopeKey,
@@ -229,6 +243,8 @@ export async function closeMonth({month, branchId, notes, user}) {
   await Audit.create({
     entity: 'monthly_snapshot',
     entityId: saved._id,
+    restaurant: scope.restaurantId,
+    branch: saved.branch,
     action: 'close',
     after: {month: saved.month, branch: saved.branch, revision: saved.revision, revenue: saved.revenue, netProfit: saved.netProfit},
     user: user.id
@@ -241,7 +257,8 @@ export async function reopenMonth({snapshotId, reason, user}) {
   if (!mongoose.isValidObjectId(snapshotId)) throw httpError('Invalid monthly snapshot', 400);
   const explanation = String(reason || '').trim();
   if (explanation.length < 3) throw httpError('A reopen reason is required', 400);
-  const snapshot = await MonthlySnapshot.findById(snapshotId);
+  const identity = await userRestaurantContext(user);
+  const snapshot = await MonthlySnapshot.findOne({_id: snapshotId, restaurant: identity.restaurantId});
   if (!snapshot) throw httpError('Monthly snapshot not found', 404);
   if (snapshot.status !== 'closed') throw httpError('This monthly snapshot is already reopened', 409);
 
@@ -253,6 +270,8 @@ export async function reopenMonth({snapshotId, reason, user}) {
   await Audit.create({
     entity: 'monthly_snapshot',
     entityId: snapshot._id,
+    restaurant: identity.restaurantId,
+    branch: snapshot.branch,
     action: 'reopen',
     before: {status: 'closed'},
     after: {status: 'reopened', reason: explanation, revision: snapshot.revision},

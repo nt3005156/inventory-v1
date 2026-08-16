@@ -99,9 +99,13 @@ describe('GET /api/reports/pnl', () => {
     await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-pnl.test-1' },
       body: {branch: String(world.branchA._id), supplier: String(supplier._id), invoiceNo: 'INV-PNL', subtotal: 1000, vat: 130, total: 1130}
     });
-    await Expense.create({category: 'rent', description: 'Kalanki shop', amount: 500, vat: 0, date: new Date()});
+    await Expense.create({
+      category: 'rent', description: 'Kalanki shop', amount: 500, vat: 0,
+      date: new Date(), createdBy: world.owner._id
+    });
     await Sale.create({items: [{name: 'Legacy', qty: 1, unitPrice: 999, foodCost: 1}], subtotal: 999, vat: 0, total: 999, cogs: 1, grossProfit: 998});
     await Purchase.create({qty: 1, total: 888, unitPrice: 888, invoiceNo: 'OLD'});
 

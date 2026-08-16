@@ -110,7 +110,61 @@ export const PurchaseOrder=model('PurchaseOrder',purchaseOrderSchema);
 const purchaseOrderCounterSchema=new Schema({restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},branch:{...oid,ref:'Branch',required:true,immutable:true},branchCode:{type:String,required:true,trim:true,uppercase:true,maxlength:8,immutable:true},year:{type:Number,required:true,immutable:true},value:{type:Number,default:0,min:0}},{timestamps:true,autoIndex:false});
 purchaseOrderCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'po_counter_scope'});
 export const PurchaseOrderCounter=model('PurchaseOrderCounter',purchaseOrderCounterSchema);
-export const SupplierInvoice=model('SupplierInvoice',new Schema({branch:{...oid,ref:'Branch',index:true},supplier:{...oid,ref:'Supplier',index:true},purchaseOrder:{...oid,ref:'PurchaseOrder'},invoiceNo:{type:String,index:true},invoiceDate:Date,dueDate:Date,subtotal:n,vat:n,total:n,paidAmount:n,status:{type:String,enum:['unpaid','partial','paid','void'],default:'unpaid'},attachmentUrl:String,notes:String,createdBy:{...oid,ref:'User'}},{timestamps:true}));
+const supplierInvoiceMatchSchema=new Schema({
+  status:{type:String,enum:['unlinked','awaiting_receipt','partial','matched','over_billed'],required:true},
+  receivedSubtotal:{type:Number,default:0,min:0},receivedVat:{type:Number,default:0,min:0},receivedTotal:{type:Number,default:0,min:0},
+  returnedSubtotal:{type:Number,default:0,min:0},returnedVat:{type:Number,default:0,min:0},returnedTotal:{type:Number,default:0,min:0},
+  netReceivedSubtotal:{type:Number,default:0,min:0},netReceivedVat:{type:Number,default:0,min:0},netReceivedTotal:{type:Number,default:0,min:0},
+  previouslyInvoicedSubtotal:{type:Number,default:0,min:0},previouslyInvoicedVat:{type:Number,default:0,min:0},previouslyInvoicedTotal:{type:Number,default:0,min:0},
+  availableSubtotal:{type:Number,default:0,min:0},availableVat:{type:Number,default:0,min:0},availableTotal:{type:Number,default:0,min:0},
+  varianceSubtotal:{type:Number,default:0},varianceVat:{type:Number,default:0},varianceTotal:{type:Number,default:0},
+  receiptIds:[{...oid,ref:'GoodsReceipt'}],returnIds:[{...oid,ref:'PurchaseReturn'}],matchedAt:{type:Date,required:true}
+},{_id:false});
+const supplierInvoiceSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},
+  branch:{...oid,ref:'Branch',required:true,immutable:true},
+  supplier:{...oid,ref:'Supplier',required:true},
+  purchaseOrder:{...oid,ref:'PurchaseOrder'},
+  invoiceNo:{type:String,required:true,trim:true,maxlength:120},
+  invoiceNoNormalized:{type:String,required:true,trim:true,maxlength:120},
+  identityVersion:{type:Number,default:2,immutable:true},
+  invoiceDate:{type:Date,required:true,default:Date.now},
+  dueDate:Date,
+  currency:{type:String,default:'NPR',enum:['NPR'],immutable:true},
+  priceIncludesVat:{type:Boolean,default:false},
+  vatRate:{type:Number,default:13,min:0,max:100},
+  subtotal:{type:Number,required:true,min:0},
+  vat:{type:Number,required:true,min:0},
+  total:{type:Number,required:true,min:Number.EPSILON},
+  paidAmount:{type:Number,default:0,min:0},
+  status:{type:String,enum:['unpaid','partial','paid','void'],default:'unpaid'},
+  matching:{type:supplierInvoiceMatchSchema,required:true},
+  attachmentUrl:{type:String,trim:true,maxlength:1000},
+  notes:{type:String,trim:true,maxlength:1000},
+  idempotencyKey:{type:String,trim:true,maxlength:120,select:false,immutable:true},
+  requestHash:{type:String,select:false,immutable:true},
+  requestHashVersion:{type:Number,default:2,select:false,immutable:true},
+  createdBy:{...oid,ref:'User',required:true,immutable:true},
+  updatedBy:{...oid,ref:'User'},
+  voidedBy:{...oid,ref:'User'},
+  voidedAt:Date
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+supplierInvoiceSchema.pre('validate',function validateSupplierInvoice(){
+  const paid=Number(this.paidAmount||0),total=Number(this.total||0);
+  if(Math.abs(total-Number(this.subtotal||0)-Number(this.vat||0))>0.011)this.invalidate('total','Invoice total must equal subtotal plus VAT');
+  if(paid>total+0.011)this.invalidate('paidAmount','Paid amount cannot exceed invoice total');
+  if(this.status==='paid'&&paid+0.011<total)this.invalidate('status','Paid invoices must be fully paid');
+  if(this.status==='unpaid'&&paid>0.011)this.invalidate('status','An invoice with payments cannot be unpaid');
+  if(this.status==='partial'&&(paid<=0.011||paid+0.011>=total))this.invalidate('status','Partial invoices require a positive balance and a partial payment');
+  if(this.dueDate&&this.invoiceDate&&this.dueDate<this.invoiceDate)this.invalidate('dueDate','Due date cannot be before invoice date');
+});
+supplierInvoiceSchema.virtual('paymentCount',{ref:'SupplierPayment',localField:'_id',foreignField:'invoice',count:true});
+supplierInvoiceSchema.set('toJSON',{virtuals:true,transform:(_document,result)=>{delete result.idempotencyKey;delete result.requestHash;delete result.requestHashVersion;delete result.id;return result;}});
+supplierInvoiceSchema.index({restaurant:1,supplier:1,invoiceNoNormalized:1},{unique:true,name:'supplier_invoice_restaurant_supplier_number'});
+supplierInvoiceSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'supplier_invoice_restaurant_idempotency',partialFilterExpression:{idempotencyKey:{$type:'string'}}});
+supplierInvoiceSchema.index({restaurant:1,branch:1,status:1,invoiceDate:-1},{name:'supplier_invoice_restaurant_branch_status_date'});
+supplierInvoiceSchema.index({restaurant:1,purchaseOrder:1,status:1},{name:'supplier_invoice_restaurant_po_status'});
+export const SupplierInvoice=model('SupplierInvoice',supplierInvoiceSchema);
 export const SupplierPayment=model('SupplierPayment',new Schema({invoice:{...oid,ref:'SupplierInvoice',index:true},supplier:{...oid,ref:'Supplier'},amount:n,method:{type:String,enum:['cash','bank','esewa','khalti','card'],default:'cash'},reference:String,paidAt:{type:Date,default:Date.now},createdBy:{...oid,ref:'User'}},{timestamps:true}));
 export const StockTransfer=model('StockTransfer',new Schema({fromBranch:{...oid,ref:'Branch'},toBranch:{...oid,ref:'Branch'},ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,status:{type:String,enum:['requested','approved','in_transit','received','cancelled'],default:'requested'},requestedBy:{...oid,ref:'User'},approvedBy:{...oid,ref:'User'}},{timestamps:true}));
 export const Delivery=model('Delivery',new Schema({order:{...oid,ref:'Order'},rider:{...oid,ref:'User'},address:String,phone:String,status:{type:String,enum:['available','assigned','picking_up','out_for_delivery','delivered','cancelled'],default:'assigned'},estimatedMinutes:n},{timestamps:true}));

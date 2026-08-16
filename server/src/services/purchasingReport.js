@@ -92,18 +92,18 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
     : {$in: tenantBranches}};
   const match = {...branchMatch, ...dates};
 
-  const [orders, receipts, returns, invoices, payments, purchaseTx, returnTx] = await Promise.all([
+  const [orders, receipts, returns, invoices, purchaseTx, returnTx] = await Promise.all([
     PurchaseOrder.find({restaurant: context.restaurantId, ...match, status: {$in: REPORTABLE_PO_STATUSES}}).populate('supplier', 'name'),
     GoodsReceipt.find({restaurant: context.restaurantId, ...match}),
     PurchaseReturn.find({restaurant: context.restaurantId, ...match}),
-    SupplierInvoice.find({...match, status: {$ne: 'void'}}).populate('supplier', 'name'),
-    SupplierPayment.find(dates),
+    SupplierInvoice.find({restaurant: context.restaurantId, ...match, status: {$ne: 'void'}}).populate('supplier', 'name'),
     InventoryTransaction.find({...branchMatch, type: 'PURCHASE', ...dates}),
     InventoryTransaction.find({...branchMatch, type: 'RETURN', referenceType: 'purchase_return', ...dates})
   ]);
 
-  const invoiceIds = new Set(invoices.map(i => String(i._id)));
-  const scopedPayments = payments.filter(payment => invoiceIds.has(String(payment.invoice)));
+  const scopedPayments = invoices.length
+    ? await SupplierPayment.find({...dates, invoice: {$in: invoices.map(invoice => invoice._id)}})
+    : [];
 
   const poQty = summarizePoLines(orders);
   const receivedValue = money(receipts.reduce((s, r) => s + (r.items || []).reduce((a, i) => a + Number(i.acceptedQty || 0) * Number(i.unitPrice || 0), 0), 0));

@@ -4,7 +4,7 @@ import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
 import {GoodsReceipt} from '../models/purchasing.js';
-import {assertBranchAccess} from '../services/kitchen.js';
+
 import {RECEIPT_DAMAGE_REASONS, receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
 import {
   listPurchaseReturnOptions,
@@ -18,7 +18,14 @@ import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
 import {buildMenuEngineering} from '../services/menuEngineering.js';
-import {updateSupplierInvoice} from '../services/invoices.js';
+import {
+  createSupplierInvoice,
+  getSupplierInvoice,
+  listSupplierInvoices,
+  replaySupplierInvoiceCreate,
+  refreshSupplierInvoiceMatching,
+  updateSupplierInvoice
+} from '../services/invoices.js';
 import {
   closeShortPurchaseOrder,
   replayShortClosePurchaseOrder,
@@ -35,7 +42,10 @@ import {publishPurchasingEvent, publishInventoryEvent} from '../services/realtim
 import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
 
 const r = Router();
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+const fail = (res, e) => {
+  const status = e?.status || (e?.name === 'ZodError' ? 400 : 500);
+  return res.status(status).json({message: e?.message || 'Request failed'});
+};
 
 const poLineSchema = z.object({
   ingredient: z.string(),
@@ -318,6 +328,14 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
           session,
           idempotencyKey
         });
+        if (!result.duplicate) {
+          await refreshSupplierInvoiceMatching({
+            purchaseOrder: result.purchaseOrder,
+            user: req.user,
+            reason: 'goods_receipt',
+            session
+          });
+        }
       });
     } catch (error) {
       if (error?.code === 11000 && idempotencyKey) {
@@ -409,6 +427,14 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
           session,
           idempotencyKey
         });
+        if (!result.duplicate) {
+          await refreshSupplierInvoiceMatching({
+            purchaseOrder: result.purchaseOrder,
+            user: req.user,
+            reason: 'purchase_return',
+            session
+          });
+        }
       });
     } catch (error) {
       if (error?.code === 11000 && idempotencyKey) {
@@ -485,54 +511,139 @@ r.get('/suppliers/:id/balance', auth(['owner', 'manager']), async (req, res) => 
   }
 });
 
+const invoiceCreateSchema = z.object({
+  branch: z.string(),
+  supplier: z.string(),
+  purchaseOrder: z.string().nullable().optional(),
+  invoiceNo: z.string().trim().min(1).max(120),
+  invoiceDate: z.string().optional(),
+  dueDate: z.string().nullable().optional(),
+  priceIncludesVat: z.boolean().optional(),
+  vatRate: z.number().min(0).max(100).optional(),
+  subtotal: z.number().nonnegative().optional(),
+  vat: z.number().nonnegative().optional(),
+  total: z.number().positive().optional(),
+  notes: z.string().trim().max(1000).optional(),
+  attachmentUrl: z.string().trim().max(1000).optional()
+}).strict();
+const invoiceListSchema = z.object({
+  branch: z.string().optional(),
+  supplier: z.string().optional(),
+  status: z.enum(['unpaid', 'partial', 'paid', 'void']).optional(),
+  q: z.string().trim().max(120).optional(),
+  from: z.string().optional(),
+  to: z.string().optional()
+}).strict();
+const invoicePatchSchema = z.object({
+  invoiceNo: z.string().trim().min(1).max(120).optional(),
+  invoiceDate: z.string().optional(),
+  dueDate: z.string().nullable().optional(),
+  priceIncludesVat: z.boolean().optional(),
+  vatRate: z.number().min(0).max(100).optional(),
+  subtotal: z.number().nonnegative().optional(),
+  vat: z.number().nonnegative().optional(),
+  total: z.number().positive().optional(),
+  notes: z.string().trim().max(1000).optional(),
+  purchaseOrder: z.string().nullable().optional(),
+  attachmentUrl: z.string().trim().max(1000).optional(),
+  status: z.enum(['void']).optional(),
+  expectedVersion: z.number().int().nonnegative()
+}).strict();
+
+r.get('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    const query = invoiceListSchema.parse(req.query);
+    res.json(await listSupplierInvoices({
+      user: req.user,
+      branchId: query.branch,
+      supplierId: query.supplier,
+      ...query
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.post('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  let input;
+  let idempotencyKey;
+  try {
+    input = invoiceCreateSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await createSupplierInvoice({input, user: req.user, idempotencyKey, session});
+      });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = await replaySupplierInvoiceCreate({input, user: req.user, idempotencyKey});
+      } else {
+        throw error;
+      }
+    }
+    const invoice = result.invoice;
+    if (!result.duplicate) {
+      publishPurchasingEvent(invoice.branch?._id || invoice.branch, {
+        reason: 'invoice_create',
+        invoiceId: String(invoice._id),
+        poId: invoice.purchaseOrder?._id ? String(invoice.purchaseOrder._id) : invoice.purchaseOrder ? String(invoice.purchaseOrder) : undefined,
+        supplierId: invoice.supplier?._id ? String(invoice.supplier._id) : String(invoice.supplier),
+        matchingStatus: invoice.matching?.status
+      });
+    }
+    res.status(result.duplicate ? 200 : 201).json({...invoice.toJSON(), duplicate: result.duplicate});
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
 r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
   try {
-    const invoice = await SupplierInvoice.findById(req.params.id);
-    if (!invoice) return res.status(404).json({message: 'Invoice not found'});
-    if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
+    const invoice = await getSupplierInvoice({invoiceId: req.params.id, user: req.user});
     res.json(await SupplierPayment.find({invoice: invoice._id}).sort({paidAt: 1, createdAt: 1}));
   } catch (e) {
     fail(res, e);
   }
 });
 
-const invoicePatchSchema = z.object({
-  invoiceNo: z.string().min(1).optional(),
-  invoiceDate: z.string().optional(),
-  dueDate: z.string().nullable().optional(),
-  subtotal: z.number().nonnegative().optional(),
-  vat: z.number().nonnegative().optional(),
-  total: z.number().positive().optional(),
-  notes: z.string().optional(),
-  purchaseOrder: z.string().nullable().optional(),
-  attachmentUrl: z.string().optional(),
-  status: z.enum(['void']).optional()
-});
-
 r.get('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
   try {
-    const invoice = await SupplierInvoice.findById(req.params.id).populate('supplier purchaseOrder');
-    if (!invoice) return res.status(404).json({message: 'Invoice not found'});
-    if (invoice.branch) assertBranchAccess(req.user, invoice.branch);
-    res.json(invoice);
+    res.json(await getSupplierInvoice({invoiceId: req.params.id, user: req.user}));
   } catch (e) {
     fail(res, e);
   }
 });
 
 r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
   try {
     const body = invoicePatchSchema.parse(req.body);
-    const invoice = await updateSupplierInvoice({invoiceId: req.params.id, user: req.user, patch: body});
-    publishPurchasingEvent(invoice.branch, {
+    let invoice;
+    await session.withTransaction(async () => {
+      invoice = await updateSupplierInvoice({
+        invoiceId: req.params.id,
+        user: req.user,
+        patch: body,
+        expectedVersion: body.expectedVersion,
+        session
+      });
+    });
+    publishPurchasingEvent(invoice.branch?._id || invoice.branch, {
       reason: invoice.status === 'void' ? 'invoice_void' : 'invoice_update',
       invoiceId: String(invoice._id),
-      supplierId: invoice.supplier ? String(invoice.supplier) : undefined,
-      status: invoice.status
+      supplierId: invoice.supplier?._id ? String(invoice.supplier._id) : String(invoice.supplier),
+      status: invoice.status,
+      matchingStatus: invoice.matching?.status
     });
-    res.json(await SupplierInvoice.findById(invoice._id).populate('supplier purchaseOrder'));
+    res.json(invoice);
   } catch (e) {
     fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 

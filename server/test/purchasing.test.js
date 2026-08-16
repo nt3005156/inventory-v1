@@ -2,7 +2,7 @@ import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
 import {Audit, Supplier, User} from '../src/models/index.js';
-import {InventoryBalance, InventoryBatch, InventoryTransaction, PurchaseOrder} from '../src/models/operations.js';
+import {InventoryBalance, InventoryBatch, InventoryTransaction, PurchaseOrder, SupplierInvoice} from '../src/models/operations.js';
 import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {acceptedQty, remainingQty} from '../src/services/receiving.js';
 import {canReceivePo, canTransitionPo} from '../src/services/purchaseOrders.js';
@@ -258,6 +258,7 @@ describe('supplier statement', () => {
     const inv = await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-1' },
       body: {
         branch: String(world.branchA._id),
         supplier: String(supplier._id),
@@ -305,16 +306,19 @@ describe('supplier statement', () => {
     await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.owner),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-2' },
       body: {branch: String(world.branchA._id), supplier: String(supplier._id), invoiceNo: 'A1', subtotal: 100, vat: 13, total: 113}
     });
     await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.owner),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-3' },
       body: {branch: String(world.branchA._id), supplier: String(other._id), invoiceNo: 'B1', subtotal: 500, vat: 65, total: 565}
     });
     await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.owner),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-4' },
       body: {branch: String(world.branchB._id), supplier: String(supplier._id), invoiceNo: 'A-BKT', subtotal: 200, vat: 26, total: 226}
     });
     const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
@@ -339,6 +343,7 @@ describe('supplier invoice VAT', () => {
     const inv = await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-5' },
       body: {
         branch: String(world.branchA._id),
         supplier: String(supplier._id),
@@ -367,6 +372,7 @@ describe('GET /api/reports/purchasing', () => {
     const inv = await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-6' },
       body: {branch: String(world.branchA._id), supplier: String(supplier._id), invoiceNo: 'INV-REP', subtotal: 1000, vat: 130, total: 1130}
     });
     assert.equal(inv.status, 201, inv.body?.message);
@@ -428,6 +434,7 @@ function createInvoice(body = {}) {
   return request('/api/supplier-invoices', {
     method: 'POST',
     token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-7' },
     body: {
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
@@ -440,11 +447,12 @@ function createInvoice(body = {}) {
   });
 }
 
-function patchInvoice(id, body, extras = {}) {
+async function patchInvoice(id, body, extras = {}) {
+  const current = await SupplierInvoice.findById(id).select('__v').lean();
   return request('/api/supplier-invoices/' + id, {
     method: 'PATCH',
     token: tokenFor(extras.user || world.manager),
-    body
+    body: {...body, expectedVersion: current?.__v ?? 0}
   });
 }
 
@@ -468,7 +476,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     assert.equal(patched.body.total, 2260);
     assert.equal(patched.body.notes, 'Corrected bill');
     assert.equal(patched.body.status, 'unpaid');
-    assert.ok(String(patched.body.invoiceDate).startsWith('2026-08-01'));
+    assert.equal(new Date(new Date(patched.body.invoiceDate).getTime() + 5.75 * 60 * 60 * 1000).toISOString().slice(0, 10), '2026-08-01');
 
     const got = await request('/api/supplier-invoices/' + inv.body._id, {token: tokenFor(world.owner)});
     assert.equal(got.status, 200);
@@ -541,6 +549,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const other = await request('/api/supplier-invoices', {
       method: 'POST',
       token: tokenFor(world.owner),
+      headers: {'Idempotency-Key': 'legacy-invoice-purchasing.test-8' },
       body: {branch: String(world.branchB._id), supplier: String(supplier._id), invoiceNo: 'INV-B', subtotal: 100, vat: 13, total: 113}
     });
     assert.equal(other.status, 201, other.body?.message);

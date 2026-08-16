@@ -1,8 +1,9 @@
 import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
-import {Audit, Expense, MonthlySnapshot} from '../src/models/index.js';
-import {InventoryTransaction, Order} from '../src/models/operations.js';
+import {Audit, Expense, MonthlySnapshot, Supplier, User} from '../src/models/index.js';
+import {Branch, InventoryTransaction, Order, Restaurant, SupplierInvoice} from '../src/models/operations.js';
 import {monthRange} from '../src/services/monthClose.js';
+import {ensureMonthCloseIndexes} from '../src/services/monthCloseMigration.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
 const MONTH = '2020-01';
@@ -184,5 +185,137 @@ describe('month close revisions', () => {
     const current = await close({month: thisMonth});
     assert.equal(current.status, 409);
     assert.match(current.body.message, /current month/i);
+  });
+});
+
+describe('month-close tenant identity', () => {
+  async function foreignWorld() {
+    const restaurant = await Restaurant.create({name: 'Foreign Month Close'});
+    const branch = await Branch.create({restaurant: restaurant._id, name: 'Foreign Branch', code: 'FMC'});
+    const owner = await User.create({
+      name: 'Foreign Owner', email: 'foreign-close@test.com', password: 'x', role: 'owner', restaurantId: restaurant._id
+    });
+    return {restaurant, branch, owner};
+  }
+
+  it('migrates legacy snapshots to a restaurant-scoped identity and hardened indexes', async () => {
+    const indexes = await MonthlySnapshot.collection.indexes();
+    for (const index of indexes) if (index.name !== '_id_') await MonthlySnapshot.collection.dropIndex(index.name);
+    const legacyId = (await MonthlySnapshot.collection.insertOne({
+      month: '2019-12',
+      branch: world.branchA._id,
+      scopeKey: String(world.branchA._id),
+      revision: 1,
+      status: 'closed',
+      closedBy: world.owner._id,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    })).insertedId;
+    const result = await ensureMonthCloseIndexes();
+    assert.equal(result.migrated, 1);
+    const migrated = await MonthlySnapshot.findById(legacyId).lean();
+    assert.equal(String(migrated.restaurant), String(world.restaurant._id));
+    const names = new Set((await MonthlySnapshot.collection.indexes()).map(index => index.name));
+    assert.ok(names.has('monthly_snapshot_restaurant_revision'));
+    assert.ok(names.has('monthly_snapshot_restaurant_status'));
+  });
+
+  it('allows the same month/scope revision per restaurant but hides and protects foreign snapshots', async () => {
+    await ensureMonthCloseIndexes();
+    const foreign = await foreignWorld();
+    const local = await MonthlySnapshot.create({
+      restaurant: world.restaurant._id,
+      month: '2019-12', scopeKey: 'all', revision: 1, status: 'closed', closedBy: world.owner._id
+    });
+    const foreignSnapshot = await MonthlySnapshot.create({
+      restaurant: foreign.restaurant._id,
+      month: '2019-12', scopeKey: 'all', revision: 1, status: 'closed', closedBy: foreign.owner._id
+    });
+    const history = await request('/api/month-close', {token: tokenFor(world.owner)});
+    assert.equal(history.status, 200, history.body?.message);
+    assert.deepEqual(history.body.map(row => row._id), [String(local._id)]);
+    const reopenForeign = await request(`/api/month-close/${foreignSnapshot._id}/reopen`, {
+      method: 'POST', token: tokenFor(world.owner), body: {reason: 'Cross tenant attempt'}
+    });
+    assert.equal(reopenForeign.status, 404);
+    assert.equal((await MonthlySnapshot.findById(foreignSnapshot._id)).status, 'closed');
+  });
+
+  it('keeps all-branch invoice, order, expense and inventory reconciliation inside the owner restaurant', async () => {
+    const foreign = await foreignWorld();
+    const localSupplier = await Supplier.create({restaurant: world.restaurant._id, name: 'Local Close Supplier'});
+    const foreignSupplier = await Supplier.create({restaurant: foreign.restaurant._id, name: 'Foreign Close Supplier'});
+    const invoiceDate = new Date('2020-01-10T00:00:00.000Z');
+    const base = {
+      invoiceDate,
+      priceIncludesVat: false,
+      vatRate: 13,
+      subtotal: 100,
+      vat: 13,
+      total: 113,
+      paidAmount: 0,
+      status: 'unpaid',
+      matching: {status: 'unlinked', matchedAt: invoiceDate},
+      createdAt: invoiceDate,
+      updatedAt: invoiceDate
+    };
+    await SupplierInvoice.create({
+      ...base,
+      restaurant: world.restaurant._id,
+      branch: world.branchA._id,
+      supplier: localSupplier._id,
+      invoiceNo: 'LOCAL-CLOSE-1',
+      invoiceNoNormalized: 'LOCAL-CLOSE-1',
+      createdBy: world.owner._id,
+      updatedBy: world.owner._id
+    });
+    await SupplierInvoice.create({
+      ...base,
+      restaurant: foreign.restaurant._id,
+      branch: foreign.branch._id,
+      supplier: foreignSupplier._id,
+      invoiceNo: 'FOREIGN-CLOSE-1',
+      invoiceNoNormalized: 'FOREIGN-CLOSE-1',
+      createdBy: foreign.owner._id,
+      updatedBy: foreign.owner._id
+    });
+    const baseline = await request(`/api/month-close/preview?month=${MONTH}`, {token: tokenFor(world.owner)});
+    assert.equal(baseline.status, 200, baseline.body?.message);
+    assert.equal(baseline.body.reconciliation.unpaidInvoices, 1);
+
+    await Order.create({
+      orderNo: 'FOREIGN-OPEN-1',
+      branch: foreign.branch._id,
+      status: 'pending',
+      items: [{name: 'Foreign item', qty: 1, unitPrice: 999, foodCost: 10}],
+      total: 999,
+      createdBy: foreign.owner._id,
+      createdAt: invoiceDate,
+      updatedAt: invoiceDate
+    });
+    await Expense.create({
+      category: 'foreign rent', amount: 777, vat: 101.01,
+      createdBy: foreign.owner._id, date: invoiceDate
+    });
+    await InventoryTransaction.create({
+      branch: foreign.branch._id,
+      ingredient: world.ingredient._id,
+      type: 'WASTE',
+      previousQty: 100,
+      changeQty: -1,
+      newQty: 99,
+      unitCost: 10,
+      totalCost: 10,
+      createdAt: invoiceDate,
+      updatedAt: invoiceDate
+    });
+    const preview = await request(`/api/month-close/preview?month=${MONTH}`, {token: tokenFor(world.owner)});
+    assert.equal(preview.status, 200, preview.body?.message);
+    assert.equal(preview.body.reconciliation.unpaidInvoices, baseline.body.reconciliation.unpaidInvoices);
+    assert.equal(preview.body.reconciliation.openOrders, baseline.body.reconciliation.openOrders);
+    assert.deepEqual(preview.body.inventory, baseline.body.inventory);
+    assert.equal(preview.body.pnl.revenue, baseline.body.pnl.revenue);
+    assert.equal(preview.body.pnl.expenses, baseline.body.pnl.expenses);
+    assert.equal(preview.body.pnl.waste, baseline.body.pnl.waste);
   });
 });

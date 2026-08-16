@@ -73,14 +73,15 @@ export default function Purchasing({call, user, token}) {
   const receiptRequestKey = useRef(requestKey());
   const returnRequestKey = useRef(requestKey());
   const [success, setSuccess] = useState('');
-  const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', subtotal: 0});
+  const [invoice, setInvoice] = useState({supplier: '', purchaseOrder: '', invoiceNo: '', invoiceDate: todayKathmandu(), dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
+  const invoiceRequestKey = useRef(requestKey());
   const [statementId, setStatementId] = useState('');
   const [statement, setStatement] = useState(null);
   const [invoicePays, setInvoicePays] = useState([]);
   const [payInvoiceId, setPayInvoiceId] = useState('');
   const [report, setReport] = useState(null);
   const [editId, setEditId] = useState('');
-  const [edit, setEdit] = useState({invoiceNo: '', invoiceDate: '', dueDate: '', subtotal: 0, notes: ''});
+  const [edit, setEdit] = useState({invoiceNo: '', purchaseOrder: '', invoiceDate: '', dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
   const [live, setLive] = useState('connecting');
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
   const loadSequence = useRef(0);
@@ -170,6 +171,8 @@ export default function Purchasing({call, user, token}) {
     setPayInvoiceId('');
     setInvoicePays([]);
     setEditId('');
+    setInvoice({supplier: '', purchaseOrder: '', invoiceNo: '', invoiceDate: todayKathmandu(), dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
+    invoiceRequestKey.current = requestKey();
     setEditingPoId('');
     setSuccess('');
     setPoPagination(current => current.page === 1 ? current : {...current, page: 1});
@@ -507,24 +510,42 @@ export default function Purchasing({call, user, token}) {
   const createInvoice = async e => {
     e.preventDefault();
     if (!branch) return;
-    const subtotal = Number(invoice.subtotal || 0);
-    const vat = Math.round(subtotal * 0.13 * 100) / 100;
+    const amount = Number(invoice.amount || 0);
+    if (!(amount > 0)) {
+      setError('Invoice amount must be greater than zero');
+      return;
+    }
+    const payload = {
+      branch: branch._id,
+      supplier: invoice.supplier,
+      purchaseOrder: invoice.purchaseOrder || undefined,
+      invoiceNo: invoice.invoiceNo,
+      invoiceDate: invoice.invoiceDate || undefined,
+      dueDate: invoice.dueDate || undefined,
+      priceIncludesVat: invoice.priceIncludesVat,
+      vatRate: Number(invoice.vatRate),
+      notes: invoice.notes.trim() || undefined,
+      attachmentUrl: invoice.attachmentUrl.trim() || undefined,
+      ...(invoice.priceIncludesVat ? {total: amount} : {subtotal: amount})
+    };
+    setBusy('create-invoice');
     setError('');
+    setSuccess('');
     try {
-      await call('/supplier-invoices', {method: 'POST', body: JSON.stringify({
-        branch: branch._id,
-        supplier: invoice.supplier,
-        purchaseOrder: invoice.purchaseOrder || undefined,
-        invoiceNo: invoice.invoiceNo,
-        subtotal,
-        vat,
-        total: Math.round((subtotal + vat) * 100) / 100
-      })});
-      setInvoice({supplier: invoice.supplier, purchaseOrder: '', invoiceNo: '', subtotal: 0});
-      load();
+      const created = await call('/supplier-invoices', {
+        method: 'POST',
+        headers: {'Idempotency-Key': invoiceRequestKey.current},
+        body: JSON.stringify(payload)
+      });
+      invoiceRequestKey.current = requestKey();
+      setInvoice({...invoice, purchaseOrder: '', invoiceNo: '', invoiceDate: todayKathmandu(), dueDate: '', amount: 0, notes: '', attachmentUrl: ''});
+      await load();
+      setSuccess(`${created.invoiceNo} ${created.duplicate ? 'was already recorded' : 'created'} for ${rs(created.total)}. Matching: ${String(created.matching?.status || 'unlinked').replaceAll('_', ' ')}.`);
       if (statementId === invoice.supplier) await loadStatement(invoice.supplier);
-    } catch (e) {
-      setError(e.message);
+    } catch (err) {
+      setError(err.message || 'Invoice creation failed');
+    } finally {
+      setBusy('');
     }
   };
 
@@ -571,10 +592,14 @@ export default function Purchasing({call, user, token}) {
     setEditId(inv._id);
     setEdit({
       invoiceNo: inv.invoiceNo || '',
+      purchaseOrder: inv.purchaseOrder?._id || inv.purchaseOrder || '',
       invoiceDate: ymd(inv.invoiceDate),
       dueDate: ymd(inv.dueDate),
-      subtotal: inv.subtotal || 0,
-      notes: inv.notes || ''
+      amount: inv.priceIncludesVat ? inv.total || 0 : inv.subtotal || 0,
+      priceIncludesVat: Boolean(inv.priceIncludesVat),
+      vatRate: Number(inv.vatRate ?? 13),
+      notes: inv.notes || '',
+      attachmentUrl: inv.attachmentUrl || ''
     });
   };
 
@@ -582,19 +607,25 @@ export default function Purchasing({call, user, token}) {
     e.preventDefault();
     const current = invoices.find(x => x._id === editId);
     if (!current || current.status === 'void') return;
-    const locked = Number(current.paidAmount || 0) > 0;
-    const subtotal = Number(edit.subtotal || 0);
-    const vat = Math.round(subtotal * 0.13 * 100) / 100;
+    const locked = Number(current.paidAmount || 0) > 0 || Number(current.paymentCount || 0) > 0;
+    const amount = Number(edit.amount || 0);
     const body = {
       invoiceNo: edit.invoiceNo,
       invoiceDate: edit.invoiceDate || undefined,
       dueDate: edit.dueDate || null,
-      notes: edit.notes
+      notes: edit.notes,
+      attachmentUrl: edit.attachmentUrl,
+      expectedVersion: current.__v
     };
     if (!locked) {
-      body.subtotal = subtotal;
-      body.vat = vat;
-      body.total = Math.round((subtotal + vat) * 100) / 100;
+      body.priceIncludesVat = edit.priceIncludesVat;
+      body.vatRate = Number(edit.vatRate);
+      if (edit.priceIncludesVat) body.total = amount;
+      else body.subtotal = amount;
+      const currentPoId = current.purchaseOrder?._id || current.purchaseOrder || '';
+      if (String(edit.purchaseOrder || '') !== String(currentPoId)) {
+        body.purchaseOrder = edit.purchaseOrder || null;
+      }
     }
     setBusy('edit-' + editId);
     setError('');
@@ -669,7 +700,7 @@ export default function Purchasing({call, user, token}) {
     setBusy('void-' + inv._id);
     setError('');
     try {
-      await call('/supplier-invoices/' + inv._id, {method: 'PATCH', body: JSON.stringify({status: 'void'})});
+      await call('/supplier-invoices/' + inv._id, {method: 'PATCH', body: JSON.stringify({status: 'void', expectedVersion: inv.__v})});
       if (editId === inv._id) setEditId('');
       await load();
       if (statementId === (inv.supplier?._id || inv.supplier)) await loadStatement(statementId);
@@ -737,6 +768,15 @@ export default function Purchasing({call, user, token}) {
     const subtotal = Number(line.qty || 0) * Number(line.price || 0);
     return {subtotal: totals.subtotal + subtotal, vat: totals.vat + subtotal * 0.13};
   }, {subtotal: 0, vat: 0});
+  const invoiceRate = Number(invoice.vatRate || 0);
+  const invoiceAmount = Number(invoice.amount || 0);
+  const invoiceDraftSubtotal = invoice.priceIncludesVat ? invoiceAmount / (1 + invoiceRate / 100) : invoiceAmount;
+  const invoiceDraftVat = invoice.priceIncludesVat ? invoiceAmount - invoiceDraftSubtotal : invoiceDraftSubtotal * invoiceRate / 100;
+  const invoiceDraftTotal = invoice.priceIncludesVat ? invoiceAmount : invoiceDraftSubtotal + invoiceDraftVat;
+  const invoiceableOrders = po.filter(order =>
+    ['approved', 'sent', 'partially_received', 'received', 'closed_short'].includes(order.status)
+    && (!invoice.supplier || String(order.supplier?._id || order.supplier) === String(invoice.supplier))
+  );
 
   return (
     <section className="panel purchasing-panel">
@@ -1082,33 +1122,42 @@ export default function Purchasing({call, user, token}) {
 
       {canManagePurchasing && branch && <>
       <h3>Create supplier invoice</h3>
+      <p>Record the supplier document in NPR. The server verifies VAT, ownership, duplicate numbers and any linked PO/receipt/return variance.</p>
       <form className="purchaseform" onSubmit={createInvoice}>
-        <select required value={invoice.supplier} onChange={e => setInvoice({...invoice, supplier: e.target.value})}>
+        <select required value={invoice.supplier} onChange={e => setInvoice({...invoice, supplier: e.target.value, purchaseOrder: ''})}>
           <option value="">Supplier</option>
           {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
         </select>
         <select value={invoice.purchaseOrder} onChange={e => setInvoice({...invoice, purchaseOrder: e.target.value})}>
-          <option value="">Link PO (optional)</option>
-          {po.map(x => <option key={x._id} value={x._id}>{x.poNo}</option>)}
+          <option value="">Unlinked invoice</option>
+          {invoiceableOrders.map(x => <option key={x._id} value={x._id}>{x.poNo} · {x.status}</option>)}
         </select>
-        <input required value={invoice.invoiceNo} onChange={e => setInvoice({...invoice, invoiceNo: e.target.value})} placeholder="Invoice no"/>
-        <input required min="0" type="number" value={invoice.subtotal} onChange={e => setInvoice({...invoice, subtotal: e.target.value})} placeholder="Subtotal Rs."/>
-        <button>Create invoice + 13% VAT</button>
+        <input required maxLength="120" value={invoice.invoiceNo} onChange={e => setInvoice({...invoice, invoiceNo: e.target.value})} placeholder="Supplier invoice no"/>
+        <input required type="date" value={invoice.invoiceDate} onChange={e => setInvoice({...invoice, invoiceDate: e.target.value})}/>
+        <input type="date" min={invoice.invoiceDate || undefined} value={invoice.dueDate} onChange={e => setInvoice({...invoice, dueDate: e.target.value})} title="Due date"/>
+        <input required min="0.01" step="0.01" type="number" value={invoice.amount} onChange={e => setInvoice({...invoice, amount: e.target.value})} placeholder={invoice.priceIncludesVat ? 'Total including VAT Rs.' : 'Subtotal before VAT Rs.'}/>
+        <input required min="0" max="100" step="0.01" type="number" value={invoice.vatRate} onChange={e => setInvoice({...invoice, vatRate: e.target.value})} title="VAT rate %"/>
+        <label><input type="checkbox" checked={invoice.priceIncludesVat} onChange={e => setInvoice({...invoice, priceIncludesVat: e.target.checked})}/> Amount includes VAT</label>
+        <input maxLength="1000" value={invoice.attachmentUrl} onChange={e => setInvoice({...invoice, attachmentUrl: e.target.value})} placeholder="HTTPS attachment URL (optional)"/>
+        <input maxLength="1000" value={invoice.notes} onChange={e => setInvoice({...invoice, notes: e.target.value})} placeholder="Notes (optional)"/>
+        <button disabled={busy === 'create-invoice'}>{busy === 'create-invoice' ? 'Recording…' : 'Create supplier invoice'}</button>
       </form>
-      <p>VAT 13% = {rs(Number(invoice.subtotal || 0) * 0.13)} · Total {rs(Number(invoice.subtotal || 0) * 1.13)}</p>
+      <p>Net {rs(invoiceDraftSubtotal)} · VAT {invoiceRate}% = {rs(invoiceDraftVat)} · Total {rs(invoiceDraftTotal)}</p>
 
       <h3>Supplier invoices & payments</h3>
-      <table>
-        <thead><tr><th>Invoice</th><th>Supplier</th><th>Total</th><th>Paid</th><th>Due</th><th>Status</th><th></th></tr></thead>
+      {!invoices.length && <p className="empty">No supplier invoices have been recorded for this branch.</p>}
+      {!!invoices.length && <table>
+        <thead><tr><th>Invoice</th><th>Supplier / PO</th><th>Total</th><th>Paid</th><th>Due</th><th>Payment</th><th>Matching</th><th></th></tr></thead>
         <tbody>
           {invoices.map(x => (
             <tr key={x._id}>
-              <td>{x.invoiceNo}</td>
-              <td>{x.supplier?.name}</td>
+              <td><b>{x.invoiceNo}</b><small className="cell-sub">{ymd(x.invoiceDate)}</small></td>
+              <td>{x.supplier?.name}<small className="cell-sub">{x.purchaseOrder?.poNo || 'Unlinked'}</small></td>
               <td>{rs(x.total)}</td>
               <td>{rs(x.paidAmount)}</td>
               <td>{rs(x.status === 'void' ? 0 : x.total - x.paidAmount)}</td>
               <td><label className={x.status === 'void' ? 'pill' : 'pill ok'}>{x.status}</label></td>
+              <td><label className={['matched', 'unlinked'].includes(x.matching?.status) ? 'pill ok' : 'pill'}>{String(x.matching?.status || 'unlinked').replaceAll('_', ' ')}</label>{x.matching?.status === 'over_billed' && <small className="cell-sub">Variance {rs(x.matching?.varianceTotal)}</small>}</td>
               <td>
                 {x.status !== 'paid' && x.status !== 'void' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}
                 {x.status !== 'void' && <button className="receive" onClick={() => openEdit(x)}>Edit</button>}
@@ -1118,24 +1167,40 @@ export default function Purchasing({call, user, token}) {
             </tr>
           ))}
         </tbody>
-      </table>
+      </table>}
       {editId && (() => {
         const current = invoices.find(x => x._id === editId);
-        const locked = Number(current?.paidAmount || 0) > 0;
-        const vat = Math.round(Number(edit.subtotal || 0) * 0.13 * 100) / 100;
+        const locked = Number(current?.paidAmount || 0) > 0 || Number(current?.paymentCount || 0) > 0;
+        const currentSupplierId = current?.supplier?._id || current?.supplier;
+        const editableOrders = po.filter(order =>
+          ['approved', 'sent', 'partially_received', 'received', 'closed_short'].includes(order.status)
+          && String(order.supplier?._id || order.supplier) === String(currentSupplierId)
+        );
+        const editAmount = Number(edit.amount || 0);
+        const editRate = Number(edit.vatRate || 0);
+        const editSubtotal = edit.priceIncludesVat ? editAmount / (1 + editRate / 100) : editAmount;
+        const editVat = edit.priceIncludesVat ? editAmount - editSubtotal : editSubtotal * editRate / 100;
+        const editTotal = edit.priceIncludesVat ? editAmount : editSubtotal + editVat;
         return (
           <div className="receive-box">
             <h3>Edit invoice {current?.invoiceNo || ''}</h3>
-            <p>{locked ? 'Payments exist — amounts stay locked. You can still correct the number, dates and notes.' : 'Unpaid invoice — number, dates, notes and amounts (13% VAT) can be changed.'}</p>
+            <p>{locked ? 'Payments exist — amounts stay locked. You can still correct the number, dates, attachment and notes.' : 'Unpaid invoice — number, dates, VAT mode and amount can be corrected with version protection.'}</p>
             <form className="purchaseform" onSubmit={saveEdit}>
-              <input required value={edit.invoiceNo} onChange={e => setEdit({...edit, invoiceNo: e.target.value})} placeholder="Invoice no"/>
-              <input type="date" value={edit.invoiceDate} onChange={e => setEdit({...edit, invoiceDate: e.target.value})}/>
-              <input type="date" value={edit.dueDate} onChange={e => setEdit({...edit, dueDate: e.target.value})}/>
-              <input required min="0" type="number" disabled={locked} value={edit.subtotal} onChange={e => setEdit({...edit, subtotal: e.target.value})} placeholder="Subtotal Rs."/>
+              <input required maxLength="120" value={edit.invoiceNo} onChange={e => setEdit({...edit, invoiceNo: e.target.value})} placeholder="Invoice no"/>
+              <select disabled={locked} value={edit.purchaseOrder} onChange={e => setEdit({...edit, purchaseOrder: e.target.value})}>
+                <option value="">Unlinked invoice</option>
+                {editableOrders.map(order => <option key={order._id} value={order._id}>{order.poNo} · {order.status}</option>)}
+              </select>
+              <input required type="date" value={edit.invoiceDate} onChange={e => setEdit({...edit, invoiceDate: e.target.value})}/>
+              <input type="date" min={edit.invoiceDate || undefined} value={edit.dueDate} onChange={e => setEdit({...edit, dueDate: e.target.value})}/>
+              <input required min="0.01" step="0.01" type="number" disabled={locked} value={edit.amount} onChange={e => setEdit({...edit, amount: e.target.value})} placeholder={edit.priceIncludesVat ? 'Total Rs.' : 'Subtotal Rs.'}/>
+              <input required min="0" max="100" step="0.01" type="number" disabled={locked} value={edit.vatRate} onChange={e => setEdit({...edit, vatRate: e.target.value})} title="VAT rate %"/>
+              <label><input type="checkbox" disabled={locked} checked={edit.priceIncludesVat} onChange={e => setEdit({...edit, priceIncludesVat: e.target.checked})}/> Amount includes VAT</label>
+              <input maxLength="1000" value={edit.attachmentUrl} onChange={e => setEdit({...edit, attachmentUrl: e.target.value})} placeholder="HTTPS attachment URL"/>
               <button disabled={!!busy}>{String(busy).startsWith('edit-') ? 'Saving…' : 'Save invoice'}</button>
             </form>
-            <input className="receive-notes" value={edit.notes} onChange={e => setEdit({...edit, notes: e.target.value})} placeholder="Invoice notes"/>
-            <p>VAT 13% = {rs(locked ? current?.vat : vat)} · Total {rs(locked ? current?.total : Number(edit.subtotal || 0) + vat)}</p>
+            <input className="receive-notes" maxLength="1000" value={edit.notes} onChange={e => setEdit({...edit, notes: e.target.value})} placeholder="Invoice notes"/>
+            <p>Net {rs(locked ? current?.subtotal : editSubtotal)} · VAT {locked ? current?.vatRate : editRate}% = {rs(locked ? current?.vat : editVat)} · Total {rs(locked ? current?.total : editTotal)}</p>
           </div>
         );
       })()}

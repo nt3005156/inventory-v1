@@ -1,7 +1,8 @@
 import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
-import {Expense} from '../src/models/index.js';
+import {Expense, User} from '../src/models/index.js';
+import {Branch, Restaurant} from '../src/models/operations.js';
 import {expenseVat} from '../src/services/expenses.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
 
@@ -76,7 +77,10 @@ describe('GET /api/expenses', () => {
   it('lists live expenses and can filter by date', async () => {
     const live = await createExpense({amount: 500});
     assert.equal(live.status, 201, live.body?.message);
-    await Expense.create({category: 'utilities', description: 'Old bill', amount: 200, vat: 26, date: new Date('2020-01-15')});
+    await Expense.create({
+      category: 'utilities', description: 'Old bill', amount: 200, vat: 26,
+      date: new Date('2020-01-15'), createdBy: world.owner._id
+    });
 
     const all = await request('/api/expenses', {token: tokenFor(world.owner)});
     assert.equal(all.status, 200, all.body?.message);
@@ -99,6 +103,34 @@ describe('GET /api/expenses', () => {
     assert.equal((await request('/api/expenses')).status, 401);
     const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
     assert.equal((await request('/api/expenses', {token: guest})).status, 403);
+  });
+
+  it('hides and protects branch and restaurant-wide expenses owned by another restaurant', async () => {
+    const restaurant = await Restaurant.create({name: 'Foreign Expense Restaurant'});
+    const branch = await Branch.create({restaurant: restaurant._id, name: 'Foreign Expense Branch', code: 'FEB'});
+    const owner = await User.create({
+      name: 'Foreign Expense Owner', email: 'foreign-expense@test.com', password: 'x', role: 'owner', restaurantId: restaurant._id
+    });
+    const restaurantWide = await Expense.create({
+      category: 'foreign rent', amount: 900, vat: 117, createdBy: owner._id, date: new Date()
+    });
+    await Expense.create({
+      category: 'foreign utilities', amount: 600, vat: 78, branch: branch._id, createdBy: owner._id, date: new Date()
+    });
+
+    const list = await request('/api/expenses', {token: tokenFor(world.owner)});
+    assert.equal(list.status, 200, list.body?.message);
+    assert.equal(list.body.count, 0);
+    const pnl = await request('/api/reports/pnl', {token: tokenFor(world.owner)});
+    assert.equal(pnl.status, 200, pnl.body?.message);
+    assert.equal(pnl.body.expenses, 0);
+    assert.equal((await request(`/api/expenses/${restaurantWide._id}`, {
+      method: 'PATCH', token: tokenFor(world.owner), body: {amount: 1}
+    })).status, 404);
+    assert.equal((await request(`/api/expenses/${restaurantWide._id}`, {
+      method: 'DELETE', token: tokenFor(world.owner)
+    })).status, 404);
+    assert.equal((await createExpense({branch: String(branch._id)}, tokenFor(world.owner))).status, 403);
   });
 });
 

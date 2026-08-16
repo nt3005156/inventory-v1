@@ -14,6 +14,7 @@ export const Sale=model('Sale',new Schema({date:{type:Date,default:Date.now},ite
 export const Waste=model('Waste',new Schema({date:{type:Date,default:Date.now},ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,reason:String,cost:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 export const Expense=model('Expense',new Schema({date:{type:Date,default:Date.now},category:String,description:String,amount:money,vat:money,branch:{type:Schema.Types.ObjectId,ref:'Branch'},createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 const monthlySnapshotSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',required:true,immutable:true,index:true},
   month:{type:String,required:true,match:/^\d{4}-(0[1-9]|1[0-2])$/,immutable:true},
   branch:{type:Schema.Types.ObjectId,ref:'Branch',default:null,immutable:true},
   scopeKey:{type:String,required:true,immutable:true},
@@ -45,7 +46,7 @@ const monthlySnapshotSchema=new Schema({
   reopenedBy:{type:Schema.Types.ObjectId,ref:'User'},
   reopenReason:String
 },{timestamps:true,autoIndex:false});
-monthlySnapshotSchema.index({scopeKey:1,month:1,revision:1},{unique:true});
-monthlySnapshotSchema.index({scopeKey:1,month:1,status:1});
+monthlySnapshotSchema.index({restaurant:1,scopeKey:1,month:1,revision:1},{unique:true,name:'monthly_snapshot_restaurant_revision'});
+monthlySnapshotSchema.index({restaurant:1,scopeKey:1,month:1,status:1},{name:'monthly_snapshot_restaurant_status'});
 export const MonthlySnapshot=model('MonthlySnapshot',monthlySnapshotSchema);
 export const Audit=model('Audit',auditSchema);
