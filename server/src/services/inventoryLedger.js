@@ -170,12 +170,24 @@ export async function moveStock({
   if(!Number.isFinite(before)||before<0||!Number.isFinite(previousCost)||previousCost<0||!Number.isSafeInteger(previousLedgerVersion)||previousLedgerVersion<0||!Number.isFinite(after)){
     throw httpError('Inventory aggregate balance is invalid; run the inventory migration before posting movements',409);
   }
-  if(after<-1e-9)throw httpError('Insufficient inventory for this movement',409);
+  if(after<-1e-9){
+    try{
+      await Notification.create([{
+        branch,
+        type:'negative_inventory',
+        title:'Negative inventory blocked',
+        body:`${ingredientRecord.name || 'Ingredient'} — attempted ${Math.abs(amount).toLocaleString('en-NP')} ${movementUnit} but only ${before.toLocaleString('en-NP')} available`,
+        referenceId:ingredient
+      }]);
+    }catch{}
+    throw httpError('Insufficient inventory for this movement',409);
+  }
   if(type==='OPENING'&&before>1e-9)throw httpError('Opening stock requires a zero inventory balance',409);
 
   let batchMovements;
   if(amount<0){
-    batchMovements=await removeBatchStock({
+    try{
+      batchMovements=await removeBatchStock({
       balance,
       branch,
       ingredient,
@@ -186,6 +198,20 @@ export async function moveStock({
       allowExpired:allowExpired??['WASTE','ADJUSTMENT','RETURN'].includes(type),
       strategy: normalizedStrategy
     },session);
+    }catch(batchErr){
+      if(batchErr?.status===409 && /Insufficient/.test(batchErr.message)){
+        try{
+          await Notification.create([{
+            branch,
+            type:'negative_inventory',
+            title:'Negative inventory blocked',
+            body:`${ingredientRecord.name || 'Ingredient'} — FEFO short ${Math.abs(amount).toLocaleString('en-NP')} ${movementUnit} but only ${Number(balance.quantity||0).toLocaleString('en-NP')} usable available`,
+            referenceId:ingredient
+          }]);
+        }catch{}
+      }
+      throw batchErr;
+    }
   }else{
     let restore=restoredMovements;
     if(type==='REVERSAL'&&!restore?.length&&!incomingBatches?.length){

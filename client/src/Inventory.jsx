@@ -70,6 +70,7 @@ export default function Inventory({call, branches = [], user, token}) {
   const [expiryAlerts, setExpiryAlerts] = useState(null);
   const [expiringDays, setExpiringDays] = useState(30);
   const [fefoStrategy, setFefoStrategy] = useState('fefo');
+  const [alerts, setAlerts] = useState([]);
   const loadSequence = useRef(0);
   const loadRef = useRef(null);
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
@@ -161,6 +162,18 @@ export default function Inventory({call, branches = [], user, token}) {
   }, [branchId, expiringDays]);
 
   useEffect(() => {
+    if (!branchId) { setAlerts([]); return; }
+    let active = true;
+    (async () => {
+      try {
+        const data = await call(`/alerts?branch=${encodeURIComponent(branchId)}`);
+        if (active) setAlerts(Array.isArray(data) ? data : []);
+      } catch {}
+    })();
+    return () => { active = false; };
+  }, [branchId]);
+
+  useEffect(() => {
     if (!branchId || !authToken) return undefined;
     let active = true;
     const socket = connectBranchSocket(authToken, branchId);
@@ -231,7 +244,7 @@ export default function Inventory({call, branches = [], user, token}) {
       <div className="title">
         <div>
           <h2>Live ingredient inventory</h2>
-          <p>Aggregate on-hand and valuation stay tied to lot-level batch movements. Usable stock excludes expired lots and issues FEFO.</p>
+          <p>Aggregate on-hand and valuation stay tied to lot-level batch movements. Usable stock excludes expired lots and issues FEFO. Alerts cover low/out, expiry, unusual consumption & negative attempts.</p>
         </div>
         <select className="kds-branch" value={branchId} disabled={!!locked} onChange={event => { setBatchPage(1); setBranchId(event.target.value); }}>
           {!locked && <option value="">All branches</option>}
@@ -240,7 +253,20 @@ export default function Inventory({call, branches = [], user, token}) {
       </div>
       {error && <p className="danger" role="alert">{error}</p>}
       {success && <p className="inventory-success">{success}</p>}
-      {loading && <p>Loading aggregate and batch stock…</p>}
+      {!!alerts.length && (
+        <div style={{margin:'10px 0', padding:'10px', border:'1px solid #fecaca', borderRadius:'8px', background:'#fef2f2'}}>
+          <b style={{color:'#991b1b'}}>Inventory Alerts — {alerts.length}</b>
+          <div style={{marginTop:'6px', display:'grid', gap:'4px', maxHeight:'160px', overflow:'auto'}}>
+            {alerts.slice(0,8).map(a=> (
+              <div key={String(a._id)} style={{display:'flex', justifyContent:'space-between', padding:'6px', background: a.severity==='critical'?'#ffe4e6': a.severity==='warning'?'#fffbeb':'#f0fdf4', borderRadius:'4px', border:'1px solid #e5e7eb'}}>
+                <span><b style={{textTransform:'capitalize'}}>{String(a.type).replaceAll('_',' ')}</b> — {a.title || a.body?.slice(0,60)} {a.ingredientName && '('+a.ingredientName+')'}</span>
+                <span style={{fontSize:'11px', opacity:0.7}}>{a.branchName || ''} • {a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-NP') : ''}</span>
+              </div>
+            ))}
+          </div>
+          <small style={{opacity:0.6}}>Low/out of stock • Expired/expiry approaching • Unusual consumption • Negative inventory attempts (FEFO-ready)</small>
+        </div>
+      )}
       {!loading && !rows.length && !error && <p className="empty">No ledger balances in this scope.</p>}
       {!loading && !!rows.length && (
         <>
