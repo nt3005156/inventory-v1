@@ -81,6 +81,12 @@ const poUpdateSchema = z.object({
   notes: z.string().trim().max(1000).optional(),
   expectedVersion: z.number().int().nonnegative()
 });
+const reportDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Report dates must use YYYY-MM-DD');
+const purchasingReportQuerySchema = z.object({
+  branch: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid branch').optional(),
+  from: reportDateSchema.optional(),
+  to: reportDateSchema.optional()
+}).strict();
 const poListSchema = z.object({
   branch: z.string(),
   q: z.string().trim().max(120).optional(),
@@ -781,11 +787,12 @@ r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) =
 
 r.get('/reports/purchasing', auth(['owner', 'manager']), async (req, res) => {
   try {
+    const query = purchasingReportQuerySchema.parse(req.query);
     res.json(await buildPurchasingReport({
-      branchId: req.query.branch,
+      branchId: query.branch,
       user: req.user,
-      from: req.query.from,
-      to: req.query.to
+      from: query.from,
+      to: query.to
     }));
   } catch (e) {
     fail(res, e);

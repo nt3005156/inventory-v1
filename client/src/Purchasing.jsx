@@ -89,6 +89,12 @@ export default function Purchasing({call, user, token}) {
   const paymentRequestKey = useRef(requestKey());
   const [reverseAction, setReverseAction] = useState(null);
   const [report, setReport] = useState(null);
+  const [reportFilters, setReportFilters] = useState({from: '', to: ''});
+  const [reportDraft, setReportDraft] = useState({from: '', to: ''});
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState('');
+  const [reportUpdatedAt, setReportUpdatedAt] = useState(null);
+  const reportRequestSequence = useRef(0);
   const [editId, setEditId] = useState('');
   const [edit, setEdit] = useState({invoiceNo: '', purchaseOrder: '', invoiceDate: '', dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
   const [live, setLive] = useState('connecting');
@@ -108,9 +114,8 @@ export default function Purchasing({call, user, token}) {
     return Promise.all([
       call('/purchase-orders?' + query.toString()),
       call('/supplier-catalog/options'),
-      canManagePurchasing ? call('/supplier-invoices?branch=' + branch._id) : Promise.resolve([]),
-      canManagePurchasing ? call('/reports/purchasing?branch=' + branch._id) : Promise.resolve(null)
-    ]).then(([a, b, d, e]) => {
+      canManagePurchasing ? call('/supplier-invoices?branch=' + branch._id) : Promise.resolve([])
+    ]).then(([a, b, d]) => {
       if (sequence !== loadSequence.current) return;
       setPo(a.items || (Array.isArray(a) ? a : []));
       setPoPagination(a.pagination || {page: 1, limit: 25, total: a.length || 0, pages: 1});
@@ -118,12 +123,37 @@ export default function Purchasing({call, user, token}) {
       setSuppliers(b.suppliers || []);
       setIngredients(b.ingredients || []);
       setInvoices(d);
-      setReport(e);
     }).catch(e => {
       if (sequence === loadSequence.current) setError(e.message);
     }).finally(() => {
       if (sequence === loadSequence.current) setPoLoading(false);
     });
+  };
+
+  const loadReport = (filters = reportFilters, {silent = false} = {}) => {
+    if (!branch?._id || !canManagePurchasing) {
+      setReportLoading(false);
+      return Promise.resolve();
+    }
+    const sequence = ++reportRequestSequence.current;
+    const query = new URLSearchParams({branch: branch._id});
+    if (filters.from) query.set('from', filters.from);
+    if (filters.to) query.set('to', filters.to);
+    if (!silent) setReportLoading(true);
+    setReportError('');
+    return call('/reports/purchasing?' + query.toString())
+      .then(result => {
+        if (sequence !== reportRequestSequence.current) return;
+        setReport(result);
+        setReportUpdatedAt(new Date());
+      })
+      .catch(err => {
+        if (sequence !== reportRequestSequence.current) return;
+        setReportError(err.message || 'Could not load purchasing report');
+      })
+      .finally(() => {
+        if (sequence === reportRequestSequence.current) setReportLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -142,6 +172,10 @@ export default function Purchasing({call, user, token}) {
   }, [visibleBranches, branchId]);
 
   useEffect(() => { load(); }, [branch?._id, poFilters, poPagination.page]);
+  useEffect(() => {
+    loadReport();
+    return () => { reportRequestSequence.current += 1; };
+  }, [branch?._id, reportFilters]);
 
   useEffect(() => {
     if (!form.supplier) {
@@ -168,6 +202,8 @@ export default function Purchasing({call, user, token}) {
     setPoSummary({subtotal: 0, vat: 0, total: 0, open: 0, pendingApprovals: 0});
     setInvoices([]);
     setReport(null);
+    setReportError('');
+    setReportUpdatedAt(null);
     setOpenId('');
     setReceipts([]);
     setReturns([]);
@@ -196,6 +232,10 @@ export default function Purchasing({call, user, token}) {
 
   const loadRef = useRef(load);
   loadRef.current = load;
+  const reportLoadRef = useRef(loadReport);
+  reportLoadRef.current = loadReport;
+  const reportFiltersRef = useRef(reportFilters);
+  reportFiltersRef.current = reportFilters;
   const openIdRef = useRef(openId);
   openIdRef.current = openId;
   const statementIdRef = useRef(statementId);
@@ -230,7 +270,10 @@ export default function Purchasing({call, user, token}) {
 
   useEffect(() => {
     if (live === 'live') return;
-    const tick = setInterval(() => loadRef.current(), 8000);
+    const tick = setInterval(() => {
+      loadRef.current();
+      reportLoadRef.current(reportFiltersRef.current, {silent: true});
+    }, 8000);
     return () => clearInterval(tick);
   }, [branch?._id, live]);
 
@@ -240,6 +283,7 @@ export default function Purchasing({call, user, token}) {
     const onUpdate = payload => {
       if (payload?.branch && String(payload.branch) !== String(branch._id)) return;
       loadRef.current();
+      reportLoadRef.current(reportFiltersRef.current, {silent: true});
       if (openIdRef.current && payload.poId && String(payload.poId) === String(openIdRef.current)) {
         refreshOpenHistory(openIdRef.current);
       }
@@ -258,6 +302,7 @@ export default function Purchasing({call, user, token}) {
         if (ack && ack.ok === false) setError(ack.message || 'Could not join purchasing room');
       });
       loadRef.current();
+      reportLoadRef.current(reportFiltersRef.current, {silent: true});
     });
     socket.on('disconnect', reason => {
       setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
@@ -729,6 +774,26 @@ export default function Purchasing({call, user, token}) {
     setStatementDraft(next);
     setStatementFilters(next);
     loadStatement(statementId, next, 1);
+  };
+
+  const applyReportPeriod = e => {
+    e.preventDefault();
+    if (reportDraft.from && reportDraft.to && reportDraft.from > reportDraft.to) {
+      setReportError('From date must not be after to date');
+      return;
+    }
+    const next = {...reportDraft};
+    const unchanged = next.from === reportFilters.from && next.to === reportFilters.to;
+    setReportFilters(next);
+    if (unchanged) loadReport(next);
+  };
+
+  const clearReportPeriod = () => {
+    const next = {from: '', to: ''};
+    setReportDraft(next);
+    const unchanged = !reportFilters.from && !reportFilters.to;
+    setReportFilters(next);
+    if (unchanged) loadReport(next);
   };
 
   const showInvoicePays = inv => openInvoicePayments(inv, false);
@@ -1559,35 +1624,99 @@ export default function Purchasing({call, user, token}) {
         )}
       </section>
 
-      <h3>Purchasing report</h3>
-      <p>Live branch totals from purchase orders, receipts, returns, invoices and the inventory ledger.</p>
-      {!report && <p className="empty">Report loads with the branch.</p>}
-      {report && (
-        <div className="receive-box">
-          <div className="kpis">
-            <article><small>PO value</small><strong>{rs(report.purchaseOrders?.orderedValue)}</strong><em>{report.purchaseOrders?.count || 0} operational POs · {report.purchaseOrders?.outstandingQty || 0} outstanding · {report.purchaseOrders?.shortClosedQty || 0} closed short</em></article>
-            <article><small>Accepted stock value</small><strong>{rs(report.receipts?.acceptedValue)}</strong><em>Damaged {rs(report.receipts?.damagedValue)}{report.receipts?.damageByReason?.length ? ` · ${report.receipts.damageByReason.map(item => `${damageReasonLabel(item.reason)} ${item.qty}`).join(', ')}` : ''}</em></article>
-            <article><small>Returned value</small><strong>{rs(report.returns?.value)}</strong><em>{report.returns?.count || 0} returns</em></article>
-            <article><small>Invoice due</small><strong>{rs(report.invoices?.due)}</strong><em>VAT {rs(report.invoices?.vat)}</em></article>
+      <section className="purchasing-report-section">
+        <div className="report-title">
+          <div>
+            <h3>Purchasing report</h3>
+            <p>Operational activity, supplier liability, and inventory-ledger reconciliation in NPR.</p>
           </div>
-          <table>
-            <thead><tr><th>Supplier</th><th>POs</th><th>Ordered</th><th>Invoiced</th><th>Paid</th><th>Due</th></tr></thead>
-            <tbody>
-              {(report.bySupplier || []).map(row => (
+          <div className="report-freshness">
+            <span className={!reportError && report ? 'pill ok' : 'pill'}>{reportLoading ? (report ? 'Refreshing' : 'Loading') : reportError ? 'Refresh failed' : report ? 'Current' : 'Not loaded'}</span>
+            {reportUpdatedAt && <small>Updated {reportUpdatedAt.toLocaleTimeString('en-NP', {hour: '2-digit', minute: '2-digit'})}</small>}
+          </div>
+        </div>
+
+        <form className="report-filters" onSubmit={applyReportPeriod}>
+          <label>From date<input type="date" max={reportDraft.to || todayKathmandu()} value={reportDraft.from} onChange={e => setReportDraft({...reportDraft, from: e.target.value})}/></label>
+          <label>To / as-of date<input type="date" min={reportDraft.from || undefined} max={todayKathmandu()} value={reportDraft.to} onChange={e => setReportDraft({...reportDraft, to: e.target.value})}/></label>
+          <button type="submit" disabled={reportLoading}>{reportLoading ? 'Loading…' : 'Apply period'}</button>
+          <button type="button" className="po-secondary" disabled={reportLoading || (!reportFilters.from && !reportFilters.to)} onClick={clearReportPeriod}>All history</button>
+          <button type="button" className="po-secondary" disabled={reportLoading} onClick={() => loadReport(reportFilters)}>Refresh</button>
+        </form>
+
+        {reportError && <p className="danger report-status" role="alert">{reportError} <button type="button" className="po-inline-button" onClick={() => loadReport(reportFilters)}>Retry</button></p>}
+        {reportLoading && !report && <p className="empty report-status">Loading purchasing report…</p>}
+        {!reportLoading && !report && !reportError && <p className="empty report-status">Choose an authorized branch to load its purchasing report.</p>}
+        {report && (
+          <div className="receive-box report-workspace" aria-busy={reportLoading}>
+            <div className="report-meta">
+              <div>
+                <p className="eyebrow">{report.scope === 'restaurant' ? 'All branches' : report.branch?.code || 'Branch report'}</p>
+                <h3>{report.scope === 'restaurant' ? 'Restaurant purchasing' : report.branch?.name || branch?.name}</h3>
+              </div>
+              <p>{report.period?.from || 'Beginning'} → {report.period?.to}<small>Inclusive days · Asia/Kathmandu</small></p>
+            </div>
+
+            {report.activity?.empty && <p className="empty report-empty">No purchasing activity occurred in this period. Closing supplier liabilities remain visible below.</p>}
+            {!!report.dataQuality?.warnings?.length && (
+              <div className="report-warning" role="status">
+                <strong>Review required</strong>
+                <ul>{report.dataQuality.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
+              </div>
+            )}
+
+            <div className="report-kpis">
+              <article><small>Purchase orders</small><strong>{rs(report.purchaseOrders?.orderedValue)}</strong><em>{report.purchaseOrders?.count || 0} POs · {report.purchaseOrders?.outstandingQty || 0} outstanding · {report.purchaseOrders?.shortClosedQty || 0} closed short</em></article>
+              <article><small>Accepted stock</small><strong>{rs(report.receipts?.acceptedValue)}</strong><em>{report.receipts?.acceptedQty || 0} accepted · damaged {rs(report.receipts?.damagedValue)}</em></article>
+              <article><small>Supplier returns</small><strong>{rs(report.returns?.value)}</strong><em>{report.returns?.count || 0} returns · stock cost {rs(report.returns?.stockValue)}</em></article>
+              <article><small>Net invoices</small><strong>{rs(report.invoices?.invoiced)}</strong><em>Gross {rs(report.invoices?.grossInvoiced)} · voids {rs(report.invoices?.voided)} · VAT {rs(report.invoices?.vat)}</em></article>
+              <article><small>Net payments</small><strong>{rs(report.invoices?.paid)}</strong><em>Paid {rs(report.invoices?.grossPaid)} · reversals {rs(report.invoices?.reversed)}</em></article>
+              <article className="report-liability"><small>Closing supplier due</small><strong>{rs(report.invoices?.due)}</strong><em>Opening {rs(report.invoices?.openingDue)} · change {rs(report.invoices?.activityChange)} · as of {report.period?.asOf}</em></article>
+            </div>
+
+            <div className="report-subheading">
+              <div><h3>Stock reconciliation</h3><p>Receipt and return source values compared with posted inventory movements.</p></div>
+              <span className={report.reconciliation?.balanced ? 'pill ok' : 'pill'}>{report.reconciliation?.balanced ? 'Balanced' : 'Difference found'}</span>
+            </div>
+            <div className="report-reconciliation">
+              <article><small>Accepted vs purchase ledger</small><strong>{rs(report.reconciliation?.receiptsToPurchaseLedger?.difference)}</strong><em>{rs(report.reconciliation?.receiptsToPurchaseLedger?.sourceValue)} source · {rs(report.reconciliation?.receiptsToPurchaseLedger?.ledgerValue)} ledger</em></article>
+              <article><small>Returns vs return ledger</small><strong>{rs(report.reconciliation?.returnsToReturnLedger?.difference)}</strong><em>{rs(report.reconciliation?.returnsToReturnLedger?.sourceValue)} source · {rs(report.reconciliation?.returnsToReturnLedger?.ledgerValue)} ledger</em></article>
+              <article><small>Net stock movement</small><strong>{rs(report.ledger?.netStockValue)}</strong><em>Purchases {rs(report.ledger?.purchaseValue)} · returns {rs(report.ledger?.returnValue)}</em></article>
+            </div>
+
+            {!!report.receipts?.damageByReason?.length && <p className="report-damage"><strong>Damage:</strong> {report.receipts.damageByReason.map(item => `${damageReasonLabel(item.reason)} ${item.qty} (${rs(item.value)})`).join(' · ')}</p>}
+
+            <div className="report-subheading">
+              <div><h3>Supplier breakdown</h3><p>Period activity with the supplier balance at the report cutoff.</p></div>
+              <span>{report.bySupplier?.length || 0} suppliers</span>
+            </div>
+            {!report.bySupplier?.length && <p className="empty">No supplier activity or balance exists for this scope.</p>}
+            {!!report.bySupplier?.length && <div className="table-scroll"><table className="report-supplier-table">
+              <thead><tr><th>Supplier</th><th>PO / receipt / return</th><th>Ordered</th><th>Accepted</th><th>Net invoiced</th><th>Net paid</th><th>Closing due</th></tr></thead>
+              <tbody>{report.bySupplier.map(row => (
                 <tr key={row.supplierId || row.name}>
-                  <td>{row.name}</td>
-                  <td>{row.poCount}</td>
+                  <td><strong>{row.name}</strong>{(row.voided || row.reversed) ? <small>Voids {rs(row.voided)} · reversals {rs(row.reversed)}</small> : null}</td>
+                  <td>{row.poCount} / {row.receiptCount} / {row.returnCount}</td>
                   <td>{rs(row.orderedValue)}</td>
+                  <td>{rs(row.acceptedValue)}</td>
                   <td>{rs(row.invoiced)}</td>
                   <td>{rs(row.paid)}</td>
-                  <td>{rs(row.due)}</td>
+                  <td><strong>{rs(row.due)}</strong><small>Opening {rs(row.openingDue)}</small></td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <p>Ledger net stock value {rs(report.ledger?.netStockValue)} · purchases {rs(report.ledger?.purchaseValue)} · returns {rs(report.ledger?.returnValue)}</p>
-        </div>
-      )}
+              ))}</tbody>
+            </table></div>}
+
+            <details className="report-methods">
+              <summary>Payment methods and report basis</summary>
+              {!report.invoices?.paymentMethods?.length && <p className="empty">No payment events in this period.</p>}
+              {!!report.invoices?.paymentMethods?.length && <div className="report-method-grid">{report.invoices.paymentMethods.map(method => (
+                <article key={method.method}><small>{String(method.method).replaceAll('_', ' ')}</small><strong>{rs(method.netPaid)}</strong><em>{method.count} payments · {method.reversalCount} reversals</em></article>
+              ))}</div>}
+              <p className="report-basis">POs use order date; receipts use received time; returns use returned time; invoices and voids use their effective dates; payments and reversals use their effective dates; inventory uses ledger-posted time.</p>
+            </details>
+          </div>
+        )}
+      </section>
       </>}
     </section>
   );

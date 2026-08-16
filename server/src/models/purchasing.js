@@ -92,6 +92,10 @@ goodsReceiptSchema.index(
   {restaurant: 1, branch: 1, purchaseOrder: 1, createdAt: -1},
   {name: 'gr_restaurant_branch_po_created'}
 );
+goodsReceiptSchema.index(
+  {restaurant: 1, branch: 1, receivedAt: -1},
+  {name: 'gr_restaurant_branch_received_at'}
+);
 export const GoodsReceipt = model('GoodsReceipt', goodsReceiptSchema);
 
 const goodsReceiptCounterSchema = new Schema({
@@ -178,6 +182,10 @@ purchaseReturnSchema.index(
 purchaseReturnSchema.index(
   {restaurant: 1, branch: 1, supplier: 1, createdAt: -1},
   {name: 'pr_restaurant_branch_supplier_created'}
+);
+purchaseReturnSchema.index(
+  {restaurant: 1, branch: 1, returnedAt: -1},
+  {name: 'pr_restaurant_branch_returned_at'}
 );
 export const PurchaseReturn = model('PurchaseReturn', purchaseReturnSchema);
 

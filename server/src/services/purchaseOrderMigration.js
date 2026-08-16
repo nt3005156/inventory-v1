@@ -20,6 +20,10 @@ const PO_INDEXES = [
     options: {name: 'po_restaurant_branch_status_created'}
   },
   {
+    key: {restaurant: 1, branch: 1, orderDate: -1, createdAt: -1, _id: -1},
+    options: {name: 'po_restaurant_branch_order_date'}
+  },
+  {
     key: {restaurant: 1, supplier: 1, createdAt: -1},
     options: {name: 'po_restaurant_supplier_created'}
   }

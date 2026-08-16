@@ -133,6 +133,7 @@ describe('supplier invoice migration and indexes', () => {
     const indexNames = new Set((await SupplierInvoice.collection.indexes()).map(index => index.name));
     assert.ok(indexNames.has('supplier_invoice_restaurant_supplier_number'));
     assert.ok(indexNames.has('supplier_invoice_restaurant_idempotency'));
+    assert.ok(indexNames.has('supplier_invoice_restaurant_branch_report_date'));
     assert.ok(indexNames.has('supplier_invoice_statement_scope_date'));
     assert.ok(indexNames.has('supplier_invoice_statement_branch_date'));
     const rerun = await ensureSupplierInvoiceIndexes();

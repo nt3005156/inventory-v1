@@ -19,6 +19,10 @@ const RETURN_INDEXES = [
   {
     key: {restaurant: 1, branch: 1, supplier: 1, createdAt: -1},
     options: {name: 'pr_restaurant_branch_supplier_created'}
+  },
+  {
+    key: {restaurant: 1, branch: 1, returnedAt: -1},
+    options: {name: 'pr_restaurant_branch_returned_at'}
   }
 ];
 

@@ -53,5 +53,13 @@ Statement APIs:
 - `GET /api/suppliers/:id/balance?branch=<id>&asOf=YYYY-MM-DD`
 - `GET /api/suppliers/:id/payments?branch=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD`
 
+## Purchasing reports
+The Purchasing workspace provides date-filtered operational KPIs, supplier liability, damage and return totals, invoice/payment activity, supplier and payment-method breakdowns, and source-to-inventory-ledger reconciliation. Public dates are inclusive `Asia/Kathmandu` calendar days. The report discloses each entity's canonical business date, preserves historical invoice void and payment-reversal events, and warns when matching or ledger evidence requires review.
+
+Purchasing report API (owner/manager):
+- `GET /api/reports/purchasing?branch=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD`
+
+Managers are restricted to their assigned branch. Owners may omit `branch` for restaurant-wide totals. Omitting `from` includes all history; omitting `to` uses the current Kathmandu day.
+
 ## Remaining client configuration items
 Actual production needs client menu/import data, VAT invoice numbering rules, POS printer hardware configuration, payment-provider verification endpoints, staff training, and a backup/retention policy before launch.

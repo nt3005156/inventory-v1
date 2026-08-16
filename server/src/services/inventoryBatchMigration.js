@@ -111,7 +111,7 @@ async function backfillCurrentBalances() {
   return {backfilled, unresolved, singletonFieldsRemoved: removed.modifiedCount};
 }
 
-async function ensureInventoryIdempotencyIndex() {
+async function ensureInventoryTransactionIndexes() {
   await ensureCollection(InventoryTransaction.collection.collectionName);
   const indexes = await InventoryTransaction.collection.indexes();
   const obsolete = indexes.filter(index => {
@@ -119,7 +119,7 @@ async function ensureInventoryIdempotencyIndex() {
     return keys.length === 1 && keys[0] === 'idempotencyKey';
   });
   for (const index of obsolete) await InventoryTransaction.collection.dropIndex(index.name);
-  await InventoryTransaction.collection.createIndex(
+  const idempotencyIndex = await InventoryTransaction.collection.createIndex(
     {branch: 1, idempotencyKey: 1},
     {
       unique: true,
@@ -127,7 +127,11 @@ async function ensureInventoryIdempotencyIndex() {
       name: 'inventory_transaction_branch_idempotency'
     }
   );
-  return 'inventory_transaction_branch_idempotency';
+  const purchasingReportIndex = await InventoryTransaction.collection.createIndex(
+    {branch: 1, type: 1, referenceType: 1, createdAt: -1},
+    {name: 'inventory_transaction_purchasing_report'}
+  );
+  return [idempotencyIndex, purchasingReportIndex];
 }
 
 export async function ensureInventoryBatchIndexes() {
@@ -135,11 +139,11 @@ export async function ensureInventoryBatchIndexes() {
   await ensureCollection(InventoryBatch.collection.collectionName);
   const backfill = await backfillCurrentBalances();
   for (const index of BATCH_INDEXES) await InventoryBatch.collection.createIndex(index.key, index.options);
-  const idempotencyIndex = await ensureInventoryIdempotencyIndex();
+  const transactionIndexes = await ensureInventoryTransactionIndexes();
   await ensureCollection(Order.collection.collectionName);
   const orderSourceIndex = await Order.collection.createIndex(
     {inventorySourceOrders: 1},
     {name: 'order_inventory_source_orders'}
   );
-  return {...backfill, indexes: [...BATCH_INDEXES.map(index => index.options.name), idempotencyIndex, orderSourceIndex]};
+  return {...backfill, indexes: [...BATCH_INDEXES.map(index => index.options.name), ...transactionIndexes, orderSourceIndex]};
 }

@@ -507,6 +507,8 @@ describe('durable batch and expiry inventory', () => {
     for (const name of ['inventory_batch_lot_key', 'inventory_batch_expiry_quantity', 'inventory_batch_lookup']) {
       assert.ok(indexes.some(index => index.name === name), `missing ${name}`);
     }
+    const transactionIndexes = await InventoryTransaction.collection.indexes();
+    assert.ok(transactionIndexes.some(index => index.name === 'inventory_transaction_purchasing_report'));
     const orderIndexes = await mongoose.connection.db.collection('orders').indexes();
     assert.ok(orderIndexes.some(index => index.name === 'order_inventory_source_orders'));
   });

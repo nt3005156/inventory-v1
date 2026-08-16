@@ -15,6 +15,10 @@ const RECEIPT_INDEXES = [
   {
     key: {restaurant: 1, branch: 1, purchaseOrder: 1, createdAt: -1},
     options: {name: 'gr_restaurant_branch_po_created'}
+  },
+  {
+    key: {restaurant: 1, branch: 1, receivedAt: -1},
+    options: {name: 'gr_restaurant_branch_received_at'}
   }
 ];
 

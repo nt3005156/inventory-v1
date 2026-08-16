@@ -99,6 +99,7 @@ describe('purchase order migration', () => {
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_request_key' && index.unique));
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_short_close_key' && index.unique));
     assert.ok(poIndexes.some(index => index.name === 'po_restaurant_branch_status_created'));
+    assert.ok(poIndexes.some(index => index.name === 'po_restaurant_branch_order_date'));
     assert.ok(auditIndexes.some(index => index.name === 'audit_entity_timeline'));
     assert.ok(counterIndexes.some(index => index.name === 'po_counter_scope' && index.unique
       && index.key.restaurant === 1 && index.key.branchCode === 1 && index.key.year === 1));

@@ -460,7 +460,7 @@ describe('durable purchase returns', () => {
 
     const indexes = await PurchaseReturn.collection.indexes();
     const names = new Set(indexes.map(index => index.name));
-    for (const name of ['pr_restaurant_number_v2', 'pr_restaurant_idempotency_key', 'pr_restaurant_branch_po_created', 'pr_restaurant_branch_supplier_created']) {
+    for (const name of ['pr_restaurant_number_v2', 'pr_restaurant_idempotency_key', 'pr_restaurant_branch_po_created', 'pr_restaurant_branch_supplier_created', 'pr_restaurant_branch_returned_at']) {
       assert.ok(names.has(name), `${name} should exist`);
     }
     assert.ok(!names.has('idempotencyKey_1'));

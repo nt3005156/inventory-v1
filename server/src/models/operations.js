@@ -38,6 +38,7 @@ const inventoryBatchMovementSchema=new Schema({
 },{_id:false});
 const inventoryTransactionSchema=new Schema({branch:{...oid,ref:'Branch',index:true},ingredient:{...oid,ref:'Ingredient',index:true},type:{type:String,enum:['OPENING','PURCHASE','SALE','RECIPE_DEDUCTION','RECIPE_REVERSAL','WASTE','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT','RETURN'],required:true},previousQty:n,changeQty:n,newQty:n,unit:String,unitCost:n,totalCost:n,reason:String,referenceType:String,referenceId:oid,user:{...oid,ref:'User'},batchMovements:{type:[inventoryBatchMovementSchema],default:undefined,immutable:true},idempotencyKey:{type:String,trim:true},idempotencyHash:{type:String,trim:true,immutable:true}},{timestamps:true});
 inventoryTransactionSchema.index({branch:1,idempotencyKey:1},{unique:true,partialFilterExpression:{idempotencyKey:{$type:'string'}},name:'inventory_transaction_branch_idempotency'});
+inventoryTransactionSchema.index({branch:1,type:1,referenceType:1,createdAt:-1},{name:'inventory_transaction_purchasing_report'});
 export const InventoryTransaction=model('InventoryTransaction',inventoryTransactionSchema);
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
 export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));
@@ -105,6 +106,7 @@ purchaseOrderSchema.index({restaurant:1,poNo:1},{unique:true,name:'po_restaurant
 purchaseOrderSchema.index({restaurant:1,requestKey:1},{unique:true,name:'po_restaurant_request_key',partialFilterExpression:{requestKey:{$type:'string'}}});
 purchaseOrderSchema.index({restaurant:1,shortCloseIdempotencyKey:1},{unique:true,name:'po_restaurant_short_close_key',partialFilterExpression:{shortCloseIdempotencyKey:{$type:'string'}}});
 purchaseOrderSchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'po_restaurant_branch_status_created'});
+purchaseOrderSchema.index({restaurant:1,branch:1,orderDate:-1,createdAt:-1,_id:-1},{name:'po_restaurant_branch_order_date'});
 purchaseOrderSchema.index({restaurant:1,supplier:1,createdAt:-1},{name:'po_restaurant_supplier_created'});
 export const PurchaseOrder=model('PurchaseOrder',purchaseOrderSchema);
 const purchaseOrderCounterSchema=new Schema({restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},branch:{...oid,ref:'Branch',required:true,immutable:true},branchCode:{type:String,required:true,trim:true,uppercase:true,maxlength:8,immutable:true},year:{type:Number,required:true,immutable:true},value:{type:Number,default:0,min:0}},{timestamps:true,autoIndex:false});
@@ -163,6 +165,7 @@ supplierInvoiceSchema.set('toJSON',{virtuals:true,transform:(_document,result)=>
 supplierInvoiceSchema.index({restaurant:1,supplier:1,invoiceNoNormalized:1},{unique:true,name:'supplier_invoice_restaurant_supplier_number'});
 supplierInvoiceSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'supplier_invoice_restaurant_idempotency',partialFilterExpression:{idempotencyKey:{$type:'string'}}});
 supplierInvoiceSchema.index({restaurant:1,branch:1,status:1,invoiceDate:-1},{name:'supplier_invoice_restaurant_branch_status_date'});
+supplierInvoiceSchema.index({restaurant:1,branch:1,invoiceDate:-1},{name:'supplier_invoice_restaurant_branch_report_date'});
 supplierInvoiceSchema.index({restaurant:1,supplier:1,invoiceDate:1,createdAt:1,_id:1},{name:'supplier_invoice_statement_scope_date'});
 supplierInvoiceSchema.index({restaurant:1,supplier:1,branch:1,invoiceDate:1,createdAt:1,_id:1},{name:'supplier_invoice_statement_branch_date'});
 supplierInvoiceSchema.index({restaurant:1,purchaseOrder:1,status:1},{name:'supplier_invoice_restaurant_po_status'});
@@ -211,6 +214,7 @@ supplierPaymentSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'s
 supplierPaymentSchema.index({restaurant:1,reversalIdempotencyKey:1},{unique:true,name:'supplier_payment_restaurant_reversal_idempotency',partialFilterExpression:{reversalIdempotencyKey:{$type:'string'}}});
 supplierPaymentSchema.index({restaurant:1,invoice:1,status:1,paidAt:1},{name:'supplier_payment_restaurant_invoice_status_date'});
 supplierPaymentSchema.index({restaurant:1,branch:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_branch_status_date'});
+supplierPaymentSchema.index({restaurant:1,branch:1,paidAt:-1},{name:'supplier_payment_restaurant_branch_report_date'});
 supplierPaymentSchema.index({restaurant:1,supplier:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_supplier_status_date'});
 supplierPaymentSchema.index({restaurant:1,supplier:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_scope_date'});
 supplierPaymentSchema.index({restaurant:1,supplier:1,branch:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_branch_date'});

@@ -326,7 +326,7 @@ describe('production goods receiving', () => {
     const rerun = await ensureGoodsReceivingIndexes();
     assert.equal(rerun.migrated, 0);
     const indexes = await GoodsReceipt.collection.indexes();
-    for (const name of ['gr_restaurant_number_v2', 'gr_restaurant_idempotency_key', 'gr_restaurant_branch_po_created']) {
+    for (const name of ['gr_restaurant_number_v2', 'gr_restaurant_idempotency_key', 'gr_restaurant_branch_po_created', 'gr_restaurant_branch_received_at']) {
       assert.ok(indexes.some(index => index.name === name), `missing ${name}`);
     }
     assert.ok((await GoodsReceiptCounter.collection.indexes()).some(index => index.name === 'gr_counter_scope'));

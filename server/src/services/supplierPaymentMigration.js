@@ -38,6 +38,10 @@ const PAYMENT_INDEXES = [
     options: {name: 'supplier_payment_restaurant_branch_status_date'}
   },
   {
+    key: {restaurant: 1, branch: 1, paidAt: -1},
+    options: {name: 'supplier_payment_restaurant_branch_report_date'}
+  },
+  {
     key: {restaurant: 1, supplier: 1, status: 1, paidAt: -1},
     options: {name: 'supplier_payment_restaurant_supplier_status_date'}
   },
