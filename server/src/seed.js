@@ -123,6 +123,7 @@ await RestaurantTable.create([
 await MenuItem.create([
   {
     name: 'Chicken Biryani', nameNp: 'चिकेन बिरयानी', category: 'Biryani', price: 350,
+    vatInclusive: false,
     recipe: [
       {ingredient: ings[0]._id, qty: 250}, {ingredient: ings[1]._id, qty: 180},
       {ingredient: ings[2]._id, qty: 20}, {ingredient: ings[3]._id, qty: 8},
@@ -131,6 +132,7 @@ await MenuItem.create([
   },
   {
     name: 'Chicken Family Pack', nameNp: 'फ्यामिली प्याक', category: 'Combo', price: 1250,
+    vatInclusive: false,
     recipe: [
       {ingredient: ings[0]._id, qty: 900}, {ingredient: ings[1]._id, qty: 600},
       {ingredient: ings[2]._id, qty: 60}, {ingredient: ings[3]._id, qty: 30}

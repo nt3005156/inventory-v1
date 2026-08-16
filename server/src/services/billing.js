@@ -2,6 +2,7 @@ import {Audit} from '../models/index.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertBranchAccess} from './kitchen.js';
 import {OPEN_ORDER_STATUSES, releaseTable} from './tables.js';
+import {computeOrderTotals, priceLine} from './pos.js';
 
 const CLOSED = ['completed', 'cancelled', 'refunded'];
 
@@ -15,12 +16,34 @@ export function money(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+// Re-prices an order after its lines change (split, void, quantity edit).
+// Mirrors the Phase 4A POS engine so a split check totals exactly like the
+// original ticket: VAT-inclusive lines keep the tax inside the menu price, and
+// the dine-in service charge is recomputed from its stored rate.
 export function recountOrder(order) {
-  order.subtotal = money((order.items || []).reduce((s, i) => s + Number(i.qty || 0) * Number(i.unitPrice || 0), 0));
-  const discount = money(order.discount || 0);
   const vatRate = Number(order.vatRate ?? 13);
-  order.vat = money((order.subtotal - discount) * vatRate / 100);
-  order.total = money(order.subtotal - discount + order.vat + Number(order.serviceCharge || 0) + Number(order.deliveryFee || 0));
+  const lines = (order.items || []).map(item => priceLine({
+    unitPrice: item.unitPrice,
+    qty: item.qty,
+    vatInclusive: item.vatInclusive === true,
+    vatRate
+  }));
+  (order.items || []).forEach((item, i) => {
+    item.lineNet = lines[i].lineNet;
+    item.lineVat = lines[i].lineVat;
+    item.lineTotal = lines[i].lineGross;
+  });
+  const totals = computeOrderTotals({
+    lines,
+    discount: order.discount || 0,
+    serviceChargeRate: order.serviceChargeRate || 0,
+    deliveryFee: order.deliveryFee || 0,
+    vatRate
+  });
+  order.subtotal = totals.subtotal;
+  order.vat = totals.vat;
+  order.serviceCharge = totals.serviceCharge;
+  order.total = totals.total;
   order.dueAmount = money(Math.max(0, order.total - Number(order.paidAmount || 0)));
   return order;
 }
@@ -107,6 +130,7 @@ export async function splitOrder({orderId, items, user, session}) {
         name: line.name,
         qty: take,
         unitPrice: line.unitPrice,
+        vatInclusive: line.vatInclusive === true,
         foodCost: line.foodCost,
         notes: line.notes,
         modifiers: line.modifiers,
@@ -140,6 +164,9 @@ export async function splitOrder({orderId, items, user, session}) {
     items: childItems,
     vatRate: parent.vatRate ?? 13,
     discount: 0,
+    // A split check keeps the parent's channel, so it keeps that channel's
+    // service charge; recountOrder recomputes the amount from this rate.
+    serviceChargeRate: parent.serviceChargeRate || 0,
     serviceCharge: 0,
     deliveryFee: 0,
     paidAmount: 0,

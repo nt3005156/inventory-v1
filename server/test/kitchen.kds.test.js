@@ -163,6 +163,7 @@ describe('order cancellation inventory reversal', () => {
       body: {
         branch: String(world.branchA._id),
         type: 'dine-in',
+        table: String(world.table._id),
         items: [{menuItem: String(world.menu._id), qty: 2, notes: 'no onion'}]
       }
     });

@@ -118,9 +118,9 @@ describe('multiple and partial payments', () => {
       body: {method: 'cash', items: [{itemId: String(line._id), qty: 1}]}
     });
     assert.equal(res.status, 201, res.body?.message);
-    assert.equal(res.body.payment.amount, 395.5);
+    assert.equal(res.body.payment.amount, 435.05);
     assert.equal(res.body.order.status, 'pending');
-    assert.equal(res.body.order.dueAmount, 395.5);
+    assert.equal(res.body.order.dueAmount, 435.05);
   });
 });
 
@@ -138,8 +138,9 @@ describe('split items and close table after paid', () => {
     assert.equal(res.status, 201, res.body?.message);
     assert.equal(res.body.order.items[0].qty, 1);
     assert.equal(res.body.splitOrder.items[0].qty, 1);
-    assert.equal(res.body.order.total, 395.5);
-    assert.equal(res.body.splitOrder.total, 395.5);
+    // Dine-in now carries the 10% service charge: 350 net + 35 svc + 50.05 VAT.
+    assert.equal(res.body.order.total, 435.05);
+    assert.equal(res.body.splitOrder.total, 435.05);
     assert.equal(res.body.splitOrder.inventoryDeducted, true);
     assert.equal(res.body.splitOrder.table, created.body.table);
     assert.equal(await InventoryTransaction.countDocuments(), beforeTx);

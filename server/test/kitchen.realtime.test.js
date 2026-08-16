@@ -55,7 +55,7 @@ async function createOrder(branch, user = world.owner) {
     token: tokenFor(user),
     body: {
       branch: String(branch._id),
-      type: 'dine-in',
+      type: 'counter',
       items: [{menuItem: String(world.menu._id), qty: 1, notes: 'live ticket'}]
     }
   });

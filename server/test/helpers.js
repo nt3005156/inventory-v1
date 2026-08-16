@@ -101,7 +101,7 @@ export async function seedWorld() {
   const menu = await MenuItem.create({
     name: 'Chicken Biryani',
     price: 350,
-    vatInclusive: true,
+    vatInclusive: false,
     recipe: [{ingredient: ingredient._id, qty: 250, unit: 'g'}]
   });
   const openingSession=await mongoose.startSession();

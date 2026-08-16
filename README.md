@@ -34,6 +34,28 @@ unchanged and still returns the fixed-cutoff `classification`.
 The Analytics screen renders the summary KPIs, the menu mix, the full item table, and the
 profitable / low-margin breakdowns.
 
+## POS core (Phase 4A)
+
+`POST /api/orders` sells through four channels, each with its own rules enforced at creation:
+
+| Channel | Table | Service charge | Delivery |
+|---|---|---|---|
+| `dine-in` | **Required** | 10% by default (waivable per order) | — |
+| `takeaway` | Rejected | None | — |
+| `counter` (default) | Rejected | None | — |
+| `delivery` | Rejected | None | Customer + address **required**; optional fee |
+
+**Pricing and taxes.** Each line is priced from the menu item's `vatInclusive` flag: an
+inclusive price already contains the tax, so VAT is extracted from within it and the guest pays
+exactly the listed amount; an exclusive price is net and 13% VAT is added on top. Lines persist
+their own `lineNet`, `lineVat`, and `lineTotal`.
+
+Totals follow Nepal convention: net subtotal, less discount, plus service charge, with VAT
+applied to that whole base. A discount removes its tax with it, the service charge is itself
+taxable, and the delivery fee is a pass-through added after VAT and never taxed. A discount
+larger than the subtotal is rejected. Split checks inherit the parent channel's service-charge
+rate and per-line VAT treatment, so a split ticket totals exactly like the original.
+
 ## Recommended local start: Docker Compose
 
 Docker Compose starts a single-member MongoDB replica set, waits for a writable primary, runs API migrations, waits for API readiness, and then starts the web proxy.
