@@ -9,6 +9,7 @@ export default function Analytics({call, branches = [], user}) {
   const owner = user?.role === 'owner';
   const [branchId, setBranchId] = useState(locked ? (assigned || '') : (owner ? '' : (visibleBranches[0]?._id || assigned || '')));
   const [menu, setMenu] = useState([]);
+  const [report, setReport] = useState(null);
   const [pnl, setPnl] = useState(null);
   const [error, setError] = useState('');
   const branch = visibleBranches.find(b => b._id === branchId) || null;
@@ -22,10 +23,11 @@ export default function Analytics({call, branches = [], user}) {
     setError('');
     const q = branchId ? `?branch=${branchId}` : '';
     Promise.all([
-      call('/analytics/menu-engineering' + q),
+      call('/analytics/menu-engineering/report' + q),
       call('/reports/pnl' + q)
-    ]).then(([m, p]) => {
-      setMenu(Array.isArray(m) ? m : []);
+    ]).then(([r, p]) => {
+      setReport(r && r.summary ? r : null);
+      setMenu(Array.isArray(r?.items) ? r.items : []);
       setPnl(p);
     }).catch(e => setError(e.message || 'Could not load analytics'));
   };
@@ -77,24 +79,105 @@ export default function Analytics({call, branches = [], user}) {
       </section>
       <section className="panel" style={{marginTop: 18}}>
         <h2>Menu engineering</h2>
-        <p>Kasavan–Smith matrix from live orders (cancelled tickets excluded). Popularity is share of plates sold. Margin is menu price minus current recipe cost, NPR.</p>
+        <p>Kasavan–Smith matrix from live orders (cancelled tickets excluded). Popularity is share of plates sold, indexed against an equal share of the menu (70% rule). Food cost is recipe plus packaging; margin is menu price minus food cost, NPR.</p>
+        {report && (
+          <div className="kpis" style={{marginTop: 14}}>
+            <article>
+              <small>Plates sold</small>
+              <strong>{report.summary.plates}</strong>
+              <em>{report.summary.itemsSold} of {report.summary.items} items sold</em>
+            </article>
+            <article>
+              <small>Food cost</small>
+              <strong>{report.summary.averageFoodCostPercent}%</strong>
+              <em>{rs(report.summary.foodCost)} · target {report.summary.targetFoodCostPercent}%</em>
+            </article>
+            <article>
+              <small>Gross margin</small>
+              <strong>{rs(report.summary.grossMargin)}</strong>
+              <em>{report.summary.grossMarginPercent}% of {rs(report.summary.revenue)}</em>
+            </article>
+            <article>
+              <small>Profitable / low margin</small>
+              <strong>{report.summary.profitableItems} / {report.summary.lowMarginItems}</strong>
+              <em>Avg margin {rs(report.summary.averageMargin)} per plate</em>
+            </article>
+          </div>
+        )}
+        {report && (
+          <div className="receive-box" style={{marginTop: 16}}>
+            <b>Menu mix</b>
+            <p style={{margin: '6px 0 0'}}>
+              {['Star', 'Plow-horse', 'Puzzle', 'Dog'].map(k => (
+                <label key={k} className={'pill ' + k.toLowerCase()} style={{marginRight: 8}}>
+                  {k} {report.summary.mix[k]}
+                </label>
+              ))}
+            </p>
+          </div>
+        )}
         {!menu.length && !error && <p className="empty">No menu items to classify yet.</p>}
         {!!menu.length && (
         <table>
-          <thead><tr><th>Menu item</th><th>Sold</th><th>Popularity</th><th>Contribution margin</th><th>Classification</th><th>Recommendation</th></tr></thead>
+          <thead><tr><th>Menu item</th><th>Sold</th><th>Popularity</th><th>Price</th><th>Food cost</th><th>Contribution margin</th><th>Classification</th><th>Recommendation</th></tr></thead>
           <tbody>
             {menu.map(x => (
               <tr key={x.id || x.name}>
-                <td><b>{x.name}</b></td>
+                <td><b>{x.name}</b>{x.lowMargin && <small className="warn">Low margin</small>}</td>
                 <td>{x.soldQty || 0}</td>
-                <td>{(Number(x.popularity || 0) * 100).toFixed(1)}%</td>
-                <td>{rs(x.margin)}</td>
-                <td><label className={'pill ' + String(x.classification || '').toLowerCase()}>{x.classification}</label></td>
-                <td>{x.classification === 'Star' ? 'Protect quality and feature it.' : x.classification === 'Dog' ? 'Review recipe or retire.' : 'Test promotion or pricing.'}</td>
+                <td>{(Number(x.popularity || 0) * 100).toFixed(1)}%<small>index {Number(x.popularityIndex || 0).toFixed(2)}</small></td>
+                <td>{rs(x.price)}</td>
+                <td>{rs(x.foodCost)}<small>{x.foodCostPercent}% · {x.costSource}</small></td>
+                <td>{rs(x.margin)}<small>{x.marginPercent}% · total {rs(x.totalMargin)}</small></td>
+                <td><label className={'pill ' + String(x.matrixClass || x.classification || '').toLowerCase()}>{x.matrixClass || x.classification}</label></td>
+                <td>{x.recommendation || (x.classification === 'Star' ? 'Protect quality and feature it.' : x.classification === 'Dog' ? 'Review recipe or retire.' : 'Test promotion or pricing.')}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        )}
+        {report && (!!report.profitableItems.length || !!report.lowMarginItems.length) && (
+          <div className="close-grid" style={{marginTop: 20}}>
+            <div>
+              <h3>Most profitable items</h3>
+              <p>Ranked by total contribution margin earned in the period.</p>
+              {!report.profitableItems.length && <p className="empty">No item beats the menu average yet.</p>}
+              {!!report.profitableItems.length && (
+                <table>
+                  <thead><tr><th>Item</th><th>Margin / plate</th><th>Total margin</th></tr></thead>
+                  <tbody>
+                    {report.profitableItems.map(x => (
+                      <tr key={x.id}>
+                        <td><b>{x.name}</b><small>{x.matrixClass} · {x.soldQty} sold</small></td>
+                        <td>{rs(x.margin)}<small>{x.marginPercent}%</small></td>
+                        <td>{rs(x.totalMargin)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div>
+              <h3>Low-margin items</h3>
+              <p>Food cost above the {report.summary.targetFoodCostPercent}% target, or selling at a loss.</p>
+              {!report.lowMarginItems.length && <p className="empty">Every item is inside the food-cost target.</p>}
+              {!!report.lowMarginItems.length && (
+                <table>
+                  <thead><tr><th>Item</th><th>Food cost</th><th>Margin</th><th>Action</th></tr></thead>
+                  <tbody>
+                    {report.lowMarginItems.map(x => (
+                      <tr key={x.id}>
+                        <td><b>{x.name}</b><small>{x.matrixClass} · {x.soldQty} sold</small></td>
+                        <td>{x.foodCostPercent}%<small>{x.overTargetBy > 0 ? '+' + x.overTargetBy + ' over target' : 'within target'}</small></td>
+                        <td className={x.margin < 0 ? 'warn' : ''}>{rs(x.margin)}</td>
+                        <td>{x.recommendation}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
         )}
       </section>
     </>

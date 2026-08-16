@@ -17,7 +17,7 @@ import {buildPurchasingReport} from '../services/purchasingReport.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
-import {buildMenuEngineering} from '../services/menuEngineering.js';
+import {buildMenuEngineering, buildMenuEngineeringReport} from '../services/menuEngineering.js';
 import {
   createSupplierInvoice,
   getSupplierInvoice,
@@ -841,6 +841,21 @@ r.get('/analytics/menu-engineering', auth(['owner', 'manager']), async (req, res
       user: req.user,
       from: req.query.from,
       to: req.query.to
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.get('/analytics/menu-engineering/report', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await buildMenuEngineeringReport({
+      branchId: req.query.branch,
+      user: req.user,
+      from: req.query.from,
+      to: req.query.to,
+      targetFoodCostPercent: req.query.targetFoodCostPercent,
+      limit: req.query.limit
     }));
   } catch (e) {
     fail(res, e);

@@ -13,6 +13,27 @@ Mittho OPS is a full-stack restaurant operations platform for Nepal. Purchasing 
 - Same-origin production web/API/Socket.IO routing through Nginx
 - MongoDB transaction enforcement, startup data/index migrations, readiness checks, and graceful API shutdown
 
+## Menu engineering (Phase 3E)
+
+`GET /api/analytics/menu-engineering/report` (owner/manager, branch-scoped) analyzes the live
+menu across five dimensions. Query parameters: `branch`, `from`, `to`,
+`targetFoodCostPercent` (default 35), and `limit` (default 5).
+
+| Dimension | How it is measured |
+|---|---|
+| **Popularity** | Share of plates sold per item, plus a `popularityIndex` against an equal share of the menu. An item is popular at the Kasavan–Smith 70% rule (`index >= 0.7`). Cancelled and refunded tickets are excluded. |
+| **Food cost** | Recipe cost plus packaging. Sold items keep the food cost captured on the order line, so historical margins never move when today's stock cost changes; unsold items are priced from the live branch recipe cost (`costSource` reports which was used). |
+| **Margin** | `price - foodCost` per plate, with `marginPercent`, `totalMargin`, and revenue for the period. |
+| **Profitable items** | Items at or above the sales-weighted average margin, ranked by total contribution margin earned. |
+| **Low-margin items** | Items whose food cost exceeds the target percent, or that sell at a loss, ranked worst-first with `overTargetBy` and a recommended action. |
+
+Each item is also placed on the menu-relative matrix (`matrixClass`): **Star**, **Plow-horse**,
+**Puzzle**, or **Dog**. The legacy `GET /api/analytics/menu-engineering` array endpoint is
+unchanged and still returns the fixed-cutoff `classification`.
+
+The Analytics screen renders the summary KPIs, the menu mix, the full item table, and the
+profitable / low-margin breakdowns.
+
 ## Recommended local start: Docker Compose
 
 Docker Compose starts a single-member MongoDB replica set, waits for a writable primary, runs API migrations, waits for API readiness, and then starts the web proxy.
