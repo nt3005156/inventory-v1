@@ -410,6 +410,22 @@ const supplierPaymentCounterSchema=new Schema({
 },{timestamps:true,autoIndex:false});
 supplierPaymentCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'supplier_payment_counter_scope'});
 export const SupplierPaymentCounter=model('SupplierPaymentCounter',supplierPaymentCounterSchema);
-export const StockTransfer=model('StockTransfer',new Schema({fromBranch:{...oid,ref:'Branch'},toBranch:{...oid,ref:'Branch'},ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,status:{type:String,enum:['requested','approved','in_transit','received','cancelled'],default:'requested'},requestedBy:{...oid,ref:'User'},approvedBy:{...oid,ref:'User'}},{timestamps:true}));
+const stockTransferSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true,immutable:true},
+  fromBranch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
+  toBranch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
+  ingredient:{...oid,ref:'Ingredient',required:true,index:true,immutable:true},
+  qty:{type:Number,required:true,min:Number.EPSILON,immutable:true},
+  unit:{type:String,required:true,trim:true,maxlength:30,immutable:true},
+  status:{type:String,enum:['requested','approved','in_transit','received','cancelled'],default:'requested',index:true},
+  requestedBy:{...oid,ref:'User',required:true,immutable:true},
+  approvedBy:{...oid,ref:'User'},
+  requestKey:{type:String,trim:true,maxlength:200,select:false,immutable:true},
+  requestHash:{type:String,match:/^[a-f0-9]{64}$/,select:false,immutable:true}
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+stockTransferSchema.index({restaurant:1,requestKey:1},{unique:true,name:'stock_transfer_restaurant_request',partialFilterExpression:{requestKey:{$type:'string'}}});
+stockTransferSchema.index({restaurant:1,fromBranch:1,status:1,createdAt:-1},{name:'stock_transfer_from_status'});
+stockTransferSchema.index({restaurant:1,toBranch:1,status:1,createdAt:-1},{name:'stock_transfer_to_status'});
+export const StockTransfer=model('StockTransfer',stockTransferSchema);
 export const Delivery=model('Delivery',new Schema({order:{...oid,ref:'Order'},rider:{...oid,ref:'User'},address:String,phone:String,status:{type:String,enum:['available','assigned','picking_up','out_for_delivery','delivered','cancelled'],default:'assigned'},estimatedMinutes:n},{timestamps:true}));
 export const Notification=model('Notification',new Schema({branch:{...oid,ref:'Branch'},user:{...oid,ref:'User'},type:String,title:String,body:String,read:{type:Boolean,default:false},referenceId:oid},{timestamps:true}));

@@ -29,6 +29,11 @@ export async function startTestApp() {
   if (!replset) {
     replset = await MongoMemoryReplSet.create({replSet: {count: 1, storageEngine: 'wiredTiger'}});
     await mongoose.connect(replset.getUri());
+    // Ensure branch transfer indexes exist for idempotency guarantees
+    try {
+      const {ensureStockTransferIndexes} = await import('../src/services/stockTransferMigration.js');
+      await ensureStockTransferIndexes();
+    } catch {}
   }
   if (!server) {
     const app = express();

@@ -9,6 +9,7 @@ import {ensurePurchaseReturnIndexes} from './purchaseReturnMigration.js';
 import {ensureSupplierInvoiceIndexes} from './supplierInvoiceMigration.js';
 import {ensureSupplierPaymentIndexes} from './supplierPaymentMigration.js';
 import {ensureStockCountIndexes} from './stockCountMigration.js';
+import {ensureStockTransferIndexes} from './stockTransferMigration.js';
 
 const OPERATIONAL_MIGRATIONS = [
   ensureMonthCloseIndexes,
@@ -18,6 +19,7 @@ const OPERATIONAL_MIGRATIONS = [
   ensureInventoryLedgerIndexes,
   ensureInventoryBatchIndexes,
   ensureStockCountIndexes,
+  ensureStockTransferIndexes,
   ensurePurchaseReturnIndexes,
   ensureSupplierInvoiceIndexes,
   ensureSupplierPaymentIndexes

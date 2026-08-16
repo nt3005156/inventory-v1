@@ -82,6 +82,7 @@ export default function StockOps({call, branches = [], user, token}) {
   const [history, setHistory] = useState([]);
 
   const wasteKey = useRef(requestKey('waste'));
+  const transferCreateKey = useRef(requestKey('transfer'));
   const countCreateKey = useRef(requestKey('stock-count'));
   const decisionKey = useRef(requestKey('stock-count-decision'));
   const loadSequence = useRef(0);
@@ -277,8 +278,10 @@ export default function StockOps({call, branches = [], user, token}) {
     try {
       await call('/transfers', {
         method: 'POST',
+        headers: {'Idempotency-Key': transferCreateKey.current},
         body: JSON.stringify({fromBranch: branchId, toBranch: destination, ingredient, qty: Number(qty)})
       });
+      transferCreateKey.current = requestKey('transfer');
       setMessage('Transfer request created.');
       await load();
     } catch (err) {
@@ -293,7 +296,7 @@ export default function StockOps({call, branches = [], user, token}) {
     setError('');
     setMessage('');
     try {
-      await call('/transfers/' + row._id + '/status', {method: 'PATCH', body: JSON.stringify({status})});
+      await call('/transfers/' + row._id + '/status', {method: 'PATCH', headers: {'Idempotency-Key': requestKey(`transfer-${row._id}-${status}`)}, body: JSON.stringify({status})});
       setMessage(status === 'received' ? 'Transfer received on the destination ledger.' : status === 'in_transit' ? 'Stock left the source branch.' : 'Transfer updated.');
       await load();
     } catch (err) {
