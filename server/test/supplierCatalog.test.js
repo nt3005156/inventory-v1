@@ -95,6 +95,101 @@ describe('supplier catalog migration', () => {
     const ingredientIndexes = (await Ingredient.collection.indexes()).map(index => index.name);
     assert.ok(ingredientIndexes.includes('ingredient_restaurant_code'));
     assert.ok(!ingredientIndexes.includes('code_1'));
+    const supplierIndexes = (await Supplier.collection.indexes()).map(index => index.name);
+    assert.ok(supplierIndexes.includes('supplier_restaurant_name'));
+    assert.ok(supplierIndexes.includes('supplier_restaurant_active_name'));
+    const migratedSupplier = await Supplier.findById(legacySupplier._id).select('+nameNormalized').lean();
+    assert.equal(migratedSupplier.nameNormalized, 'LEGACY MILL');
+  });
+});
+
+describe('tenant-scoped supplier master API', () => {
+  it('creates, lists, updates and deactivates suppliers with audit and version protection', async () => {
+    const created = await request('/api/suppliers', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {
+        name: '  Valley   Produce  ',
+        contact: '9800000000',
+        address: 'Kalimati, Kathmandu',
+        paymentTerms: 'Net 15',
+        reason: 'Approved purchasing vendor'
+      }
+    });
+    assert.equal(created.status, 201, created.body?.message);
+    assert.equal(created.body.name, 'Valley Produce');
+    assert.equal(created.body.restaurant, String(world.restaurant._id));
+    assert.equal(created.body.nameNormalized, undefined);
+    assert.equal(created.body.__v, 0);
+    assert.equal(String(created.body.createdBy), String(world.manager._id));
+
+    const list = await request('/api/suppliers?q=produce&active=true', {token: tokenFor(world.staffA)});
+    assert.equal(list.status, 200, list.body?.message);
+    assert.equal(list.body.pagination.total, 1);
+    assert.equal(list.body.items[0]._id, created.body._id);
+    assert.equal(list.body.items[0].nameNormalized, undefined);
+
+    const updated = await request(`/api/suppliers/${created.body._id}`, {
+      method: 'PATCH',
+      token: tokenFor(world.manager),
+      body: {expectedVersion: created.body.__v, paymentTerms: 'Net 30', active: false, reason: 'Contract amended'}
+    });
+    assert.equal(updated.status, 200, updated.body?.message);
+    assert.equal(updated.body.paymentTerms, 'Net 30');
+    assert.equal(updated.body.active, false);
+    assert.equal(updated.body.__v, 1);
+
+    const stale = await request(`/api/suppliers/${created.body._id}`, {
+      method: 'PATCH',
+      token: tokenFor(world.manager),
+      body: {expectedVersion: created.body.__v, active: true}
+    });
+    assert.equal(stale.status, 409);
+    assert.match(stale.body.message, /changed since it was loaded/i);
+
+    const options = await request('/api/supplier-catalog/options', {token: tokenFor(world.staffA)});
+    assert.equal(options.status, 200, options.body?.message);
+    assert.ok(!options.body.suppliers.some(item => item._id === created.body._id));
+    assert.equal(await Audit.countDocuments({entity: 'supplier', entityId: created.body._id}), 2);
+  });
+
+  it('owns restaurant identity, enforces permissions and prevents normalized duplicates', async () => {
+    const otherRestaurant = await Restaurant.create({name: 'Supplier Tenant B'});
+    const otherBranch = await Branch.create({restaurant: otherRestaurant._id, name: 'Tenant B Branch', code: 'STB'});
+    const otherManager = await User.create({
+      name: 'Supplier Tenant B Manager', email: 'supplier-b@test.com', password: 'hashed', role: 'manager',
+      restaurantId: otherRestaurant._id, branch: otherBranch._id
+    });
+    const foreign = await Supplier.create({restaurant: otherRestaurant._id, name: 'Foreign Supplier'});
+
+    const payloadOwned = await request('/api/suppliers', {
+      method: 'POST',
+      token: tokenFor(world.manager),
+      body: {name: 'Payload Attack', restaurant: String(otherRestaurant._id)}
+    });
+    assert.equal(payloadOwned.status, 400);
+    assert.equal(await Supplier.countDocuments({name: 'Payload Attack'}), 0);
+    assert.equal((await request('/api/suppliers', {method: 'POST', token: tokenFor(world.staffA), body: {name: 'Staff Supplier'}})).status, 403);
+
+    const first = await request('/api/suppliers', {
+      method: 'POST', token: tokenFor(world.owner), body: {name: 'Duplicate Name'}
+    });
+    assert.equal(first.status, 201, first.body?.message);
+    const duplicate = await request('/api/suppliers', {
+      method: 'POST', token: tokenFor(world.manager), body: {name: ' duplicate   name '}
+    });
+    assert.equal(duplicate.status, 409);
+
+    const list = await request('/api/suppliers', {token: tokenFor(world.owner)});
+    assert.ok(!list.body.items.some(item => item._id === String(foreign._id)));
+    const hidden = await request(`/api/suppliers/${foreign._id}`, {
+      method: 'PATCH', token: tokenFor(world.owner), body: {expectedVersion: foreign.__v, active: false}
+    });
+    assert.equal(hidden.status, 404);
+
+    const otherList = await request('/api/suppliers', {token: tokenFor(otherManager)});
+    assert.equal(otherList.status, 200, otherList.body?.message);
+    assert.deepEqual(otherList.body.items.map(item => item._id), [String(foreign._id)]);
   });
 });
 

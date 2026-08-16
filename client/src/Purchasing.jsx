@@ -95,6 +95,9 @@ export default function Purchasing({call, user, token}) {
   const [reportError, setReportError] = useState('');
   const [reportUpdatedAt, setReportUpdatedAt] = useState(null);
   const reportRequestSequence = useRef(0);
+  const catalogRequestSequence = useRef(0);
+  const openHistoryRequestSequence = useRef(0);
+  const invoicePaymentsRequestSequence = useRef(0);
   const [editId, setEditId] = useState('');
   const [edit, setEdit] = useState({invoiceNo: '', purchaseOrder: '', invoiceDate: '', dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
   const [live, setLive] = useState('connecting');
@@ -156,6 +159,34 @@ export default function Purchasing({call, user, token}) {
       });
   };
 
+  const loadSupplierCatalog = (supplierId, {silent = false} = {}) => {
+    const sequence = ++catalogRequestSequence.current;
+    if (!supplierId) {
+      setCatalog([]);
+      setCatalogLoadedFor('');
+      setCatalogLoading(false);
+      return Promise.resolve();
+    }
+    if (!silent) {
+      setCatalogLoading(true);
+      setCatalogLoadedFor('');
+    }
+    return call(`/supplier-catalog?supplier=${supplierId}&limit=200`)
+      .then(result => {
+        if (sequence !== catalogRequestSequence.current) return;
+        setCatalog(result.items || []);
+        setCatalogLoadedFor(supplierId);
+      })
+      .catch(err => {
+        if (sequence === catalogRequestSequence.current && !silent) {
+          setError(err.message || 'Could not load current supplier catalog');
+        }
+      })
+      .finally(() => {
+        if (sequence === catalogRequestSequence.current) setCatalogLoading(false);
+      });
+  };
+
   useEffect(() => {
     let cancelled = false;
     call('/purchase-order-branches')
@@ -178,23 +209,8 @@ export default function Purchasing({call, user, token}) {
   }, [branch?._id, reportFilters]);
 
   useEffect(() => {
-    if (!form.supplier) {
-      setCatalog([]);
-      setCatalogLoadedFor('');
-      return;
-    }
-    let cancelled = false;
-    setCatalogLoading(true);
-    setCatalogLoadedFor('');
-    call(`/supplier-catalog?supplier=${form.supplier}&limit=200`)
-      .then(result => {
-        if (cancelled) return;
-        setCatalog(result.items || []);
-        setCatalogLoadedFor(form.supplier);
-      })
-      .catch(err => !cancelled && setError(err.message || 'Could not load current supplier catalog'))
-      .finally(() => !cancelled && setCatalogLoading(false));
-    return () => { cancelled = true; };
+    loadSupplierCatalog(form.supplier);
+    return () => { catalogRequestSequence.current += 1; };
   }, [form.supplier]);
 
   useEffect(() => {
@@ -211,7 +227,9 @@ export default function Purchasing({call, user, token}) {
     setReturnOptionsLoading(false);
     setApprovalHistory([]);
     setApprovalAction(null);
+    openHistoryRequestSequence.current += 1;
     statementRequestSequence.current += 1;
+    invoicePaymentsRequestSequence.current += 1;
     setStatement(null);
     setStatementId('');
     setStatementLoading(false);
@@ -246,9 +264,15 @@ export default function Purchasing({call, user, token}) {
   statementPageRef.current = statement?.linePagination?.page || 1;
   const payInvoiceIdRef = useRef(payInvoiceId);
   payInvoiceIdRef.current = payInvoiceId;
+  const formSupplierRef = useRef(form.supplier);
+  formSupplierRef.current = form.supplier;
+  const catalogLoadRef = useRef(loadSupplierCatalog);
+  catalogLoadRef.current = loadSupplierCatalog;
+  const statementLoadRef = useRef(null);
 
   const refreshOpenHistory = async id => {
     if (!id) return;
+    const sequence = ++openHistoryRequestSequence.current;
     setReturnOptionsLoading(true);
     try {
       const [r, ret, approvals, options] = await Promise.all([
@@ -257,6 +281,7 @@ export default function Purchasing({call, user, token}) {
         call('/purchase-orders/' + id + '/approval-history'),
         call('/purchase-orders/' + id + '/return-options')
       ]);
+      if (sequence !== openHistoryRequestSequence.current || String(openIdRef.current) !== String(id)) return;
       setReceipts(r);
       setReturns(ret);
       setApprovalHistory(approvals);
@@ -264,52 +289,130 @@ export default function Purchasing({call, user, token}) {
     } catch {
       /* list reload still ran */
     } finally {
-      setReturnOptionsLoading(false);
+      if (sequence === openHistoryRequestSequence.current) setReturnOptionsLoading(false);
+    }
+  };
+
+  const refreshInvoicePayments = async id => {
+    if (!id) return;
+    const sequence = ++invoicePaymentsRequestSequence.current;
+    try {
+      const rows = await call('/supplier-invoices/' + id + '/payments');
+      if (sequence === invoicePaymentsRequestSequence.current && String(payInvoiceIdRef.current) === String(id)) {
+        setInvoicePays(rows);
+      }
+    } catch {
+      /* the next event or consistency poll will retry the surrounding workspace */
     }
   };
 
   useEffect(() => {
-    if (live === 'live') return;
+    if (!branch?._id) return undefined;
+    // Socket events are hints rather than durable messages. Keep a slower live
+    // consistency poll so a process restart or transient dropped event heals.
+    const delay = live === 'live' ? 60000 : 8000;
     const tick = setInterval(() => {
       loadRef.current();
       reportLoadRef.current(reportFiltersRef.current, {silent: true});
-    }, 8000);
+    }, delay);
     return () => clearInterval(tick);
   }, [branch?._id, live]);
 
   useEffect(() => {
-    if (!authToken || !branch?._id) return undefined;
+    if (!authToken || !branch?._id) {
+      setLive('offline');
+      return undefined;
+    }
+    let active = true;
+    let refreshTimer = null;
+    let reconnectTimer = null;
+    let queued = [];
+    const seenEventIds = new Set();
+    setLive('connecting');
     const socket = connectBranchSocket(authToken, branch._id);
-    const onUpdate = payload => {
-      if (payload?.branch && String(payload.branch) !== String(branch._id)) return;
+
+    const flushUpdates = () => {
+      refreshTimer = null;
+      if (!active || !queued.length) return;
+      const events = queued;
+      queued = [];
       loadRef.current();
       reportLoadRef.current(reportFiltersRef.current, {silent: true});
-      if (openIdRef.current && payload.poId && String(payload.poId) === String(openIdRef.current)) {
-        refreshOpenHistory(openIdRef.current);
+
+      const openPo = openIdRef.current;
+      if (openPo && events.some(payload => payload.poId && String(payload.poId) === String(openPo))) {
+        refreshOpenHistory(openPo);
       }
-      if (statementIdRef.current && payload.supplierId && String(payload.supplierId) === String(statementIdRef.current)) {
-        loadStatement(statementIdRef.current, statementFiltersRef.current, statementPageRef.current, {silent: true});
+      const openSupplier = statementIdRef.current;
+      if (openSupplier && events.some(payload => payload.supplierId && String(payload.supplierId) === String(openSupplier))) {
+        statementLoadRef.current?.(openSupplier, statementFiltersRef.current, statementPageRef.current, {silent: true});
       }
-      if (payInvoiceIdRef.current && payload.invoiceId && String(payload.invoiceId) === String(payInvoiceIdRef.current)) {
-        call('/supplier-invoices/' + payInvoiceIdRef.current + '/payments')
-          .then(setInvoicePays)
-          .catch(() => {});
+      const openInvoice = payInvoiceIdRef.current;
+      if (openInvoice && events.some(payload => payload.invoiceId && String(payload.invoiceId) === String(openInvoice))) {
+        refreshInvoicePayments(openInvoice);
+      }
+      const selectedSupplier = formSupplierRef.current;
+      if (selectedSupplier && events.some(payload =>
+        String(payload.reason || '').startsWith('catalog_')
+        && (!payload.supplierId || String(payload.supplierId) === String(selectedSupplier))
+      )) {
+        catalogLoadRef.current(selectedSupplier, {silent: true});
       }
     };
+
+    const onUpdate = payload => {
+      if (!active || (payload?.branch && String(payload.branch) !== String(branch._id))) return;
+      if (payload?.eventId) {
+        if (seenEventIds.has(payload.eventId)) return;
+        seenEventIds.add(payload.eventId);
+        if (seenEventIds.size > 200) seenEventIds.delete(seenEventIds.values().next().value);
+      }
+      queued.push(payload || {});
+      if (!refreshTimer) refreshTimer = setTimeout(flushUpdates, 75);
+    };
+
     socket.on('connect', () => {
-      setLive('live');
-      socket.emit('join:branch', branch._id, ack => {
-        if (ack && ack.ok === false) setError(ack.message || 'Could not join purchasing room');
+      if (!active) return;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      setLive('connecting');
+      socket.timeout(5000).emit('join:branch', branch._id, (joinError, ack) => {
+        if (!active) return;
+        if (joinError) {
+          setLive('reconnecting');
+          socket.disconnect();
+          reconnectTimer = setTimeout(() => {
+            if (active) socket.connect();
+          }, 2000);
+          return;
+        }
+        if (!ack?.ok) {
+          setLive('offline');
+          setError(ack?.message || 'Could not join purchasing room');
+          socket.disconnect();
+          return;
+        }
+        // Reload only after room membership is acknowledged. This closes the
+        // connect-versus-join gap where an update could otherwise be missed.
+        setLive('live');
+        loadRef.current();
+        reportLoadRef.current(reportFiltersRef.current, {silent: true});
       });
-      loadRef.current();
-      reportLoadRef.current(reportFiltersRef.current, {silent: true});
     });
     socket.on('disconnect', reason => {
-      setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+      if (active) setLive(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
     });
-    socket.on('connect_error', () => setLive('reconnecting'));
+    socket.on('connect_error', () => {
+      if (active) setLive('reconnecting');
+    });
     socket.on('purchasing:update', onUpdate);
     return () => {
+      active = false;
+      queued = [];
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       socket.emit('leave:branch', branch._id);
       socket.off('purchasing:update', onUpdate);
       socket.disconnect();
@@ -317,7 +420,9 @@ export default function Purchasing({call, user, token}) {
   }, [authToken, branch?._id]);
 
   const openReceive = async order => {
+    const sequence = ++openHistoryRequestSequence.current;
     setError('');
+    openIdRef.current = order._id;
     setOpenId(order._id);
     setApprovalAction(null);
     setShortCloseAction(null);
@@ -344,18 +449,20 @@ export default function Purchasing({call, user, token}) {
         call('/purchase-orders/' + order._id + '/approval-history'),
         call('/purchase-orders/' + order._id + '/return-options')
       ]);
+      if (sequence !== openHistoryRequestSequence.current || String(openIdRef.current) !== String(order._id)) return;
       setReceipts(r);
       setReturns(ret);
       setApprovalHistory(approvals);
       setReturnOptions(options);
     } catch (e) {
+      if (sequence !== openHistoryRequestSequence.current || String(openIdRef.current) !== String(order._id)) return;
       setReceipts([]);
       setReturns([]);
       setReturnOptions({items: [], summary: {returnableQty: 0, availableQty: 0, legacyLines: 0}});
       setApprovalHistory([]);
       setError(e.message);
     } finally {
-      setReturnOptionsLoading(false);
+      if (sequence === openHistoryRequestSequence.current) setReturnOptionsLoading(false);
     }
   };
 
@@ -613,9 +720,11 @@ export default function Purchasing({call, user, token}) {
   };
 
   const openInvoicePayments = async (inv, preparePayment = false) => {
+    const sequence = ++invoicePaymentsRequestSequence.current;
     setError('');
     setSuccess('');
-    const changingInvoice = String(inv._id) !== String(payInvoiceId);
+    const changingInvoice = String(inv._id) !== String(payInvoiceIdRef.current);
+    payInvoiceIdRef.current = inv._id;
     setPayInvoiceId(inv._id);
     if (changingInvoice) setInvoicePays([]);
     setReverseAction(null);
@@ -630,12 +739,17 @@ export default function Purchasing({call, user, token}) {
     }
     setPaymentLoading(true);
     try {
-      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
+      const rows = await call('/supplier-invoices/' + inv._id + '/payments');
+      if (sequence === invoicePaymentsRequestSequence.current && String(payInvoiceIdRef.current) === String(inv._id)) {
+        setInvoicePays(rows);
+      }
     } catch (e) {
-      setInvoicePays([]);
-      setError(e.message || 'Could not load invoice payment history');
+      if (sequence === invoicePaymentsRequestSequence.current && String(payInvoiceIdRef.current) === String(inv._id)) {
+        setInvoicePays([]);
+        setError(e.message || 'Could not load invoice payment history');
+      }
     } finally {
-      setPaymentLoading(false);
+      if (sequence === invoicePaymentsRequestSequence.current) setPaymentLoading(false);
     }
   };
 
@@ -757,6 +871,7 @@ export default function Purchasing({call, user, token}) {
       if (sequence === statementRequestSequence.current) setStatementLoading(false);
     }
   };
+  statementLoadRef.current = loadStatement;
 
   const applyStatementPeriod = e => {
     e.preventDefault();
@@ -1428,7 +1543,7 @@ export default function Purchasing({call, user, token}) {
               <h3>Payments · {selectedPaymentInvoice?.invoiceNo || 'Invoice'}</h3>
               <p>Posted payments reduce the supplier balance. Reversals preserve the original evidence and restore the amount due.</p>
             </div>
-            <button type="button" className="po-secondary" onClick={() => { setPayInvoiceId(''); setInvoicePays([]); setReverseAction(null); }}>Close</button>
+            <button type="button" className="po-secondary" onClick={() => { invoicePaymentsRequestSequence.current += 1; payInvoiceIdRef.current = ''; setPayInvoiceId(''); setInvoicePays([]); setPaymentLoading(false); setReverseAction(null); }}>Close</button>
           </div>
           {selectedPaymentInvoice && <div className="payment-summary">
             <article><small>Invoice total</small><strong>{rs(selectedPaymentInvoice.total)}</strong></article>

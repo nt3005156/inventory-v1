@@ -108,12 +108,25 @@ export default function Inventory({call, branches = [], user, token}) {
 
   useEffect(() => {
     if (!branchId || !authToken) return undefined;
+    let active = true;
     const socket = connectBranchSocket(authToken, branchId);
     const refresh = event => {
       if (String(event?.branch || '') === String(branchId)) loadRef.current?.();
     };
+    socket.on('connect', () => {
+      socket.timeout(5000).emit('join:branch', branchId, (joinError, ack) => {
+        if (!active) return;
+        if (joinError || !ack?.ok) {
+          setError(ack?.message || 'Could not join inventory room');
+          return;
+        }
+        loadRef.current?.();
+      });
+    });
     socket.on('inventory:update', refresh);
     return () => {
+      active = false;
+      socket.emit('leave:branch', branchId);
       socket.off('inventory:update', refresh);
       socket.disconnect();
     };

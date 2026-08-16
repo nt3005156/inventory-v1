@@ -52,6 +52,41 @@ async function backfillCatalogRows() {
   }
 }
 
+async function ensureTenantSupplierIndex() {
+  await createCollection(Supplier.collection.collectionName);
+  const suppliers = await Supplier.find().select('+nameNormalized restaurant name').lean();
+  const seen = new Set();
+  const writes = [];
+  for (const supplier of suppliers) {
+    if (!supplier.restaurant) {
+      throw new Error(`Supplier ${supplier._id} cannot be safely assigned to a restaurant`);
+    }
+    const normalized = String(supplier.name || '').trim().replace(/\s+/g, ' ').toUpperCase();
+    if (!normalized) throw new Error(`Supplier ${supplier._id} has no valid name`);
+    const identity = `${supplier.restaurant}:${normalized}`;
+    if (seen.has(identity)) {
+      throw new Error(`Duplicate supplier name ${supplier.name} must be resolved before migration`);
+    }
+    seen.add(identity);
+    if (supplier.nameNormalized !== normalized) {
+      writes.push({updateOne: {filter: {_id: supplier._id}, update: {$set: {nameNormalized: normalized}}}});
+    }
+  }
+  if (writes.length) await Supplier.collection.bulkWrite(writes);
+  await Supplier.collection.createIndex(
+    {restaurant: 1, nameNormalized: 1},
+    {
+      unique: true,
+      name: 'supplier_restaurant_name',
+      partialFilterExpression: {restaurant: {$type: 'objectId'}, nameNormalized: {$type: 'string'}}
+    }
+  );
+  await Supplier.collection.createIndex(
+    {restaurant: 1, active: 1, name: 1},
+    {name: 'supplier_restaurant_active_name'}
+  );
+}
+
 async function ensureTenantIngredientCodeIndex() {
   await createCollection(Ingredient.collection.collectionName);
   const indexes = await Ingredient.collection.indexes();
@@ -94,6 +129,7 @@ async function migrate() {
   await createCollection(SupplierIngredient.collection.collectionName);
   await createCollection(SupplierPriceHistory.collection.collectionName);
   await backfillSingleRestaurant();
+  await ensureTenantSupplierIndex();
   await ensureTenantIngredientCodeIndex();
   await backfillCatalogRows();
   await backfillPriceHistory();

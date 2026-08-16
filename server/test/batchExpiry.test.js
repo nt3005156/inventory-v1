@@ -109,9 +109,9 @@ function receive(po, item, key) {
 function connectSocket(token, branch) {
   return new Promise((resolve, reject) => {
     const socket = clientIo(baseUrl, {auth: {token, branch}, transports: ['websocket'], reconnection: false, timeout: 4000});
-    const timer = setTimeout(() => reject(new Error('socket connect timeout')), 4000);
+    const timer = setTimeout(() => { socket.close(); reject(new Error('socket connect timeout')); }, 4000);
     socket.on('connect', () => { clearTimeout(timer); resolve(socket); });
-    socket.on('connect_error', error => { clearTimeout(timer); reject(error); });
+    socket.on('connect_error', error => { clearTimeout(timer); socket.close(); reject(error); });
   });
 }
 
@@ -576,14 +576,10 @@ describe('durable batch and expiry inventory', () => {
         name: 'Socket Foreign Owner', email: 'socket-foreign@test.com', password: 'hashed', role: 'owner',
         restaurant: foreignRestaurant.name, restaurantId: foreignRestaurant._id
       });
-      const foreignSocket = await connectSocket(tokenFor(foreignOwner), world.branchA._id);
-      try {
-        const denied = await joinBranch(foreignSocket, world.branchA._id);
-        assert.equal(denied.ok, false);
-        assert.equal(denied.status, 403);
-      } finally {
-        foreignSocket.close();
-      }
+      await assert.rejects(
+        connectSocket(tokenFor(foreignOwner), world.branchA._id),
+        /Branch does not belong to the user restaurant/
+      );
     } finally {
       socketA.close();
       socketB.close();

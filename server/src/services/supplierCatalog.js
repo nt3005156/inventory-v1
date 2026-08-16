@@ -41,6 +41,110 @@ export async function restaurantForUser(user, options = {}) {
   return (await userRestaurantContext(user, options)).restaurantId;
 }
 
+function supplierView(row) {
+  if (!row) return row;
+  const value = row?.toJSON ? row.toJSON() : {...row};
+  delete value.nameNormalized;
+  return value;
+}
+
+export async function listSuppliers({user, q, active, page = 1, limit = 100}) {
+  const restaurantId = await restaurantForUser(user);
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.min(200, Math.max(1, Number(limit) || 100));
+  const match = {restaurant: restaurantId};
+  if (active !== undefined && active !== '') {
+    if (!['true', 'false'].includes(String(active))) throw httpError('Invalid supplier status filter', 400);
+    match.active = String(active) === 'true';
+  }
+  const term = clean(q);
+  if (term) {
+    const regex = new RegExp(escapeRegex(term), 'i');
+    match.$or = [{name: regex}, {contact: regex}, {address: regex}, {paymentTerms: regex}];
+  }
+  const [items, total] = await Promise.all([
+    Supplier.find(match)
+      .select('+nameNormalized')
+      .sort({active: -1, name: 1, _id: 1})
+      .skip((safePage - 1) * safeLimit)
+      .limit(safeLimit)
+      .lean(),
+    Supplier.countDocuments(match)
+  ]);
+  return {
+    items: items.map(supplierView),
+    pagination: {page: safePage, limit: safeLimit, total, pages: Math.max(1, Math.ceil(total / safeLimit))}
+  };
+}
+
+export async function createSupplier({input, user, session}) {
+  const context = await userRestaurantContext(user, {session});
+  try {
+    const [row] = await Supplier.create([{
+      restaurant: context.restaurantId,
+      name: clean(input.name),
+      contact: clean(input.contact),
+      address: clean(input.address),
+      paymentTerms: clean(input.paymentTerms),
+      active: input.active !== false,
+      createdBy: context.userId,
+      updatedBy: context.userId
+    }], {session});
+    await Audit.create([{
+      entity: 'supplier',
+      entityId: row._id,
+      restaurant: context.restaurantId,
+      action: 'supplier_create',
+      after: supplierView(row),
+      reason: clean(input.reason),
+      user: context.userId
+    }], {session});
+    return supplierView(row);
+  } catch (error) {
+    if (error?.code === 11000) throw httpError('A supplier with this name already exists', 409);
+    throw error;
+  }
+}
+
+export async function updateSupplier({supplierId, patch, expectedVersion, user, session}) {
+  if (!asId(supplierId)) throw httpError('Invalid supplier', 400);
+  const context = await userRestaurantContext(user, {session});
+  const row = await Supplier.findOne({_id: supplierId, restaurant: context.restaurantId})
+    .select('+nameNormalized')
+    .session(session || null);
+  if (!row) throw httpError('Supplier not found', 404);
+  if (Number(expectedVersion) !== row.__v) {
+    throw httpError('Supplier changed since it was loaded; refresh and try again', 409);
+  }
+  const before = supplierView(row);
+  if (patch.name !== undefined) row.name = clean(patch.name);
+  if (patch.contact !== undefined) row.contact = clean(patch.contact);
+  if (patch.address !== undefined) row.address = clean(patch.address);
+  if (patch.paymentTerms !== undefined) row.paymentTerms = clean(patch.paymentTerms);
+  if (patch.active !== undefined) row.active = Boolean(patch.active);
+  row.updatedBy = context.userId;
+  try {
+    await row.save({session});
+  } catch (error) {
+    if (error?.name === 'VersionError' || error?.matchedCount === 0) {
+      throw httpError('Supplier changed since it was loaded; refresh and try again', 409);
+    }
+    if (error?.code === 11000) throw httpError('A supplier with this name already exists', 409);
+    throw error;
+  }
+  await Audit.create([{
+    entity: 'supplier',
+    entityId: row._id,
+    restaurant: context.restaurantId,
+    action: 'supplier_update',
+    before,
+    after: supplierView(row),
+    reason: clean(patch.reason),
+    user: context.userId
+  }], {session});
+  return supplierView(row);
+}
+
 async function assertCatalogReferences({restaurantId, supplierId, ingredientId, session}) {
   if (!asId(supplierId)) throw httpError('Invalid supplier', 400);
   if (!asId(ingredientId)) throw httpError('Invalid ingredient', 400);

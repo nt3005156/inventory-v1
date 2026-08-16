@@ -2,6 +2,7 @@ import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {CheckCircle2, Clock3, History, PackageSearch, Pencil, Power, RefreshCw, X} from 'lucide-react';
 
 const rs = value => `Rs. ${Number(value || 0).toLocaleString('en-NP', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+const initialSupplierForm = {name: '', contact: '', address: '', paymentTerms: '', reason: ''};
 const initialForm = {
   supplier: '',
   ingredient: '',
@@ -20,6 +21,11 @@ export default function SupplierCatalog({call, user}) {
   const canManage = ['owner', 'manager'].includes(user?.role);
   const [rows, setRows] = useState([]);
   const [options, setOptions] = useState({suppliers: [], ingredients: []});
+  const [suppliers, setSuppliers] = useState([]);
+  const [supplierForm, setSupplierForm] = useState(initialSupplierForm);
+  const [supplierEditId, setSupplierEditId] = useState('');
+  const [supplierEditVersion, setSupplierEditVersion] = useState(0);
+  const [supplierLoading, setSupplierLoading] = useState(true);
   const [pagination, setPagination] = useState({page: 1, pages: 1, total: 0});
   const [filters, setFilters] = useState({q: '', supplier: '', active: ''});
   const [form, setForm] = useState(initialForm);
@@ -61,10 +67,24 @@ export default function SupplierCatalog({call, user}) {
     }
   };
 
+  const loadMasterData = async () => {
+    setSupplierLoading(true);
+    try {
+      const [nextOptions, directory] = await Promise.all([
+        call('/supplier-catalog/options'),
+        call('/suppliers?limit=200')
+      ]);
+      setOptions(nextOptions);
+      setSuppliers(directory.items || []);
+    } catch (err) {
+      setError(err.message || 'Could not load supplier master data');
+    } finally {
+      setSupplierLoading(false);
+    }
+  };
+
   useEffect(() => {
-    call('/supplier-catalog/options')
-      .then(setOptions)
-      .catch(err => setError(err.message || 'Could not load catalog options'));
+    loadMasterData();
   }, []);
 
   useEffect(() => {
@@ -76,6 +96,75 @@ export default function SupplierCatalog({call, user}) {
   const updateFilter = (key, value) => {
     setFilters(current => ({...current, [key]: value}));
     setPagination(current => ({...current, page: 1}));
+  };
+
+  const resetSupplierForm = () => {
+    setSupplierForm(initialSupplierForm);
+    setSupplierEditId('');
+    setSupplierEditVersion(0);
+  };
+
+  const startSupplierEdit = row => {
+    setSupplierEditId(row._id);
+    setSupplierEditVersion(row.__v);
+    setSupplierForm({
+      name: row.name || '',
+      contact: row.contact || '',
+      address: row.address || '',
+      paymentTerms: row.paymentTerms || '',
+      reason: ''
+    });
+    setError('');
+    setSuccess('');
+  };
+
+  const submitSupplier = async event => {
+    event.preventDefault();
+    setBusy(supplierEditId ? `supplier-${supplierEditId}` : 'supplier-create');
+    setError('');
+    setSuccess('');
+    try {
+      if (supplierEditId) {
+        await call(`/suppliers/${supplierEditId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({...supplierForm, expectedVersion: supplierEditVersion})
+        });
+        setSuccess('Supplier details updated and audited.');
+      } else {
+        await call('/suppliers', {method: 'POST', body: JSON.stringify(supplierForm)});
+        setSuccess('Supplier created and made available to purchasing.');
+      }
+      resetSupplierForm();
+      await Promise.all([loadMasterData(), load()]);
+    } catch (err) {
+      setError(err.message || 'Supplier update failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const toggleSupplier = async row => {
+    if (row.active && !window.confirm(`Deactivate ${row.name}? Existing history will remain, but new purchasing selections will exclude this supplier.`)) return;
+    setBusy(`supplier-toggle-${row._id}`);
+    setError('');
+    setSuccess('');
+    try {
+      await call(`/suppliers/${row._id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          active: !row.active,
+          expectedVersion: row.__v,
+          reason: row.active ? 'Deactivated from supplier directory' : 'Reactivated from supplier directory'
+        })
+      });
+      setSuccess(row.active ? 'Supplier deactivated.' : 'Supplier reactivated.');
+      if (supplierEditId === row._id) resetSupplierForm();
+      await Promise.all([loadMasterData(), load()]);
+    } catch (err) {
+      setError(err.message || 'Could not change supplier status');
+    } finally {
+      setBusy('');
+    }
   };
 
   const resetForm = () => {
@@ -184,7 +273,7 @@ export default function SupplierCatalog({call, user}) {
           <h2>Supplier ingredient catalog</h2>
           <p>Control supplier SKUs, pack conversions, minimum orders and auditable NPR price history. Active mappings feed new purchase orders.</p>
         </div>
-        <button className="secondary-action" onClick={load} disabled={loading}><RefreshCw size={15}/> Refresh</button>
+        <button className="secondary-action" onClick={() => Promise.all([load(), loadMasterData()])} disabled={loading || supplierLoading}><RefreshCw size={15}/> Refresh</button>
       </div>
 
       <div className="catalog-kpis">
@@ -195,6 +284,38 @@ export default function SupplierCatalog({call, user}) {
 
       {error && <div className="catalog-alert error">{error}<button onClick={() => setError('')} aria-label="Dismiss error"><X size={15}/></button></div>}
       {success && <div className="catalog-alert success">{success}<button onClick={() => setSuccess('')} aria-label="Dismiss message"><X size={15}/></button></div>}
+
+      <div className="panel catalog-list supplier-directory">
+        <div className="title">
+          <div><h2>Supplier directory</h2><p>Restaurant-owned vendor identity, contact details and payment terms. Deactivation preserves every purchasing record.</p></div>
+          <span className="pill ok">{suppliers.filter(item => item.active).length} active</span>
+        </div>
+        {canManage && <form className="catalog-form" onSubmit={submitSupplier}>
+          <div className="title">
+            <div><h3>{supplierEditId ? 'Edit supplier' : 'Add supplier'}</h3><p>{supplierEditId ? 'Changes use optimistic version checks and are audited.' : 'Create a supplier before mapping ingredients and purchasing terms.'}</p></div>
+            {supplierEditId && <button type="button" className="text-action" onClick={resetSupplierForm}>Cancel edit</button>}
+          </div>
+          <div className="catalog-form-grid">
+            <label>Supplier name<input required maxLength={120} value={supplierForm.name} onChange={event => setSupplierForm({...supplierForm, name: event.target.value})} placeholder="e.g. Kathmandu Fresh Foods"/></label>
+            <label>Contact<input maxLength={120} value={supplierForm.contact} onChange={event => setSupplierForm({...supplierForm, contact: event.target.value})} placeholder="Phone, email or contact person"/></label>
+            <label>Address<input maxLength={240} value={supplierForm.address} onChange={event => setSupplierForm({...supplierForm, address: event.target.value})} placeholder="Supplier address"/></label>
+            <label>Payment terms<input maxLength={120} value={supplierForm.paymentTerms} onChange={event => setSupplierForm({...supplierForm, paymentTerms: event.target.value})} placeholder="e.g. Net 15"/></label>
+            <label className="catalog-reason">Reason / reference<input maxLength={240} value={supplierForm.reason} onChange={event => setSupplierForm({...supplierForm, reason: event.target.value})} placeholder="Approval, agreement or change context"/></label>
+          </div>
+          <button disabled={Boolean(busy)}>{busy ? 'Saving…' : supplierEditId ? 'Save supplier' : 'Create supplier'}</button>
+        </form>}
+        {supplierLoading ? <div className="catalog-loading">Loading supplier directory…</div> : suppliers.length ? <div className="table-scroll"><table>
+          <thead><tr><th>Supplier</th><th>Contact</th><th>Address</th><th>Payment terms</th><th>Status</th>{canManage && <th>Actions</th>}</tr></thead>
+          <tbody>{suppliers.map(row => <tr key={row._id} className={!row.active ? 'catalog-inactive' : ''}>
+            <td><strong>{row.name}</strong></td>
+            <td>{row.contact || 'Not recorded'}</td>
+            <td>{row.address || 'Not recorded'}</td>
+            <td>{row.paymentTerms || 'Not recorded'}</td>
+            <td><span className={`pill ${row.active ? 'ok' : ''}`}>{row.active ? 'Active' : 'Inactive'}</span></td>
+            {canManage && <td><div className="catalog-actions"><button type="button" title="Edit supplier" onClick={() => startSupplierEdit(row)}><Pencil size={14}/></button><button type="button" title={row.active ? 'Deactivate supplier' : 'Reactivate supplier'} disabled={busy === `supplier-toggle-${row._id}`} onClick={() => toggleSupplier(row)}><Power size={14}/></button></div></td>}
+          </tr>)}</tbody>
+        </table></div> : <div className="catalog-empty"><PackageSearch size={28}/><h3>No suppliers yet</h3><p>{canManage ? 'Create the first approved supplier to begin purchasing.' : 'Ask an owner or manager to add an approved supplier.'}</p></div>}
+      </div>
 
       {canManage && <form className="panel catalog-form" onSubmit={submit}>
         <div className="title">

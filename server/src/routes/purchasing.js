@@ -621,7 +621,7 @@ r.post('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
         poId: invoice.purchaseOrder?._id ? String(invoice.purchaseOrder._id) : invoice.purchaseOrder ? String(invoice.purchaseOrder) : undefined,
         supplierId: invoice.supplier?._id ? String(invoice.supplier._id) : String(invoice.supplier),
         matchingStatus: invoice.matching?.status
-      });
+      }, {audience: 'management'});
     }
     res.status(result.duplicate ? 200 : 201).json({...invoice.toJSON(), duplicate: result.duplicate});
   } catch (e) {
@@ -689,7 +689,7 @@ r.post('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req
         paymentNo: result.payment.paymentNo,
         supplierId: String(result.payment.supplier?._id || result.payment.supplier),
         status: result.invoice.status
-      });
+      }, {audience: 'management'});
     }
     res.status(result.duplicate ? 200 : 201).json({...result, duplicate: result.duplicate});
   } catch (e) {
@@ -738,7 +738,7 @@ r.post('/supplier-payments/:id/reverse', auth(['owner']), async (req, res) => {
         paymentNo: result.payment.paymentNo,
         supplierId: String(result.payment.supplier?._id || result.payment.supplier),
         status: result.invoice.status
-      });
+      }, {audience: 'management'});
     }
     res.status(result.duplicate ? 200 : 201).json({...result, duplicate: result.duplicate});
   } catch (e) {
@@ -776,7 +776,7 @@ r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) =
       supplierId: invoice.supplier?._id ? String(invoice.supplier._id) : String(invoice.supplier),
       status: invoice.status,
       matchingStatus: invoice.matching?.status
-    });
+    }, {audience: 'management'});
     res.json(invoice);
   } catch (e) {
     fail(res, e);

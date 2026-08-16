@@ -1,14 +1,22 @@
+import {randomUUID} from 'node:crypto';
 import {Server} from 'socket.io';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import {assertBranchAccess} from './kitchen.js';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {Order} from '../models/operations.js';
 
-const KITCHEN_ROLES = ['owner', 'manager', 'staff'];
+const SOCKET_ROLES = ['owner', 'manager', 'staff'];
+const MANAGEMENT_ROLES = new Set(['owner', 'manager']);
 export const branchRoom = id => 'branch:' + String(id);
+export const purchasingManagementRoom = id => `${branchRoom(id)}:purchasing-management`;
 
 let io = null;
+
+function socketError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
 
 function readToken(socket) {
   const auth = socket.handshake.auth || {};
@@ -19,36 +27,44 @@ function readToken(socket) {
   return null;
 }
 
+function leaveBranchRooms(socket, branchId) {
+  if (!branchId) return;
+  socket.leave(branchRoom(branchId));
+  socket.leave(purchasingManagementRoom(branchId));
+}
+
 export async function joinBranch(socket, branchId) {
-  if (!branchId) {
-    const err = new Error('Branch is required');
-    err.status = 400;
-    throw err;
-  }
-  if (!mongoose.isValidObjectId(branchId)) {
-    const err = new Error('Invalid branch');
-    err.status = 400;
-    throw err;
-  }
-  await purchaseBranchContext({user: socket.user, branchId, allowInactive: true});
+  if (!branchId) throw socketError('Branch is required');
+  if (!mongoose.isValidObjectId(branchId)) throw socketError('Invalid branch');
+
+  // Resolve the stored user/restaurant/branch assignment on every room change. A
+  // valid but stale JWT must not authorize a room after an assignment or role change.
+  const context = await purchaseBranchContext({user: socket.user, branchId, allowInactive: true});
   for (const room of [...socket.rooms]) {
     if (String(room).startsWith('branch:')) socket.leave(room);
   }
-  await socket.join(branchRoom(branchId));
-  socket.data.branchId = String(branchId);
-  return String(branchId);
+
+  const id = String(context.branch._id);
+  await socket.join(branchRoom(id));
+  if (MANAGEMENT_ROLES.has(context.role)) await socket.join(purchasingManagementRoom(id));
+  socket.data.branchId = id;
+  socket.data.role = context.role;
+  return id;
 }
 
 export function leaveBranch(socket, branchId) {
-  const current = branchId || socket.data?.branchId;
-  if (!current) {
-    const err = new Error('Branch is required');
-    err.status = 400;
-    throw err;
+  const current = socket.data?.branchId;
+  const requested = branchId ? String(branchId) : current;
+  if (!requested) throw socketError('Branch is required');
+  if (!mongoose.isValidObjectId(requested)) throw socketError('Invalid branch');
+  if (current && requested !== String(current)) throw socketError('Socket is not joined to that branch', 409);
+
+  leaveBranchRooms(socket, requested);
+  if (current === requested) {
+    socket.data.branchId = null;
+    socket.data.role = null;
   }
-  socket.leave(branchRoom(current));
-  if (socket.data.branchId && String(socket.data.branchId) === String(current)) socket.data.branchId = null;
-  return String(current);
+  return requested;
 }
 
 export function attachRealtime(httpServer, {corsOrigin} = {}) {
@@ -59,44 +75,45 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
     }
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token = readToken(socket);
       if (!token) return next(new Error('Authentication required'));
       const payload = jwt.verify(token, process.env.JWT_SECRET);
-      if (!KITCHEN_ROLES.includes(payload.role)) return next(new Error('Insufficient permission'));
+      if (!SOCKET_ROLES.includes(payload.role)) return next(new Error('Insufficient permission'));
       socket.user = payload;
+
+      // A requested initial branch is fully tenant-checked during the handshake.
+      // Clients still join explicitly and reload after the join acknowledgement so
+      // mutations that happen during connection setup cannot be missed.
       const requested = socket.handshake.auth?.branch;
-      if (requested) {
-        try {
-          assertBranchAccess(payload, requested);
-        } catch (e) {
-          return next(new Error(e.message || 'Branch access denied'));
-        }
-      }
+      if (requested) await purchaseBranchContext({user: payload, branchId: requested, allowInactive: true});
       next();
-    } catch {
-      next(new Error('Authentication required'));
+    } catch (error) {
+      const message = error?.status === 403
+        ? (error.message || 'Branch access denied')
+        : error?.status === 400
+          ? (error.message || 'Invalid branch')
+          : 'Authentication required';
+      next(new Error(message));
     }
   });
 
   io.on('connection', socket => {
-    const initial = socket.handshake.auth?.branch;
-    if (initial) joinBranch(socket, initial).catch(() => {});
     socket.on('join:branch', async (branchId, cb) => {
       try {
         const joined = await joinBranch(socket, branchId);
         cb?.({ok: true, branch: joined});
-      } catch (e) {
-        cb?.({ok: false, status: e.status || 400, message: e.message});
+      } catch (error) {
+        cb?.({ok: false, status: error.status || 400, message: error.message});
       }
     });
     socket.on('leave:branch', (branchId, cb) => {
       try {
         const left = leaveBranch(socket, branchId);
         cb?.({ok: true, branch: left});
-      } catch (e) {
-        cb?.({ok: false, status: e.status || 400, message: e.message});
+      } catch (error) {
+        cb?.({ok: false, status: error.status || 400, message: error.message});
       }
     });
   });
@@ -105,31 +122,45 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
 }
 
 export function emitKitchenEvent(branchId, event, payload) {
-  if (!io || !branchId) return;
+  if (!io || !branchId) return false;
   io.to(branchRoom(branchId)).emit(event, payload);
+  return true;
 }
 
 export function publishTableEvent(branchId, extra = {}) {
-  if (!branchId) return;
-  emitKitchenEvent(branchId, 'table:update', {
-    branch: String(branchId),
-    ...extra
+  if (!branchId) return false;
+  return emitKitchenEvent(branchId, 'table:update', {
+    ...extra,
+    branch: String(branchId)
   });
 }
 
-export function publishPurchasingEvent(branchId, extra = {}) {
-  if (!branchId) return;
-  emitKitchenEvent(branchId, 'purchasing:update', {
-    branch: String(branchId),
-    ...extra
-  });
+export function publishPurchasingEvent(branchId, extra = {}, {audience = 'branch'} = {}) {
+  if (!io || !branchId) return false;
+  const id = String(branchId);
+  const room = audience === 'management' ? purchasingManagementRoom(id) : branchRoom(id);
+  try {
+    io.to(room).emit('purchasing:update', {
+      ...extra,
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      occurredAt: new Date().toISOString(),
+      branch: id
+    });
+    return true;
+  } catch (error) {
+    // The business transaction is already committed. Notification failure must
+    // never turn a successful mutation into a retryable HTTP failure.
+    console.error('purchasing realtime publish failed', error.message);
+    return false;
+  }
 }
 
 export function publishInventoryEvent(branchId, extra = {}) {
-  if (!branchId) return;
-  emitKitchenEvent(branchId, 'inventory:update', {
-    branch: String(branchId),
-    ...extra
+  if (!branchId) return false;
+  return emitKitchenEvent(branchId, 'inventory:update', {
+    ...extra,
+    branch: String(branchId)
   });
 }
 
@@ -139,8 +170,8 @@ export async function publishKitchenOrder(order, event, extra = {}) {
     const full = await Order.findById(order._id).populate('table', 'name area seats status').populate('customer', 'name phone');
     if (!full) return;
     emitKitchenEvent(full.branch, event, {order: full.toJSON(), ...extra});
-  } catch (e) {
-    console.error('kitchen realtime publish failed', e.message);
+  } catch (error) {
+    console.error('kitchen realtime publish failed', error.message);
   }
 }
 

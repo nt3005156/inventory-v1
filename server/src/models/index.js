@@ -3,7 +3,27 @@ const {Schema,model}=mongoose; const money={type:Number,default:0};
 const auditSchema=new Schema({entity:String,entityId:Schema.Types.ObjectId,restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant'},branch:{type:Schema.Types.ObjectId,ref:'Branch'},action:String,before:Schema.Types.Mixed,after:Schema.Types.Mixed,reason:String,user:{type:Schema.Types.ObjectId,ref:'User'},at:{type:Date,default:Date.now}});
 auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{name:'audit_entity_timeline'});
 export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff'],default:'staff'},restaurant:String,restaurantId:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},branch:{type:Schema.Types.ObjectId,ref:'Branch'}},{timestamps:true}));
-export const Supplier=model('Supplier',new Schema({restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},name:{type:String,required:true},contact:String,address:String,paymentTerms:String,active:{type:Boolean,default:true},ingredients:[{type:Schema.Types.ObjectId,ref:'Ingredient'}]},{timestamps:true}));
+const supplierSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},
+  name:{type:String,required:true,trim:true,maxlength:120},
+  nameNormalized:{type:String,trim:true,uppercase:true,select:false},
+  contact:{type:String,trim:true,maxlength:120},
+  address:{type:String,trim:true,maxlength:240},
+  paymentTerms:{type:String,trim:true,maxlength:120},
+  active:{type:Boolean,default:true},
+  ingredients:[{type:Schema.Types.ObjectId,ref:'Ingredient'}],
+  createdBy:{type:Schema.Types.ObjectId,ref:'User'},
+  updatedBy:{type:Schema.Types.ObjectId,ref:'User'}
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+supplierSchema.pre('validate',function(){
+  this.name=String(this.name||'').trim().replace(/\s+/g,' ');
+  this.nameNormalized=this.name.toUpperCase();
+});
+supplierSchema.index(
+  {restaurant:1,nameNormalized:1},
+  {unique:true,name:'supplier_restaurant_name',partialFilterExpression:{restaurant:{$type:'objectId'},nameNormalized:{$type:'string'}}}
+);
+export const Supplier=model('Supplier',supplierSchema);
 const ingredientSchema=new Schema({restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},code:String,name:{type:String,required:true},nameNp:String,category:String,unit:{type:String,default:'g'},active:{type:Boolean,default:true},minimumStock:money,reorderQty:money,stockQty:money,averageCost:money,lastPurchasePrice:money,supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},expiryDate:Date},{timestamps:true});
 ingredientSchema.index({restaurant:1,code:1},{unique:true,name:'ingredient_restaurant_code',partialFilterExpression:{restaurant:{$type:'objectId'},code:{$type:'string'}}});
 export const Ingredient=model('Ingredient',ingredientSchema);
