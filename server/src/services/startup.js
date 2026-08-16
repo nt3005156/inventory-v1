@@ -11,6 +11,7 @@ import {ensureSupplierPaymentIndexes} from './supplierPaymentMigration.js';
 import {ensureStockCountIndexes} from './stockCountMigration.js';
 import {ensureStockTransferIndexes} from './stockTransferMigration.js';
 import {ensureIngredientIndexes} from './ingredients.js';
+import {ensureRecipeIndexes} from './recipes.js';
 
 const OPERATIONAL_MIGRATIONS = [
   ensureMonthCloseIndexes,
@@ -24,7 +25,8 @@ const OPERATIONAL_MIGRATIONS = [
   ensurePurchaseReturnIndexes,
   ensureSupplierInvoiceIndexes,
   ensureSupplierPaymentIndexes,
-  ensureIngredientIndexes
+  ensureIngredientIndexes,
+  ensureRecipeIndexes
 ];
 
 const INSECURE_PRODUCTION_SECRETS = new Set([

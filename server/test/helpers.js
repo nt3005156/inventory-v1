@@ -6,6 +6,7 @@ import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import operations from '../src/routes/operations.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
+import recipesRouter from '../src/routes/recipes.js';
 import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
@@ -42,6 +43,7 @@ export async function startTestApp() {
     app.use('/api', operations);
     app.use('/api', supplierCatalog);
     app.use('/api', ingredientsRouter);
+    app.use('/api', recipesRouter);
     app.use((err, req, res, next) => res.status(err.status || 500).json({message: err.message || 'Server error'}));
     server = http.createServer(app);
     attachRealtime(server);

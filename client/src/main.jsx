@@ -10,6 +10,7 @@ import Analytics from './Analytics.jsx';
 import Inventory from './Inventory.jsx';
 import Dashboard from './Dashboard.jsx';
 import Ingredients from './Ingredients.jsx';
+import Recipes from './Recipes.jsx';
 import POS from './Pos.jsx';
 import Expenses from './Expenses.jsx';
 import MonthClose from './MonthClose.jsx';
@@ -66,6 +67,7 @@ function App() {
     ['Dashboard', LayoutDashboard],
     ['Inventory', Package],
     ['Ingredients', Package],
+    ['Recipes', ChefHat],
     ['Stock Ops', Package],
     ['Purchases', ShoppingCart],
     ['Expenses', Receipt],
@@ -142,6 +144,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Inventory') return <Inventory call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Ingredients') return <Ingredients call={call}/>;
+  if (page === 'Recipes') return <Recipes call={call}/>;
   if (page === 'Tables') return <Tables call={call} branches={branches} user={user} token={token}/>;
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;

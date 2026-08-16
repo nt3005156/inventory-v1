@@ -82,7 +82,32 @@ ingredientSchema.index({restaurant:1,unit:1},{name:'ingredient_restaurant_unit'}
 ingredientSchema.index({restaurant:1,primarySupplier:1},{name:'ingredient_restaurant_supplier'});
 export const Ingredient=model('Ingredient',ingredientSchema);
 export const PriceHistory=model('PriceHistory',new Schema({ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},price:money,qty:money,unit:String,effectiveAt:{type:Date,default:Date.now},purchase:{type:Schema.Types.ObjectId,ref:'Purchase'},user:{type:Schema.Types.ObjectId,ref:'User'}}));
-export const MenuItem=model('MenuItem',new Schema({name:{type:String,required:true},nameNp:String,category:String,price:money,vatInclusive:{type:Boolean,default:true},active:{type:Boolean,default:true},recipe:[{ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,unit:String}]},{timestamps:true}));
+export const MenuItem=model('MenuItem',new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},
+  name:{type:String,required:true,trim:true,maxlength:120},
+  nameNp:{type:String,trim:true,maxlength:120},
+  code:{type:String,trim:true,uppercase:true,maxlength:30},
+  category:{type:String,trim:true,maxlength:60,default:'main'},
+  price:{...money,required:true,min:0.01},
+  vatInclusive:{type:Boolean,default:true},
+  vatRate:{type:Number,default:13,min:0,max:100},
+  active:{type:Boolean,default:true,index:true},
+  yield:{type:Number,default:1,min:0.01,max:1000},
+  yieldUnit:{type:String,trim:true,maxlength:30,default:'serving'},
+  recipe:{type:[{
+    ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient',required:true},
+    qty:{...money,required:true,min:Number.EPSILON},
+    unit:{type:String,trim:true,maxlength:30,required:true},
+    cost:{...money,default:0},
+    notes:{type:String,trim:true,maxlength:200}
+  }],validate:{validator: function(v){ return !v || v.length<=50; }, message:'Recipe cannot have more than 50 ingredients'}},
+  recipeCost:{...money,default:0},
+  recipeCostUpdatedAt:Date,
+  description:{type:String,trim:true,maxlength:500},
+  imageUrl:{type:String,trim:true,maxlength:500}
+},{timestamps:true,optimisticConcurrency:true}));
+MenuItem.schema.index({restaurant:1,code:1},{unique:true,name:'menu_restaurant_code',partialFilterExpression:{restaurant:{$type:'objectId'},code:{$type:'string'}}});
+MenuItem.schema.index({restaurant:1,name:1},{unique:true,name:'menu_restaurant_name',partialFilterExpression:{restaurant:{$type:'objectId'},name:{$type:'string'}}});
 export const Purchase=model('Purchase',new Schema({date:{type:Date,default:Date.now},supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,unit:String,total:money,unitPrice:money,invoiceNo:String,paymentStatus:{type:String,enum:['paid','due','partial'],default:'due'},paidAmount:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 export const Sale=model('Sale',new Schema({date:{type:Date,default:Date.now},items:[{menuItem:{type:Schema.Types.ObjectId,ref:'MenuItem'},name:String,qty:money,unitPrice:money,foodCost:money}],orderType:{type:String,default:'dine-in'},paymentMethod:{type:String,default:'cash'},subtotal:money,vat:money,total:money,cogs:money,grossProfit:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
 export const Waste=model('Waste',new Schema({date:{type:Date,default:Date.now},ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,reason:String,cost:money,createdBy:{type:Schema.Types.ObjectId,ref:'User'}},{timestamps:true}));
