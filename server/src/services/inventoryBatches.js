@@ -210,6 +210,23 @@ function sortFefo(left, right) {
   return received || String(left._id).localeCompare(String(right._id));
 }
 
+function sortFifo(left, right) {
+  const leftReceived = new Date(left.receivedAt || left.createdAt).getTime();
+  const rightReceived = new Date(right.receivedAt || right.createdAt).getTime();
+  if (leftReceived !== rightReceived) return leftReceived - rightReceived;
+  return String(left._id).localeCompare(String(right._id));
+}
+
+export const BATCH_CONSUMPTION_STRATEGIES = Object.freeze({
+  fefo: { key: 'fefo', label: 'FEFO — First Expired First Out', description: 'Consumes the batch whose expiry is nearest (nulls last). Current production strategy.', sort: sortFefo },
+  fifo: { key: 'fifo', label: 'FIFO — First In First Out', description: 'Consumes by earliest receivedAt. Ready via ?strategy=fifo without data migration.', sort: sortFifo }
+});
+
+export function consumptionSortFor(strategy = 'fefo') {
+  const key = String(strategy || 'fefo').toLowerCase();
+  return BATCH_CONSUMPTION_STRATEGIES[key]?.sort || sortFefo;
+}
+
 export async function removeBatchStock({
   balance,
   branch,
@@ -219,7 +236,8 @@ export async function removeBatchStock({
   batchId,
   batchNumber,
   allowExpired = false,
-  asOf = new Date()
+  asOf = new Date(),
+  strategy = 'fefo'
 }, session) {
   const amount = Math.abs(Number(quantity));
   if (!(amount > EPSILON)) return [];
@@ -238,7 +256,7 @@ export async function removeBatchStock({
   }
 
   const batches = await InventoryBatch.find(match).session(session || null);
-  batches.sort(sortFefo);
+  batches.sort(consumptionSortFor(strategy));
   const available = batches.reduce((sum, batch) => sum + Number(batch.quantity || 0), 0);
   if (available + EPSILON < amount) {
     throw httpError(allowExpired ? 'Insufficient inventory in the selected batch' : 'Insufficient unexpired inventory', 409);

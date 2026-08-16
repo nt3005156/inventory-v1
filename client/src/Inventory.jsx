@@ -66,6 +66,10 @@ export default function Inventory({call, branches = [], user, token}) {
   const [valuation, setValuation] = useState(null);
   const [priceHistory, setPriceHistory] = useState(null);
   const [selectedValuationIngredient, setSelectedValuationIngredient] = useState('');
+  const [expirySummary, setExpirySummary] = useState(null);
+  const [expiryAlerts, setExpiryAlerts] = useState(null);
+  const [expiringDays, setExpiringDays] = useState(30);
+  const [fefoStrategy, setFefoStrategy] = useState('fefo');
   const loadSequence = useRef(0);
   const loadRef = useRef(null);
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
@@ -140,6 +144,21 @@ export default function Inventory({call, branches = [], user, token}) {
     })();
     return () => { active = false; };
   }, [branchId, selectedValuationIngredient]);
+
+  useEffect(() => {
+    if (!branchId) { setExpirySummary(null); setExpiryAlerts(null); return; }
+    let active = true;
+    (async () => {
+      try {
+        const [summary, alerts] = await Promise.all([
+          call(`/inventory/expiry-summary?branch=${encodeURIComponent(branchId)}&expiringDays=${expiringDays}`),
+          call(`/inventory/expiry-alerts?branch=${encodeURIComponent(branchId)}&expiringDays=${expiringDays}&limit=20`)
+        ]);
+        if (active) { setExpirySummary(summary); setExpiryAlerts(alerts); }
+      } catch (e) {}
+    })();
+    return () => { active = false; };
+  }, [branchId, expiringDays]);
 
   useEffect(() => {
     if (!branchId || !authToken) return undefined;
@@ -283,6 +302,56 @@ export default function Inventory({call, branches = [], user, token}) {
                 </div>
               )}
               <small style={{display:'block', marginTop:'8px', opacity:0.6}}>Valuation strategies are pluggable — add LIFO by extending VALUATION_STRATEGIES (sortBatches). Weighted average remains the ledger truth; FIFO/FEFO are projections for future COGS.</small>
+            </div>
+          )}
+          {expirySummary && (
+            <div className="inventory-valuation-panel" style={{margin:'16px 0', padding:'12px', border:'1px solid #e5e7eb', borderRadius:'8px', background:'#fff7ed'}}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:'12px'}}>
+                <div>
+                  <h3 style={{margin:'0 0 4px', color:'#9a3412'}}>Batch & Expiry Management — Phase 2F</h3>
+                  <small>FEFO-ready • Expired excluded from usable stock & recipe deductions • Quantity per batch tracked</small>
+                  <div style={{marginTop:'8px', display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', fontSize:'13px'}}>
+                    <span>Expiring window:</span>
+                    <select value={expiringDays} onChange={e=>setExpiringDays(Number(e.target.value))} style={{padding:'4px 8px'}}>
+                      <option value={7}>7 days</option>
+                      <option value={14}>14 days</option>
+                      <option value={30}>30 days</option>
+                      <option value={60}>60 days</option>
+                      <option value={90}>90 days</option>
+                    </select>
+                    <select value={fefoStrategy} onChange={e=>setFefoStrategy(e.target.value)} style={{padding:'4px 8px'}}>
+                      <option value="fefo">FEFO (production)</option>
+                      <option value="fifo">FIFO (ready)</option>
+                    </select>
+                    <span style={{opacity:0.7}}>Strategy: {fefoStrategy==='fefo' ? 'nearest expiry first' : 'earliest received first'}</span>
+                  </div>
+                </div>
+                <div style={{display:'flex', gap:'12px', textAlign:'right', flexWrap:'wrap'}}>
+                  <span style={{background:'#fef2f2', padding:'6px 10px', borderRadius:'6px', border:'1px solid #fecaca'}}><small style={{color:'#991b1b'}}>Expired</small><strong style={{display:'block', color:'#dc2626'}}>{expirySummary.expired.quantity.toLocaleString('en-NP')} {rows[0]?.unit || 'g'}</strong><small>{expirySummary.expired.count} lots • {rs(expirySummary.expired.value)}</small></span>
+                  <span style={{background:'#fffbeb', padding:'6px 10px', borderRadius:'6px', border:'1px solid #fde68a'}}><small style={{color:'#92400e'}}>Near-expiry ({expiringDays}d)</small><strong style={{display:'block', color:'#d97706'}}>{expirySummary.expiring.quantity.toLocaleString('en-NP')} {rows[0]?.unit || 'g'}</strong><small>{expirySummary.expiring.count} lots • {rs(expirySummary.expiring.value)}</small></span>
+                  <span style={{background:'#f0fdf4', padding:'6px 10px', borderRadius:'6px', border:'1px solid #bbf7d0'}}><small style={{color:'#166534'}}>Fresh</small><strong style={{display:'block', color:'#16a34a'}}>{expirySummary.fresh.quantity.toLocaleString('en-NP')} {rows[0]?.unit || 'g'}</strong><small>{expirySummary.fresh.count} lots</small></span>
+                </div>
+              </div>
+              {expiryAlerts && !!expiryAlerts.alerts.length && (
+                <div style={{marginTop:'12px', fontSize:'12px', background:'white', border:'1px solid #fed7aa', borderRadius:'6px', padding:'8px', maxHeight:'200px', overflow:'auto'}}>
+                  <b style={{color:'#c2410c'}}>Expiry alerts — {expiryAlerts.alerts.length} lot{expiryAlerts.alerts.length===1?'':'s'} (of {expiryAlerts.pagination.total})</b>
+                  <div style={{marginTop:'6px', display:'grid', gap:'4px'}}>
+                    {expiryAlerts.alerts.map(a=> (
+                      <div key={String(a._id)} style={{display:'flex', justifyContent:'space-between', borderBottom:'1px dotted #ffe4d6', padding:'6px 4px', background: a.severity==='critical' ? '#fef2f2' : a.severity==='warning' ? '#fffbeb' : 'transparent', borderRadius:'4px'}}>
+                        <span>
+                          <b style={{color: a.severity==='critical' ? '#dc2626' : a.severity==='warning' ? '#d97706' : '#334155'}}>{a.title}</b> • {a.ingredientName} • <code>{a.batchNumber || 'UNTRACKED'}</code> • {qtyLabel(a.quantity, a.unit)} @ {rs(a.unitCost)}/{a.unit} • {rs(a.stockValue)}
+                          <small style={{display:'block', opacity:0.7}}>Lot {a.lotKey?.slice(0,40)} • exp {a.expiryDateText || 'no expiry'} {a.daysUntilExpiry!=null && '(' + (a.daysUntilExpiry<0 ? Math.abs(a.daysUntilExpiry)+'d ago' : a.daysUntilExpiry+'d') + ')' } • {a.sourceType}</small>
+                        </span>
+                        <span style={{textAlign:'right'}}><small>{a.branchName}</small><br/><small>{dateLabel(a.expiryDate)}</small></span>
+                      </div>
+                    ))}
+                  </div>
+                  <small style={{display:'block', marginTop:'6px', opacity:0.6}}>Quantity per batch • Expiry per lot • FEFO consumption already enforced in ledger (earliest expiry first). Expired stock stays physical but excluded from ordinary deductions; use explicit batch waste.</small>
+                </div>
+              )}
+              {expiryAlerts && !expiryAlerts.alerts.length && (
+                <div style={{marginTop:'10px', fontSize:'13px', padding:'8px', background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:'6px', color:'#166534'}}>No expired or near-expiry lots in {expiringDays} days — stock is fresh.</div>
+              )}
             </div>
           )}
           <div className="table-scroll">

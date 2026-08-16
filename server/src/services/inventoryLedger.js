@@ -98,6 +98,7 @@ export async function moveStock({
   batchId,
   batchNumber,
   allowExpired,
+  consumptionStrategy = 'fefo',
   wasteCategory,
   wasteNotes,
   wasteBatch
@@ -106,6 +107,8 @@ export async function moveStock({
     branch,ingredient,qty,type,reason,referenceType,referenceId,user,idempotencyKey,unitCost,
     wasteCategory,wasteNotes,wasteBatch,batchId
   },session);
+  const normalizedStrategy = String(consumptionStrategy || 'fefo').toLowerCase();
+  if (!['fefo','fifo'].includes(normalizedStrategy)) throw httpError('Invalid batch consumption strategy. Allowed: fefo, fifo', 400);
   const [branchRecord,ingredientRecord,userRecord]=await Promise.all([
     Branch.findById(branch).select('restaurant active').session(session).lean(),
     Ingredient.findById(ingredient).select('restaurant name unit').session(session).lean(),
@@ -140,6 +143,7 @@ export async function moveStock({
     batchId,
     batchNumber,
     allowExpired,
+    consumptionStrategy: normalizedStrategy,
     wasteCategory,
     wasteNotes:normalizedWasteNotes,
     wasteBatch
@@ -179,7 +183,8 @@ export async function moveStock({
       unit:movementUnit,
       batchId,
       batchNumber,
-      allowExpired:allowExpired??['WASTE','ADJUSTMENT','RETURN'].includes(type)
+      allowExpired:allowExpired??['WASTE','ADJUSTMENT','RETURN'].includes(type),
+      strategy: normalizedStrategy
     },session);
   }else{
     let restore=restoredMovements;
