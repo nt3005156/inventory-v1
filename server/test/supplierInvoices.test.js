@@ -558,10 +558,21 @@ describe('supplier invoice update and query concurrency', () => {
     const created = await postInvoice({invoiceNo: 'PAID-LOCK'});
     assert.equal(created.status, 201, created.body?.message);
     await SupplierPayment.create({
+      restaurant: world.restaurant._id,
+      branch: world.branchA._id,
       invoice: created.body._id,
       supplier: supplier._id,
+      paymentNo: `PAY-${String(created.body._id).slice(-8).toUpperCase()}`,
       amount: 100,
       method: 'bank',
+      reference: 'LOCK-TEST',
+      paidAt: new Date(),
+      status: 'posted',
+      origin: 'legacy_record',
+      migrationSource: 'supplier invoice locking fixture',
+      idempotencyKey: `locking-fixture-${created.body._id}`,
+      requestHash: 'a'.repeat(64),
+      requestHashVersion: 2,
       createdBy: world.manager._id
     });
     const amountEdit = await request(`/api/supplier-invoices/${created.body._id}`, {

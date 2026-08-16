@@ -2,7 +2,7 @@ import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
-import {PurchaseOrder, SupplierInvoice, SupplierPayment} from '../models/operations.js';
+import {PurchaseOrder, SupplierInvoice} from '../models/operations.js';
 import {GoodsReceipt} from '../models/purchasing.js';
 
 import {RECEIPT_DAMAGE_REASONS, receivePurchaseOrder, replayGoodsReceipt} from '../services/receiving.js';
@@ -26,6 +26,13 @@ import {
   refreshSupplierInvoiceMatching,
   updateSupplierInvoice
 } from '../services/invoices.js';
+import {
+  createSupplierPayment,
+  listSupplierInvoicePayments,
+  replaySupplierPayment,
+  replaySupplierPaymentReversal,
+  reverseSupplierPayment
+} from '../services/supplierPayments.js';
 import {
   closeShortPurchaseOrder,
   replayShortClosePurchaseOrder,
@@ -601,12 +608,120 @@ r.post('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
+const supplierPaymentSchema = z.object({
+  amount: z.number().positive(),
+  method: z.enum(['cash', 'bank', 'esewa', 'khalti', 'card']),
+  reference: z.string().trim().max(200).optional(),
+  paidAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  expectedInvoiceVersion: z.number().int().nonnegative().optional()
+}).strict();
+const supplierPaymentReversalSchema = z.object({
+  reason: z.string().trim().min(3).max(500),
+  expectedInvoiceVersion: z.number().int().nonnegative().optional()
+}).strict();
+
 r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
   try {
-    const invoice = await getSupplierInvoice({invoiceId: req.params.id, user: req.user});
-    res.json(await SupplierPayment.find({invoice: invoice._id}).sort({paidAt: 1, createdAt: 1}));
+    res.json(await listSupplierInvoicePayments({invoiceId: req.params.id, user: req.user}));
   } catch (e) {
     fail(res, e);
+  }
+});
+
+r.post('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  let input;
+  let idempotencyKey;
+  try {
+    input = supplierPaymentSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await createSupplierPayment({
+          invoiceId: req.params.id,
+          input,
+          user: req.user,
+          idempotencyKey,
+          session
+        });
+      });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = await replaySupplierPayment({
+          invoiceId: req.params.id,
+          input,
+          user: req.user,
+          idempotencyKey
+        });
+      } else {
+        throw error;
+      }
+    }
+    if (!result.duplicate) {
+      publishPurchasingEvent(result.payment.branch, {
+        reason: 'invoice_pay',
+        invoiceId: String(result.payment.invoice?._id || result.payment.invoice),
+        paymentId: String(result.payment._id),
+        paymentNo: result.payment.paymentNo,
+        supplierId: String(result.payment.supplier?._id || result.payment.supplier),
+        status: result.invoice.status
+      });
+    }
+    res.status(result.duplicate ? 200 : 201).json({...result, duplicate: result.duplicate});
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+r.post('/supplier-payments/:id/reverse', auth(['owner']), async (req, res) => {
+  const session = await mongoose.startSession();
+  let body;
+  let idempotencyKey;
+  try {
+    body = supplierPaymentReversalSchema.parse(req.body);
+    idempotencyKey = String(req.headers['idempotency-key'] || '').trim();
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await reverseSupplierPayment({
+          paymentId: req.params.id,
+          reason: body.reason,
+          expectedInvoiceVersion: body.expectedInvoiceVersion,
+          user: req.user,
+          idempotencyKey,
+          session
+        });
+      });
+    } catch (error) {
+      if (error?.code === 11000 && idempotencyKey) {
+        result = await replaySupplierPaymentReversal({
+          paymentId: req.params.id,
+          reason: body.reason,
+          user: req.user,
+          idempotencyKey
+        });
+      } else {
+        throw error;
+      }
+    }
+    if (!result.duplicate) {
+      publishPurchasingEvent(result.payment.branch, {
+        reason: 'invoice_payment_reverse',
+        invoiceId: String(result.payment.invoice?._id || result.payment.invoice),
+        paymentId: String(result.payment._id),
+        paymentNo: result.payment.paymentNo,
+        supplierId: String(result.payment.supplier?._id || result.payment.supplier),
+        status: result.invoice.status
+      });
+    }
+    res.status(result.duplicate ? 200 : 201).json({...result, duplicate: result.duplicate});
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 

@@ -304,12 +304,40 @@ describe('socket purchasing events', () => {
       const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
         method: 'POST',
         token: tokenFor(world.manager),
+        headers: {'Idempotency-Key': 'legacy-payment-realtime-1'},
         body: {amount: 130, method: 'cash'}
       });
       assert.equal(paid.status, 201, paid.body?.message);
       const payload = await paidEvt;
       assert.equal(payload.reason, 'invoice_pay');
       assert.equal(payload.status, 'partial');
+      assert.equal(payload.paymentNo, paid.body.payment.paymentNo);
+
+      const duplicateEvents = [];
+      socket.on('purchasing:update', event => duplicateEvents.push(event));
+      const paidReplay = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
+        method: 'POST',
+        token: tokenFor(world.manager),
+        headers: {'Idempotency-Key': 'legacy-payment-realtime-1'},
+        body: {amount: 130, method: 'cash'}
+      });
+      assert.equal(paidReplay.status, 200, paidReplay.body?.message);
+      assert.equal(paidReplay.body.duplicate, true);
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(duplicateEvents.length, 0, 'idempotent payment replay must not publish another event');
+
+      const reversalEvt = waitEvent(socket, 'purchasing:update');
+      const reversed = await request('/api/supplier-payments/' + paid.body.payment._id + '/reverse', {
+        method: 'POST',
+        token: tokenFor(world.owner),
+        headers: {'Idempotency-Key': 'payment-reversal-realtime-1'},
+        body: {reason: 'Wrong supplier payment'}
+      });
+      assert.equal(reversed.status, 201, reversed.body?.message);
+      const reversalPayload = await reversalEvt;
+      assert.equal(reversalPayload.reason, 'invoice_payment_reverse');
+      assert.equal(reversalPayload.status, 'unpaid');
+      assert.equal(reversalPayload.paymentNo, paid.body.payment.paymentNo);
     } finally {
       socket.close();
     }

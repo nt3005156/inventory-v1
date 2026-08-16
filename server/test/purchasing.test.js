@@ -273,6 +273,7 @@ describe('supplier statement', () => {
     const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-statement-1'},
       body: {amount: 130, method: 'cash', reference: 'PART-1'}
     });
     assert.equal(paid.status, 201, paid.body?.message);
@@ -379,6 +380,7 @@ describe('GET /api/reports/purchasing', () => {
     await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-report-1'},
       body: {amount: 130, method: 'cash'}
     });
 
@@ -489,6 +491,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-lock-1'},
       body: {amount: 130, method: 'cash'}
     });
     assert.equal(paid.status, 201, paid.body?.message);
@@ -514,6 +517,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const pay = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-void-1'},
       body: {amount: 100, method: 'cash'}
     });
     assert.equal(pay.status, 409);
@@ -532,6 +536,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-no-void-1'},
       body: {amount: 130, method: 'cash'}
     });
     assert.equal(paid.status, 201, paid.body?.message);
@@ -748,6 +753,7 @@ describe('purchasing E2E workflow', () => {
     const paid = await request('/api/supplier-invoices/' + inv.body._id + '/payments', {
       method: 'POST',
       token: tokenFor(world.manager),
+      headers: {'Idempotency-Key': 'legacy-payment-e2e-1'},
       body: {amount: 260, method: 'bank', reference: 'E2E-PAY'}
     });
     assert.equal(paid.status, 201, paid.body?.message);

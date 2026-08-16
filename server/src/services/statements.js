@@ -28,15 +28,34 @@ export function buildStatementLines(invoices, payments) {
   }
   for (const p of payments) {
     const invoice = p.invoice && p.invoice.invoiceNo ? p.invoice : null;
-    events.push({
+    const payment = {
       date: p.paidAt || p.createdAt,
       type: 'payment',
-      ref: p.reference || invoice?.invoiceNo || 'Payment',
+      ref: p.paymentNo || p.reference || invoice?.invoiceNo || 'Payment',
+      paymentId: p._id,
       invoiceId: invoice?._id || p.invoice,
       method: p.method,
+      reference: p.reference,
+      status: p.status || 'posted',
       debit: 0,
       credit: money(p.amount)
-    });
+    };
+    events.push(payment);
+    if (p.status === 'reversed') {
+      events.push({
+        date: p.reversedAt || p.updatedAt || p.createdAt,
+        type: 'payment_reversal',
+        ref: p.paymentNo || p.reference || invoice?.invoiceNo || 'Payment reversal',
+        paymentId: p._id,
+        invoiceId: invoice?._id || p.invoice,
+        method: p.method,
+        reference: p.reference,
+        status: p.status,
+        reversalReason: p.reversalReason,
+        debit: money(p.amount),
+        credit: 0
+      });
+    }
   }
   events.sort((a, b) => {
     const d = new Date(a.date) - new Date(b.date);
@@ -67,12 +86,22 @@ export async function buildSupplierStatement({supplierId, branchId, user}) {
   const invMatch = {restaurant: identity.restaurantId, supplier: supplier._id, status: {$ne: 'void'}};
   if (effectiveBranch) invMatch.branch = effectiveBranch;
   const invoices = await SupplierInvoice.find(invMatch).populate('purchaseOrder', 'poNo').sort({invoiceDate: 1, createdAt: 1});
-  const payMatch = {supplier: supplier._id, invoice: {$in: invoices.map(i => i._id)}};
-  const payments = await SupplierPayment.find(payMatch).populate('invoice', 'invoiceNo total').sort({paidAt: 1, createdAt: 1});
+  const payMatch = {
+    restaurant: identity.restaurantId,
+    supplier: supplier._id,
+    invoice: {$in: invoices.map(i => i._id)}
+  };
+  if (effectiveBranch) payMatch.branch = effectiveBranch;
+  const payments = await SupplierPayment.find(payMatch)
+    .populate('invoice', 'invoiceNo total')
+    .populate('createdBy reversedBy', 'name role')
+    .sort({paidAt: 1, createdAt: 1});
 
   const lines = buildStatementLines(invoices, payments);
   const invoiced = money(invoices.reduce((s, i) => s + Number(i.total || 0), 0));
-  const paid = money(payments.reduce((s, p) => s + Number(p.amount || 0), 0));
+  const paid = money(payments
+    .filter(payment => (payment.status || 'posted') === 'posted')
+    .reduce((s, p) => s + Number(p.amount || 0), 0));
   return {
     supplier: {_id: supplier._id, name: supplier.name, contact: supplier.contact},
     branch: effectiveBranch || null,

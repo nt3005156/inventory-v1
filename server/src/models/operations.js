@@ -165,7 +165,61 @@ supplierInvoiceSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'s
 supplierInvoiceSchema.index({restaurant:1,branch:1,status:1,invoiceDate:-1},{name:'supplier_invoice_restaurant_branch_status_date'});
 supplierInvoiceSchema.index({restaurant:1,purchaseOrder:1,status:1},{name:'supplier_invoice_restaurant_po_status'});
 export const SupplierInvoice=model('SupplierInvoice',supplierInvoiceSchema);
-export const SupplierPayment=model('SupplierPayment',new Schema({invoice:{...oid,ref:'SupplierInvoice',index:true},supplier:{...oid,ref:'Supplier'},amount:n,method:{type:String,enum:['cash','bank','esewa','khalti','card'],default:'cash'},reference:String,paidAt:{type:Date,default:Date.now},createdBy:{...oid,ref:'User'}},{timestamps:true}));
+const supplierPaymentSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},
+  branch:{...oid,ref:'Branch',required:true,immutable:true},
+  invoice:{...oid,ref:'SupplierInvoice',required:true,immutable:true},
+  supplier:{...oid,ref:'Supplier',required:true,immutable:true},
+  paymentNo:{type:String,required:true,trim:true,maxlength:80,immutable:true},
+  numberVersion:{type:Number,default:2,immutable:true},
+  amount:{type:Number,required:true,min:Number.EPSILON,max:1000000000,immutable:true},
+  currency:{type:String,default:'NPR',enum:['NPR'],immutable:true},
+  method:{type:String,enum:['cash','bank','esewa','khalti','card','legacy'],required:true,immutable:true},
+  reference:{type:String,trim:true,maxlength:200,immutable:true},
+  origin:{type:String,enum:['recorded','legacy_record','legacy_invoice_balance'],default:'recorded',required:true,immutable:true},
+  migrationSource:{type:String,trim:true,maxlength:200,immutable:true},
+  paidAt:{type:Date,default:Date.now,required:true,immutable:true},
+  status:{type:String,enum:['posted','reversed'],default:'posted'},
+  idempotencyKey:{type:String,required:true,trim:true,maxlength:120,select:false,immutable:true},
+  requestHash:{type:String,required:true,match:/^[a-f0-9]{64}$/,select:false,immutable:true},
+  requestHashVersion:{type:Number,required:true,default:2,enum:[2],select:false,immutable:true},
+  createdBy:{...oid,ref:'User',required:true,immutable:true},
+  reversedAt:Date,
+  reversedBy:{...oid,ref:'User'},
+  reversalReason:{type:String,trim:true,maxlength:500},
+  reversalIdempotencyKey:{type:String,trim:true,maxlength:120,select:false},
+  reversalRequestHash:{type:String,match:/^[a-f0-9]{64}$/,select:false}
+},{timestamps:true,autoIndex:false,optimisticConcurrency:true});
+supplierPaymentSchema.pre('validate',function validateSupplierPayment(){
+  const amount=Number(this.amount);
+  const reference=String(this.reference||'').trim();
+  const reversalKey=String(this.reversalIdempotencyKey||'').trim();
+  const reversalHash=String(this.reversalRequestHash||'').trim();
+  if(!Number.isFinite(amount)||amount<=0)this.invalidate('amount','Payment amount must be positive');
+  if(Math.abs(amount-Math.round(amount*100)/100)>1e-9)this.invalidate('amount','Payment amount cannot have more than two decimal places');
+  if(this.origin==='recorded'&&this.method==='legacy')this.invalidate('method','Recorded payments cannot use the legacy method');
+  if(this.origin!=='recorded'&&!String(this.migrationSource||'').trim())this.invalidate('migrationSource','Migrated payments require source evidence');
+  if(this.origin==='recorded'&&!['cash','legacy'].includes(this.method)&&reference.length<3)this.invalidate('reference','Non-cash payments require a traceable reference');
+  if(this.status==='posted'&&(this.reversedAt||this.reversedBy||this.reversalReason||reversalKey||reversalHash))this.invalidate('status','Posted payments cannot have reversal details');
+  if(this.status==='reversed'&&(!this.reversedAt||!this.reversedBy||!this.reversalReason||!reversalKey||!reversalHash))this.invalidate('status','Reversed payments require complete reversal details');
+});
+supplierPaymentSchema.set('toJSON',{transform:(_document,result)=>{delete result.idempotencyKey;delete result.requestHash;delete result.requestHashVersion;delete result.reversalIdempotencyKey;delete result.reversalRequestHash;return result;}});
+supplierPaymentSchema.index({restaurant:1,paymentNo:1},{unique:true,name:'supplier_payment_restaurant_number'});
+supplierPaymentSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'supplier_payment_restaurant_idempotency',partialFilterExpression:{idempotencyKey:{$type:'string'}}});
+supplierPaymentSchema.index({restaurant:1,reversalIdempotencyKey:1},{unique:true,name:'supplier_payment_restaurant_reversal_idempotency',partialFilterExpression:{reversalIdempotencyKey:{$type:'string'}}});
+supplierPaymentSchema.index({restaurant:1,invoice:1,status:1,paidAt:1},{name:'supplier_payment_restaurant_invoice_status_date'});
+supplierPaymentSchema.index({restaurant:1,branch:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_branch_status_date'});
+supplierPaymentSchema.index({restaurant:1,supplier:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_supplier_status_date'});
+export const SupplierPayment=model('SupplierPayment',supplierPaymentSchema);
+const supplierPaymentCounterSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},
+  branch:{...oid,ref:'Branch',required:true,immutable:true},
+  branchCode:{type:String,required:true,trim:true,uppercase:true,maxlength:8,immutable:true},
+  year:{type:Number,required:true,immutable:true},
+  value:{type:Number,default:0,min:0}
+},{timestamps:true,autoIndex:false});
+supplierPaymentCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'supplier_payment_counter_scope'});
+export const SupplierPaymentCounter=model('SupplierPaymentCounter',supplierPaymentCounterSchema);
 export const StockTransfer=model('StockTransfer',new Schema({fromBranch:{...oid,ref:'Branch'},toBranch:{...oid,ref:'Branch'},ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,status:{type:String,enum:['requested','approved','in_transit','received','cancelled'],default:'requested'},requestedBy:{...oid,ref:'User'},approvedBy:{...oid,ref:'User'}},{timestamps:true}));
 export const Delivery=model('Delivery',new Schema({order:{...oid,ref:'Order'},rider:{...oid,ref:'User'},address:String,phone:String,status:{type:String,enum:['available','assigned','picking_up','out_for_delivery','delivered','cancelled'],default:'assigned'},estimatedMinutes:n},{timestamps:true}));
 export const Notification=model('Notification',new Schema({branch:{...oid,ref:'Branch'},user:{...oid,ref:'User'},type:String,title:String,body:String,read:{type:Boolean,default:false},referenceId:oid},{timestamps:true}));

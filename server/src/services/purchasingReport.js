@@ -102,7 +102,13 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   ]);
 
   const scopedPayments = invoices.length
-    ? await SupplierPayment.find({...dates, invoice: {$in: invoices.map(invoice => invoice._id)}})
+    ? await SupplierPayment.find({
+      restaurant: context.restaurantId,
+      ...branchMatch,
+      ...dates,
+      status: 'posted',
+      invoice: {$in: invoices.map(invoice => invoice._id)}
+    })
     : [];
 
   const poQty = summarizePoLines(orders);
@@ -150,7 +156,11 @@ export async function buildPurchasingReport({branchId, user, from, to, toExclusi
   for (const inv of invoices) {
     const row = touch(inv.supplier?._id || inv.supplier, inv.supplier?.name);
     row.invoiced = money(row.invoiced + Number(inv.total || 0));
-    row.paid = money(row.paid + Number(inv.paidAmount || 0));
+    row.due = money(row.invoiced - row.paid);
+  }
+  for (const payment of scopedPayments) {
+    const row = touch(payment.supplier);
+    row.paid = money(row.paid + Number(payment.amount || 0));
     row.due = money(row.invoiced - row.paid);
   }
 

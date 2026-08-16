@@ -79,6 +79,10 @@ export default function Purchasing({call, user, token}) {
   const [statement, setStatement] = useState(null);
   const [invoicePays, setInvoicePays] = useState([]);
   const [payInvoiceId, setPayInvoiceId] = useState('');
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentForm, setPaymentForm] = useState({amount: '', method: 'cash', reference: '', paidAt: todayKathmandu()});
+  const paymentRequestKey = useRef(requestKey());
+  const [reverseAction, setReverseAction] = useState(null);
   const [report, setReport] = useState(null);
   const [editId, setEditId] = useState('');
   const [edit, setEdit] = useState({invoiceNo: '', purchaseOrder: '', invoiceDate: '', dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
@@ -170,6 +174,10 @@ export default function Purchasing({call, user, token}) {
     setStatementId('');
     setPayInvoiceId('');
     setInvoicePays([]);
+    setPaymentLoading(false);
+    setPaymentForm({amount: '', method: 'cash', reference: '', paidAt: todayKathmandu()});
+    paymentRequestKey.current = requestKey();
+    setReverseAction(null);
     setEditId('');
     setInvoice({supplier: '', purchaseOrder: '', invoiceNo: '', invoiceDate: todayKathmandu(), dueDate: '', amount: 0, priceIncludesVat: false, vatRate: 13, notes: '', attachmentUrl: ''});
     invoiceRequestKey.current = requestKey();
@@ -549,15 +557,122 @@ export default function Purchasing({call, user, token}) {
     }
   };
 
-  const pay = async inv => {
-    const amount = Number(window.prompt(`Record cash payment in Rs. (due ${rs(inv.total - inv.paidAmount)})`, inv.total - inv.paidAmount));
-    if (!amount || amount < 0) return;
+  const openInvoicePayments = async (inv, preparePayment = false) => {
+    setError('');
+    setSuccess('');
+    const changingInvoice = String(inv._id) !== String(payInvoiceId);
+    setPayInvoiceId(inv._id);
+    if (changingInvoice) setInvoicePays([]);
+    setReverseAction(null);
+    if (preparePayment || changingInvoice) {
+      setPaymentForm({
+        amount: Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0)).toFixed(2),
+        method: 'cash',
+        reference: '',
+        paidAt: todayKathmandu()
+      });
+      paymentRequestKey.current = requestKey();
+    }
+    setPaymentLoading(true);
     try {
-      await call('/supplier-invoices/' + inv._id + '/payments', {method: 'POST', body: JSON.stringify({amount, method: 'cash'})});
-      load();
-      if (statementId === (inv.supplier?._id || inv.supplier)) await loadStatement(statementId);
+      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
     } catch (e) {
-      setError(e.message);
+      setInvoicePays([]);
+      setError(e.message || 'Could not load invoice payment history');
+    } finally {
+      setPaymentLoading(false);
+    }
+  };
+
+  const recordPayment = async event => {
+    event.preventDefault();
+    const inv = invoices.find(item => item._id === payInvoiceId);
+    if (!inv || ['paid', 'void'].includes(inv.status)) return;
+    const amount = Number(paymentForm.amount);
+    const due = Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0));
+    if (!Number.isFinite(amount) || amount <= 0 || amount > due + 0.001) {
+      setError(`Enter a payment greater than zero and no more than ${rs(due)}`);
+      return;
+    }
+    if (paymentForm.method !== 'cash' && paymentForm.reference.trim().length < 3) {
+      setError('Enter a bank, wallet, or card reference of at least 3 characters');
+      return;
+    }
+    if (typeof globalThis.confirm === 'function'
+      && !globalThis.confirm(`Record ${rs(amount)} against ${inv.invoiceNo} by ${paymentForm.method}? This creates an auditable payment entry.`)) return;
+    setBusy('pay-' + inv._id);
+    setError('');
+    setSuccess('');
+    try {
+      const result = await call('/supplier-invoices/' + inv._id + '/payments', {
+        method: 'POST',
+        headers: {'Idempotency-Key': paymentRequestKey.current},
+        body: JSON.stringify({
+          amount,
+          method: paymentForm.method,
+          reference: paymentForm.reference.trim() || undefined,
+          paidAt: paymentForm.paidAt || undefined,
+          expectedInvoiceVersion: inv.__v
+        })
+      });
+      paymentRequestKey.current = requestKey();
+      setPaymentForm({
+        amount: Math.max(0, Number(result.invoice?.total || 0) - Number(result.invoice?.paidAmount || 0)).toFixed(2),
+        method: paymentForm.method,
+        reference: '',
+        paidAt: todayKathmandu()
+      });
+      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
+      await load();
+      const supplierId = inv.supplier?._id || inv.supplier;
+      if (statementId === supplierId) await loadStatement(statementId);
+      setSuccess(`${result.payment?.paymentNo || 'Payment'} ${result.duplicate ? 'was already recorded' : 'recorded'} for ${rs(result.payment?.amount || amount)}.`);
+    } catch (e) {
+      setError(e.message || 'Supplier payment failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const requestPaymentReversal = payment => {
+    setError('');
+    setSuccess('');
+    setReverseAction({payment, reason: '', requestKey: requestKey()});
+  };
+
+  const reversePayment = async event => {
+    event.preventDefault();
+    const payment = reverseAction?.payment;
+    const reasonText = String(reverseAction?.reason || '').trim();
+    const inv = invoices.find(item => item._id === payInvoiceId);
+    if (!payment || !inv || reasonText.length < 3) return;
+    if (typeof globalThis.confirm === 'function'
+      && !globalThis.confirm(`Reverse ${payment.paymentNo || 'this payment'} for ${rs(payment.amount)}? The invoice balance will be restored and the original entry retained.`)) return;
+    setBusy('reverse-' + payment._id);
+    setError('');
+    setSuccess('');
+    try {
+      const result = await call('/supplier-payments/' + payment._id + '/reverse', {
+        method: 'POST',
+        headers: {'Idempotency-Key': reverseAction.requestKey},
+        body: JSON.stringify({reason: reasonText, expectedInvoiceVersion: inv.__v})
+      });
+      setReverseAction(null);
+      setPaymentForm(current => ({
+        ...current,
+        amount: Math.max(0, Number(result.invoice?.total || 0) - Number(result.invoice?.paidAmount || 0)).toFixed(2),
+        reference: '',
+        paidAt: todayKathmandu()
+      }));
+      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
+      await load();
+      const supplierId = inv.supplier?._id || inv.supplier;
+      if (statementId === supplierId) await loadStatement(statementId);
+      setSuccess(`${result.payment?.paymentNo || 'Payment'} ${result.duplicate ? 'reversal was already recorded' : 'reversed'}; ${rs(result.payment?.amount || payment.amount)} is due again.`);
+    } catch (e) {
+      setError(e.message || 'Supplier payment reversal failed');
+    } finally {
+      setBusy('');
     }
   };
 
@@ -576,16 +691,7 @@ export default function Purchasing({call, user, token}) {
     }
   };
 
-  const showInvoicePays = async inv => {
-    setError('');
-    setPayInvoiceId(inv._id);
-    try {
-      setInvoicePays(await call('/supplier-invoices/' + inv._id + '/payments'));
-    } catch (e) {
-      setInvoicePays([]);
-      setError(e.message);
-    }
-  };
+  const showInvoicePays = inv => openInvoicePayments(inv, false);
 
   const openEdit = inv => {
     setError('');
@@ -777,6 +883,12 @@ export default function Purchasing({call, user, token}) {
     ['approved', 'sent', 'partially_received', 'received', 'closed_short'].includes(order.status)
     && (!invoice.supplier || String(order.supplier?._id || order.supplier) === String(invoice.supplier))
   );
+  const selectedPaymentInvoice = invoices.find(item => item._id === payInvoiceId);
+  const selectedInvoiceDue = selectedPaymentInvoice
+    ? Math.max(0, Number(selectedPaymentInvoice.total || 0) - Number(selectedPaymentInvoice.paidAmount || 0))
+    : 0;
+  const postedPaymentTotal = invoicePays.filter(item => item.status === 'posted').reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const reversedPaymentTotal = invoicePays.filter(item => item.status === 'reversed').reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
   return (
     <section className="panel purchasing-panel">
@@ -1159,7 +1271,7 @@ export default function Purchasing({call, user, token}) {
               <td><label className={x.status === 'void' ? 'pill' : 'pill ok'}>{x.status}</label></td>
               <td><label className={['matched', 'unlinked'].includes(x.matching?.status) ? 'pill ok' : 'pill'}>{String(x.matching?.status || 'unlinked').replaceAll('_', ' ')}</label>{x.matching?.status === 'over_billed' && <small className="cell-sub">Variance {rs(x.matching?.varianceTotal)}</small>}</td>
               <td>
-                {x.status !== 'paid' && x.status !== 'void' && <button className="receive" onClick={() => pay(x)}>Record payment</button>}
+                {x.status !== 'paid' && x.status !== 'void' && <button className="receive" onClick={() => openInvoicePayments(x, true)}>Record payment</button>}
                 {x.status !== 'void' && <button className="receive" onClick={() => openEdit(x)}>Edit</button>}
                 {x.status === 'unpaid' && Number(x.paidAmount || 0) === 0 && <button className="kds-cancel" onClick={() => voidInvoice(x)}>Void</button>}
                 <button className="receive" onClick={() => showInvoicePays(x)}>Payments</button>
@@ -1205,23 +1317,81 @@ export default function Purchasing({call, user, token}) {
         );
       })()}
       {payInvoiceId && (
-        <div className="receive-box">
-          <h3>Invoice payment history</h3>
-          {!invoicePays.length && <p className="empty">No payments on this invoice yet.</p>}
-          {!!invoicePays.length && (
-            <table>
-              <thead><tr><th>When</th><th>Method</th><th>Amount</th><th>Reference</th></tr></thead>
+        <div className="receive-box payment-workspace">
+          <div className="payment-heading">
+            <div>
+              <h3>Payments · {selectedPaymentInvoice?.invoiceNo || 'Invoice'}</h3>
+              <p>Posted payments reduce the supplier balance. Reversals preserve the original evidence and restore the amount due.</p>
+            </div>
+            <button type="button" className="po-secondary" onClick={() => { setPayInvoiceId(''); setInvoicePays([]); setReverseAction(null); }}>Close</button>
+          </div>
+          {selectedPaymentInvoice && <div className="payment-summary">
+            <article><small>Invoice total</small><strong>{rs(selectedPaymentInvoice.total)}</strong></article>
+            <article><small>Active payments</small><strong>{rs(postedPaymentTotal)}</strong></article>
+            <article><small>Balance due</small><strong>{rs(selectedInvoiceDue)}</strong></article>
+            <article><small>Reversed history</small><strong>{rs(reversedPaymentTotal)}</strong></article>
+          </div>}
+
+          {selectedPaymentInvoice && !['paid', 'void'].includes(selectedPaymentInvoice.status) && (
+            <form className="payment-form" onSubmit={recordPayment}>
+              <div>
+                <h3>Record a payment</h3>
+                <p>Payment numbers are assigned automatically. Non-cash methods require a traceable reference.</p>
+              </div>
+              <label>Amount (NPR)<input required type="number" min="0.01" max={selectedInvoiceDue} step="0.01" value={paymentForm.amount} onChange={e => setPaymentForm({...paymentForm, amount: e.target.value})}/></label>
+              <label>Method<select required value={paymentForm.method} onChange={e => setPaymentForm({...paymentForm, method: e.target.value, reference: e.target.value === 'cash' ? '' : paymentForm.reference})}>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank transfer</option>
+                <option value="esewa">eSewa</option>
+                <option value="khalti">Khalti</option>
+                <option value="card">Card</option>
+              </select></label>
+              <label>Payment date<input required type="date" min={ymd(selectedPaymentInvoice.invoiceDate)} max={todayKathmandu()} value={paymentForm.paidAt} onChange={e => setPaymentForm({...paymentForm, paidAt: e.target.value})}/></label>
+              <label>Reference<input required={paymentForm.method !== 'cash'} minLength={paymentForm.method !== 'cash' ? 3 : undefined} maxLength="200" value={paymentForm.reference} onChange={e => setPaymentForm({...paymentForm, reference: e.target.value})} placeholder={paymentForm.method === 'cash' ? 'Receipt or note (optional)' : 'Bank, wallet, or card reference'}/></label>
+              <button disabled={!!busy || !(Number(paymentForm.amount) > 0) || Number(paymentForm.amount) > selectedInvoiceDue + 0.001 || (paymentForm.method !== 'cash' && paymentForm.reference.trim().length < 3)}>{busy === 'pay-' + payInvoiceId ? 'Recording…' : `Review & record ${rs(paymentForm.amount)}`}</button>
+            </form>
+          )}
+          {selectedPaymentInvoice?.status === 'paid' && <p className="po-success">This invoice is fully paid. Its complete transaction history remains below.</p>}
+          {selectedPaymentInvoice?.status === 'void' && <p className="danger">Void invoices cannot receive payments.</p>}
+
+          <div className="payment-history-heading">
+            <h3>Auditable payment history</h3>
+            <span>{invoicePays.length} {invoicePays.length === 1 ? 'entry' : 'entries'}</span>
+          </div>
+          {paymentLoading && <p className="empty">Loading payment history…</p>}
+          {!paymentLoading && !invoicePays.length && <p className="empty">No payments have been recorded on this invoice.</p>}
+          {!paymentLoading && !!invoicePays.length && (
+            <div className="table-scroll"><table className="payment-history-table">
+              <thead><tr><th>Payment</th><th>Paid at</th><th>Method / reference</th><th>Amount</th><th>Status</th><th>Recorded by</th><th>Reversal evidence</th><th></th></tr></thead>
               <tbody>
                 {invoicePays.map(p => (
-                  <tr key={p._id}>
-                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP')}</td>
-                    <td>{p.method}</td>
+                  <tr key={p._id} className={p.status === 'reversed' ? 'payment-reversed' : ''}>
+                    <td><strong>{p.paymentNo || 'Legacy payment'}</strong><small>{p.origin === 'legacy_invoice_balance' ? 'Migrated invoice balance' : p.origin === 'legacy_record' ? 'Migrated record' : 'Recorded payment'}</small></td>
+                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}</td>
+                    <td><strong>{String(p.method || '').replaceAll('_', ' ')}</strong><small>{p.reference || 'No reference'}</small></td>
                     <td>{rs(p.amount)}</td>
-                    <td>{p.reference || '—'}</td>
+                    <td><span className={p.status === 'posted' ? 'pill ok' : 'pill'}>{p.status}</span></td>
+                    <td>{p.createdBy?.name || 'Recorded user'}<small>{p.createdBy?.role || ''}</small></td>
+                    <td>{p.status === 'reversed' ? <>{p.reversalReason}<small>{p.reversedAt ? new Date(p.reversedAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}{p.reversedBy?.name ? ` · ${p.reversedBy.name}` : ''}</small></> : '—'}</td>
+                    <td>{user?.role === 'owner' && p.status === 'posted' && <button type="button" className="kds-cancel" disabled={!!busy} onClick={() => requestPaymentReversal(p)}>Reverse</button>}</td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
+          )}
+          {reverseAction && (
+            <form className="payment-reversal" onSubmit={reversePayment}>
+              <div>
+                <p className="eyebrow">Owner authorization</p>
+                <h3>Reverse {reverseAction.payment.paymentNo || 'payment'}</h3>
+                <p>The original {rs(reverseAction.payment.amount)} entry will stay in history, while the invoice balance becomes due again.</p>
+              </div>
+              <label>Reason<input autoFocus required minLength="3" maxLength="500" value={reverseAction.reason} onChange={e => setReverseAction({...reverseAction, reason: e.target.value})} placeholder="Why is this payment being reversed?"/></label>
+              <div className="payment-reversal-actions">
+                <button type="button" className="po-secondary" disabled={!!busy} onClick={() => setReverseAction(null)}>Cancel</button>
+                <button type="submit" className="kds-cancel" disabled={!!busy || reverseAction.reason.trim().length < 3}>{busy === 'reverse-' + reverseAction.payment._id ? 'Reversing…' : 'Review & reverse payment'}</button>
+              </div>
+            </form>
           )}
         </div>
       )}
@@ -1262,14 +1432,16 @@ export default function Purchasing({call, user, token}) {
           {!statement.payments?.length && <p className="empty">No supplier payments recorded.</p>}
           {!!statement.payments?.length && (
             <table>
-              <thead><tr><th>When</th><th>Invoice</th><th>Method</th><th>Amount</th></tr></thead>
+              <thead><tr><th>When</th><th>Payment</th><th>Invoice</th><th>Method</th><th>Amount</th><th>Status / evidence</th></tr></thead>
               <tbody>
                 {statement.payments.map(p => (
-                  <tr key={p._id}>
-                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP')}</td>
+                  <tr key={p._id} className={p.status === 'reversed' ? 'payment-reversed' : ''}>
+                    <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}</td>
+                    <td>{p.paymentNo || 'Legacy payment'}</td>
                     <td>{p.invoice?.invoiceNo || '—'}</td>
-                    <td>{p.method}</td>
+                    <td>{p.method}{p.reference ? <small>{p.reference}</small> : null}</td>
                     <td>{rs(p.amount)}</td>
+                    <td><span className={p.status === 'posted' ? 'pill ok' : 'pill'}>{p.status || 'posted'}</span>{p.status === 'reversed' && <small>{p.reversalReason || 'Reversed'}{p.reversedBy?.name ? ` · ${p.reversedBy.name}` : ''}</small>}</td>
                   </tr>
                 ))}
               </tbody>
