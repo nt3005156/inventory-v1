@@ -40,6 +40,14 @@ const PAYMENT_INDEXES = [
   {
     key: {restaurant: 1, supplier: 1, status: 1, paidAt: -1},
     options: {name: 'supplier_payment_restaurant_supplier_status_date'}
+  },
+  {
+    key: {restaurant: 1, supplier: 1, paidAt: 1, createdAt: 1, _id: 1},
+    options: {name: 'supplier_payment_statement_scope_date'}
+  },
+  {
+    key: {restaurant: 1, supplier: 1, branch: 1, paidAt: 1, createdAt: 1, _id: 1},
+    options: {name: 'supplier_payment_statement_branch_date'}
   }
 ];
 const COUNTER_INDEXES = [{

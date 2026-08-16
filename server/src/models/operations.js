@@ -163,6 +163,8 @@ supplierInvoiceSchema.set('toJSON',{virtuals:true,transform:(_document,result)=>
 supplierInvoiceSchema.index({restaurant:1,supplier:1,invoiceNoNormalized:1},{unique:true,name:'supplier_invoice_restaurant_supplier_number'});
 supplierInvoiceSchema.index({restaurant:1,idempotencyKey:1},{unique:true,name:'supplier_invoice_restaurant_idempotency',partialFilterExpression:{idempotencyKey:{$type:'string'}}});
 supplierInvoiceSchema.index({restaurant:1,branch:1,status:1,invoiceDate:-1},{name:'supplier_invoice_restaurant_branch_status_date'});
+supplierInvoiceSchema.index({restaurant:1,supplier:1,invoiceDate:1,createdAt:1,_id:1},{name:'supplier_invoice_statement_scope_date'});
+supplierInvoiceSchema.index({restaurant:1,supplier:1,branch:1,invoiceDate:1,createdAt:1,_id:1},{name:'supplier_invoice_statement_branch_date'});
 supplierInvoiceSchema.index({restaurant:1,purchaseOrder:1,status:1},{name:'supplier_invoice_restaurant_po_status'});
 export const SupplierInvoice=model('SupplierInvoice',supplierInvoiceSchema);
 const supplierPaymentSchema=new Schema({
@@ -210,6 +212,8 @@ supplierPaymentSchema.index({restaurant:1,reversalIdempotencyKey:1},{unique:true
 supplierPaymentSchema.index({restaurant:1,invoice:1,status:1,paidAt:1},{name:'supplier_payment_restaurant_invoice_status_date'});
 supplierPaymentSchema.index({restaurant:1,branch:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_branch_status_date'});
 supplierPaymentSchema.index({restaurant:1,supplier:1,status:1,paidAt:-1},{name:'supplier_payment_restaurant_supplier_status_date'});
+supplierPaymentSchema.index({restaurant:1,supplier:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_scope_date'});
+supplierPaymentSchema.index({restaurant:1,supplier:1,branch:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_branch_date'});
 export const SupplierPayment=model('SupplierPayment',supplierPaymentSchema);
 const supplierPaymentCounterSchema=new Schema({
   restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},

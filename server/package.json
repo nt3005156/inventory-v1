@@ -5,7 +5,7 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "seed": "node src/seed.js",
-    "test": "node --test --test-concurrency=1 --test-timeout=120000 test/kitchen.transitions.test.js test/kitchen.kds.test.js test/kitchen.realtime.test.js test/tables.test.js test/tables.ops.test.js test/tables.realtime.test.js test/purchasing.realtime.test.js test/goodsReceiving.test.js test/partialDamagedReceiving.test.js test/purchaseReturns.test.js test/supplierCatalog.test.js test/purchaseOrders.test.js test/billing.test.js test/purchasing.test.js test/supplierInvoices.test.js test/supplierPayments.test.js test/pnl.test.js test/dashboard.test.js test/inventory.test.js test/batchExpiry.test.js test/menuEngineering.test.js test/transfers.test.js test/expenses.test.js test/alerts.test.js test/monthClose.test.js"
+    "test": "node --test --test-concurrency=1 --test-timeout=120000 test/kitchen.transitions.test.js test/kitchen.kds.test.js test/kitchen.realtime.test.js test/tables.test.js test/tables.ops.test.js test/tables.realtime.test.js test/purchasing.realtime.test.js test/goodsReceiving.test.js test/partialDamagedReceiving.test.js test/purchaseReturns.test.js test/supplierCatalog.test.js test/purchaseOrders.test.js test/billing.test.js test/purchasing.test.js test/supplierInvoices.test.js test/supplierPayments.test.js test/supplierStatements.test.js test/pnl.test.js test/dashboard.test.js test/inventory.test.js test/batchExpiry.test.js test/menuEngineering.test.js test/transfers.test.js test/expenses.test.js test/alerts.test.js test/monthClose.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -123,6 +123,8 @@ describe('supplier payment migration and index repair', () => {
     const indexNames = (await SupplierPayment.collection.indexes()).map(index => index.name);
     assert.equal(indexNames.includes('supplier_payment_restaurant_number'), true);
     assert.equal(indexNames.includes('supplier_payment_restaurant_idempotency'), true);
+    assert.equal(indexNames.includes('supplier_payment_statement_scope_date'), true);
+    assert.equal(indexNames.includes('supplier_payment_statement_branch_date'), true);
 
     await ensureSupplierPaymentIndexes();
     assert.equal(await SupplierPayment.countDocuments({invoice: created.body._id}), 2);

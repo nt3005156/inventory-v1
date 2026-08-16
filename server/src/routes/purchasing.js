@@ -485,6 +485,10 @@ r.get('/suppliers/:id/statement', auth(['owner', 'manager']), async (req, res) =
     res.json(await buildSupplierStatement({
       supplierId: req.params.id,
       branchId: req.query.branch,
+      from: req.query.from,
+      to: req.query.to,
+      page: req.query.page,
+      limit: req.query.limit,
       user: req.user
     }));
   } catch (e) {
@@ -497,7 +501,10 @@ r.get('/suppliers/:id/payments', auth(['owner', 'manager']), async (req, res) =>
     const statement = await buildSupplierStatement({
       supplierId: req.params.id,
       branchId: req.query.branch,
-      user: req.user
+      from: req.query.from,
+      to: req.query.to,
+      user: req.user,
+      limit: 500
     });
     res.json(statement.payments);
   } catch (e) {
@@ -510,9 +517,19 @@ r.get('/suppliers/:id/balance', auth(['owner', 'manager']), async (req, res) => 
     const statement = await buildSupplierStatement({
       supplierId: req.params.id,
       branchId: req.query.branch,
-      user: req.user
+      to: req.query.asOf || req.query.to,
+      user: req.user,
+      limit: 1
     });
-    res.json({invoiced: statement.invoiced, paid: statement.paid, balance: statement.balance});
+    res.json({
+      supplier: statement.supplier,
+      branch: statement.branch,
+      asOf: statement.period.asOf,
+      invoiced: statement.invoiced,
+      paid: statement.paid,
+      balance: statement.balance,
+      aging: statement.aging
+    });
   } catch (e) {
     fail(res, e);
   }

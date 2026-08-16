@@ -77,6 +77,11 @@ export default function Purchasing({call, user, token}) {
   const invoiceRequestKey = useRef(requestKey());
   const [statementId, setStatementId] = useState('');
   const [statement, setStatement] = useState(null);
+  const [statementFilters, setStatementFilters] = useState({from: '', to: ''});
+  const [statementDraft, setStatementDraft] = useState({from: '', to: ''});
+  const [statementLoading, setStatementLoading] = useState(false);
+  const [statementError, setStatementError] = useState('');
+  const statementRequestSequence = useRef(0);
   const [invoicePays, setInvoicePays] = useState([]);
   const [payInvoiceId, setPayInvoiceId] = useState('');
   const [paymentLoading, setPaymentLoading] = useState(false);
@@ -170,8 +175,11 @@ export default function Purchasing({call, user, token}) {
     setReturnOptionsLoading(false);
     setApprovalHistory([]);
     setApprovalAction(null);
+    statementRequestSequence.current += 1;
     setStatement(null);
     setStatementId('');
+    setStatementLoading(false);
+    setStatementError('');
     setPayInvoiceId('');
     setInvoicePays([]);
     setPaymentLoading(false);
@@ -192,6 +200,10 @@ export default function Purchasing({call, user, token}) {
   openIdRef.current = openId;
   const statementIdRef = useRef(statementId);
   statementIdRef.current = statementId;
+  const statementFiltersRef = useRef(statementFilters);
+  statementFiltersRef.current = statementFilters;
+  const statementPageRef = useRef(statement?.linePagination?.page || 1);
+  statementPageRef.current = statement?.linePagination?.page || 1;
   const payInvoiceIdRef = useRef(payInvoiceId);
   payInvoiceIdRef.current = payInvoiceId;
 
@@ -232,9 +244,7 @@ export default function Purchasing({call, user, token}) {
         refreshOpenHistory(openIdRef.current);
       }
       if (statementIdRef.current && payload.supplierId && String(payload.supplierId) === String(statementIdRef.current)) {
-        call('/suppliers/' + statementIdRef.current + '/statement?branch=' + branch._id)
-          .then(setStatement)
-          .catch(() => {});
+        loadStatement(statementIdRef.current, statementFiltersRef.current, statementPageRef.current, {silent: true});
       }
       if (payInvoiceIdRef.current && payload.invoiceId && String(payload.invoiceId) === String(payInvoiceIdRef.current)) {
         call('/supplier-invoices/' + payInvoiceIdRef.current + '/payments')
@@ -676,19 +686,49 @@ export default function Purchasing({call, user, token}) {
     }
   };
 
-  const loadStatement = async id => {
+  const loadStatement = async (id, filters = statementFilters, page = 1, {silent = false} = {}) => {
+    const sequence = ++statementRequestSequence.current;
     if (!id) {
       setStatement(null);
+      setStatementError('');
+      setStatementLoading(false);
       return;
     }
-    setError('');
+    const query = new URLSearchParams({page: String(page || 1), limit: '100'});
+    if (branch?._id) query.set('branch', branch._id);
+    if (filters.from) query.set('from', filters.from);
+    if (filters.to) query.set('to', filters.to);
+    if (!silent) setStatementLoading(true);
+    setStatementError('');
     try {
-      const data = await call('/suppliers/' + id + '/statement' + (branch ? `?branch=${branch._id}` : ''));
-      setStatement(data);
+      const data = await call(`/suppliers/${id}/statement?${query}`);
+      if (sequence === statementRequestSequence.current) setStatement(data);
     } catch (e) {
-      setStatement(null);
-      setError(e.message);
+      if (sequence === statementRequestSequence.current) {
+        setStatementError(e.message || 'Could not load supplier statement');
+        if (!silent) setStatement(null);
+      }
+    } finally {
+      if (sequence === statementRequestSequence.current) setStatementLoading(false);
     }
+  };
+
+  const applyStatementPeriod = e => {
+    e.preventDefault();
+    if (statementDraft.from && statementDraft.to && statementDraft.from > statementDraft.to) {
+      setStatementError('From date must not be after to date');
+      return;
+    }
+    const next = {...statementDraft};
+    setStatementFilters(next);
+    loadStatement(statementId, next, 1);
+  };
+
+  const clearStatementPeriod = () => {
+    const next = {from: '', to: ''};
+    setStatementDraft(next);
+    setStatementFilters(next);
+    loadStatement(statementId, next, 1);
   };
 
   const showInvoicePays = inv => openInvoicePayments(inv, false);
@@ -1396,59 +1436,128 @@ export default function Purchasing({call, user, token}) {
         </div>
       )}
 
-      <h3>Supplier statement</h3>
-      <p>Invoices increase what we owe. Payments reduce it. Amounts are NPR including 13% VAT.</p>
-      <select className="kds-branch" value={statementId} onChange={e => { setStatementId(e.target.value); loadStatement(e.target.value); }}>
-        <option value="">Choose supplier</option>
-        {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
-      </select>
-      {statement && (
-        <div className="receive-box">
-          <div className="kpis" style={{marginTop: 12}}>
-            <article><small>Invoiced</small><strong>{rs(statement.invoiced)}</strong></article>
-            <article><small>Paid</small><strong>{rs(statement.paid)}</strong></article>
-            <article><small>Balance due</small><strong>{rs(statement.balance)}</strong></article>
+      <section className="supplier-statement-section">
+        <div className="statement-title">
+          <div>
+            <h3>Supplier statement</h3>
+            <p>Auditable invoice, void, payment, and reversal activity in NPR. Invoice amounts include recorded VAT.</p>
           </div>
-          <h3>Statement</h3>
-          {!statement.lines?.length && <p className="empty">No invoices or payments for this supplier.</p>}
-          {!!statement.lines?.length && (
-            <table>
-              <thead><tr><th>Date</th><th>Type</th><th>Ref</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+          <select className="kds-branch" value={statementId} onChange={e => {
+            const id = e.target.value;
+            setStatementId(id);
+            loadStatement(id, statementFilters, 1);
+          }}>
+            <option value="">Choose supplier</option>
+            {suppliers.map(x => <option key={x._id} value={x._id}>{x.name}</option>)}
+          </select>
+        </div>
+
+        <form className="statement-filters" onSubmit={applyStatementPeriod}>
+          <label>From date<input type="date" max={statementDraft.to || todayKathmandu()} value={statementDraft.from} onChange={e => setStatementDraft({...statementDraft, from: e.target.value})}/></label>
+          <label>To / aging date<input type="date" min={statementDraft.from || undefined} max={todayKathmandu()} value={statementDraft.to} onChange={e => setStatementDraft({...statementDraft, to: e.target.value})}/></label>
+          <button type="submit" disabled={!statementId || statementLoading}>{statementLoading ? 'Loading…' : 'Apply period'}</button>
+          <button type="button" className="po-secondary" disabled={!statementId || statementLoading || (!statementFilters.from && !statementFilters.to)} onClick={clearStatementPeriod}>All history</button>
+        </form>
+
+        {statementError && <p className="danger statement-status">{statementError}</p>}
+        {statementLoading && !statement && <p className="empty statement-status">Loading supplier statement…</p>}
+        {!statementId && <p className="empty statement-status">Choose a supplier to review balances, aging, and transaction evidence.</p>}
+        {statement && (
+          <div className="receive-box statement-workspace" aria-busy={statementLoading}>
+            <div className="statement-meta">
+              <div>
+                <p className="eyebrow">{statement.scope === 'restaurant' ? 'All branches' : statement.branch?.name || 'Branch'}</p>
+                <h3>{statement.supplier?.name}</h3>
+              </div>
+              <p>{statement.period?.from || 'Beginning'} → {statement.period?.to} · As of end of day, Asia/Kathmandu</p>
+              {statementLoading && <span className="pill">Refreshing</span>}
+            </div>
+
+            {statement.reconciliation && !statement.reconciliation.balanced && <p className="danger statement-reconciliation">Statement ledger and invoice aging differ by {rs(statement.reconciliation.difference)}. Review payment evidence before settling this supplier.</p>}
+            <div className="statement-summary">
+              <article><small>Opening balance</small><strong>{rs(statement.summary?.openingBalance)}</strong></article>
+              <article><small>Period invoices</small><strong>{rs(statement.summary?.periodInvoiced)}</strong></article>
+              <article><small>Period payments</small><strong>{rs(statement.summary?.periodPayments)}</strong></article>
+              <article><small>Invoice voids</small><strong>{rs(statement.summary?.periodVoids)}</strong></article>
+              <article><small>Payment reversals</small><strong>{rs(statement.summary?.periodReversals)}</strong></article>
+              <article className="statement-closing"><small>Closing balance due</small><strong>{rs(statement.summary?.closingBalance)}</strong></article>
+            </div>
+
+            <div className="statement-subheading">
+              <div><h3>Aging summary</h3><p>{statement.aging?.openInvoiceCount || 0} open invoices · {statement.aging?.overdueInvoiceCount || 0} overdue</p></div>
+              <strong>{rs(statement.aging?.totalDue)} due</strong>
+            </div>
+            <div className="aging-grid">
+              <article><small>Current</small><strong>{rs(statement.aging?.current)}</strong></article>
+              <article><small>1–30 days</small><strong>{rs(statement.aging?.days1To30)}</strong></article>
+              <article><small>31–60 days</small><strong>{rs(statement.aging?.days31To60)}</strong></article>
+              <article><small>61–90 days</small><strong>{rs(statement.aging?.days61To90)}</strong></article>
+              <article><small>Over 90 days</small><strong>{rs(statement.aging?.over90)}</strong></article>
+            </div>
+
+            <div className="statement-subheading"><div><h3>Open invoices</h3><p>Outstanding allocation as of {statement.period?.asOf}.</p></div><strong>{rs(statement.aging?.overdue)} overdue</strong></div>
+            {!statement.openInvoices?.length && <p className="empty">No open invoices at this as-of date.</p>}
+            {statement.evidence?.openInvoiceReturned < statement.evidence?.openInvoiceTotal && <p className="statement-truncated">Showing the {statement.evidence.openInvoiceReturned} oldest open invoices of {statement.evidence.openInvoiceTotal}.</p>}
+            {!!statement.openInvoices?.length && <div className="table-scroll"><table className="statement-open-table">
+              <thead><tr><th>Invoice</th><th>Invoice date</th><th>Due date</th><th>Total</th><th>Paid as of</th><th>Balance</th><th>Age</th></tr></thead>
+              <tbody>{statement.openInvoices.map(invoiceRow => (
+                <tr key={invoiceRow._id}>
+                  <td><strong>{invoiceRow.invoiceNo}</strong><small>{invoiceRow.branch?.name || invoiceRow.branch?.code || ''}</small></td>
+                  <td>{invoiceRow.invoiceDate ? new Date(invoiceRow.invoiceDate).toLocaleDateString('en-NP', {timeZone: 'Asia/Kathmandu'}) : '—'}</td>
+                  <td>{invoiceRow.dueDate ? new Date(invoiceRow.dueDate).toLocaleDateString('en-NP', {timeZone: 'Asia/Kathmandu'}) : 'Not set'}</td>
+                  <td>{rs(invoiceRow.total)}</td>
+                  <td>{rs(invoiceRow.paid)}</td>
+                  <td><strong>{rs(invoiceRow.balance)}</strong></td>
+                  <td><span className={invoiceRow.daysOverdue ? 'pill' : 'pill ok'}>{invoiceRow.daysOverdue ? `${invoiceRow.daysOverdue} days overdue` : 'Current'}</span></td>
+                </tr>
+              ))}</tbody>
+            </table></div>}
+
+            <div className="statement-subheading"><div><h3>Statement ledger</h3><p>Debits increase the supplier balance; credits reduce it.</p></div><span>{statement.linePagination?.total || 0} entries</span></div>
+            {!statement.lines?.length && <p className="empty">No invoice, void, payment, or reversal activity in this period.</p>}
+            {!!statement.lines?.length && <div className="table-scroll"><table className="statement-ledger-table">
+              <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th>Invoice</th><th>Debit</th><th>Credit</th><th>Running balance</th></tr></thead>
               <tbody>
-                {statement.lines.map((line, i) => (
-                  <tr key={i}>
-                    <td>{line.date ? new Date(line.date).toLocaleDateString('en-NP') : ''}</td>
-                    <td>{line.type}</td>
-                    <td>{line.ref}{line.method ? ` · ${line.method}` : ''}</td>
+                {statement.lines.map(line => (
+                  <tr key={line.eventId || `${line.type}-${line.sourceId}-${line.date}`} className={['payment_reversal', 'invoice_void'].includes(line.type) ? 'payment-reversed' : ''}>
+                    <td>{line.date ? new Date(line.date).toLocaleDateString('en-NP', {timeZone: 'Asia/Kathmandu'}) : ''}</td>
+                    <td><span className={line.type === 'payment' ? 'pill ok' : 'pill'}>{String(line.type || '').replaceAll('_', ' ')}</span></td>
+                    <td><strong>{line.ref}</strong>{line.method ? <small>{line.method}{line.reference ? ` · ${line.reference}` : ''}</small> : null}{line.reversalReason ? <small>{line.reversalReason}</small> : null}</td>
+                    <td>{line.invoiceNo || '—'}</td>
                     <td>{line.debit ? rs(line.debit) : '—'}</td>
                     <td>{line.credit ? rs(line.credit) : '—'}</td>
-                    <td>{rs(line.balance)}</td>
+                    <td><strong>{rs(line.balance)}</strong></td>
                   </tr>
                 ))}
               </tbody>
-            </table>
-          )}
-          <h3>Payment history</h3>
-          {!statement.payments?.length && <p className="empty">No supplier payments recorded.</p>}
-          {!!statement.payments?.length && (
-            <table>
-              <thead><tr><th>When</th><th>Payment</th><th>Invoice</th><th>Method</th><th>Amount</th><th>Status / evidence</th></tr></thead>
-              <tbody>
-                {statement.payments.map(p => (
+            </table></div>}
+            {(statement.linePagination?.pages || 1) > 1 && <div className="po-pagination statement-pagination">
+              <button type="button" className="po-secondary" disabled={statementLoading || statement.linePagination.page <= 1} onClick={() => loadStatement(statementId, statementFilters, statement.linePagination.page - 1)}>Previous</button>
+              <span>Page {statement.linePagination.page} of {statement.linePagination.pages}</span>
+              <button type="button" className="po-secondary" disabled={statementLoading || statement.linePagination.page >= statement.linePagination.pages} onClick={() => loadStatement(statementId, statementFilters, statement.linePagination.page + 1)}>Next</button>
+            </div>}
+
+            <details className="statement-payment-evidence">
+              <summary>Payment evidence ({statement.evidence?.paymentTotal ?? statement.payments?.length ?? 0})</summary>
+              {statement.evidence?.paymentReturned < statement.evidence?.paymentTotal && <p className="statement-truncated">Showing the latest {statement.evidence.paymentReturned} payment records of {statement.evidence.paymentTotal}.</p>}
+              {!statement.payments?.length && <p className="empty">No supplier payments recorded by this as-of date.</p>}
+              {!!statement.payments?.length && <div className="table-scroll"><table>
+                <thead><tr><th>When</th><th>Payment</th><th>Invoice</th><th>Method</th><th>Amount</th><th>Status / evidence</th></tr></thead>
+                <tbody>{statement.payments.map(p => (
                   <tr key={p._id} className={p.status === 'reversed' ? 'payment-reversed' : ''}>
                     <td>{new Date(p.paidAt || p.createdAt).toLocaleString('en-NP', {timeZone: 'Asia/Kathmandu'})}</td>
                     <td>{p.paymentNo || 'Legacy payment'}</td>
                     <td>{p.invoice?.invoiceNo || '—'}</td>
                     <td>{p.method}{p.reference ? <small>{p.reference}</small> : null}</td>
                     <td>{rs(p.amount)}</td>
-                    <td><span className={p.status === 'posted' ? 'pill ok' : 'pill'}>{p.status || 'posted'}</span>{p.status === 'reversed' && <small>{p.reversalReason || 'Reversed'}{p.reversedBy?.name ? ` · ${p.reversedBy.name}` : ''}</small>}</td>
+                    <td><span className={p.status === 'posted' ? 'pill ok' : 'pill'}>{p.status || 'posted'}</span>{p.status === 'reversed' && <small>{p.reversalReason || 'Reversed'}{p.reversedBy?.name ? ` · ${p.reversedBy.name}` : ''}</small>}{p.reversalEffectiveAfterAsOf && <small>Reversed after this as-of date</small>}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
+                ))}</tbody>
+              </table></div>}
+            </details>
+          </div>
+        )}
+      </section>
 
       <h3>Purchasing report</h3>
       <p>Live branch totals from purchase orders, receipts, returns, invoices and the inventory ledger.</p>

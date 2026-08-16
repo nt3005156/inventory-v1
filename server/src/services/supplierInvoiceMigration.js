@@ -22,6 +22,14 @@ const INVOICE_INDEXES = [
     options: {name: 'supplier_invoice_restaurant_branch_status_date'}
   },
   {
+    key: {restaurant: 1, supplier: 1, invoiceDate: 1, createdAt: 1, _id: 1},
+    options: {name: 'supplier_invoice_statement_scope_date'}
+  },
+  {
+    key: {restaurant: 1, supplier: 1, branch: 1, invoiceDate: 1, createdAt: 1, _id: 1},
+    options: {name: 'supplier_invoice_statement_branch_date'}
+  },
+  {
     key: {restaurant: 1, purchaseOrder: 1, status: 1},
     options: {name: 'supplier_invoice_restaurant_po_status'}
   }

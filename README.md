@@ -45,5 +45,13 @@ Month-close API:
 - `POST /api/month-close`
 - `POST /api/month-close/:id/reopen`
 
+## Supplier statements
+Owners and managers can review supplier balances through the Purchasing workspace. Statements are tenant scoped; managers are restricted to their assigned branch, while owners may select a branch or review all branches. Period boundaries and aging use `Asia/Kathmandu`, amounts are NPR including recorded invoice VAT, and invoice voids plus payment reversals remain explicit ledger adjustments.
+
+Statement APIs:
+- `GET /api/suppliers/:id/statement?branch=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD&page=1&limit=100`
+- `GET /api/suppliers/:id/balance?branch=<id>&asOf=YYYY-MM-DD`
+- `GET /api/suppliers/:id/payments?branch=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD`
+
 ## Remaining client configuration items
 Actual production needs client menu/import data, VAT invoice numbering rules, POS printer hardware configuration, payment-provider verification endpoints, staff training, and a backup/retention policy before launch.

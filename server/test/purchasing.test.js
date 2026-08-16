@@ -508,7 +508,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     assert.equal(ok.body.status, 'partial');
   });
 
-  it('voids an unpaid invoice and drops it from the statement', async () => {
+  it('voids an unpaid invoice and preserves an explicit zeroing statement adjustment', async () => {
     const inv = await createInvoice({invoiceNo: 'INV-VOID'});
     const voided = await patchInvoice(inv.body._id, {status: 'void'});
     assert.equal(voided.status, 200, voided.body?.message);
@@ -528,7 +528,8 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const stmt = await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(stmt.status, 200);
     assert.equal(stmt.body.invoiced, 0);
-    assert.equal(stmt.body.lines.length, 0);
+    assert.deepEqual(stmt.body.lines.map(line => line.type), ['invoice', 'invoice_void']);
+    assert.deepEqual(stmt.body.lines.map(line => line.balance), [1130, 0]);
   });
 
   it('cannot void an invoice that already has payments', async () => {
