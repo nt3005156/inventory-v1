@@ -24,8 +24,62 @@ supplierSchema.index(
   {unique:true,name:'supplier_restaurant_name',partialFilterExpression:{restaurant:{$type:'objectId'},nameNormalized:{$type:'string'}}}
 );
 export const Supplier=model('Supplier',supplierSchema);
-const ingredientSchema=new Schema({restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},code:String,name:{type:String,required:true},nameNp:String,category:String,unit:{type:String,default:'g'},active:{type:Boolean,default:true},minimumStock:money,reorderQty:money,lastPurchasePrice:money,supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},expiryDate:Date},{timestamps:true,strict:'throw'});
+const ingredientSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},
+  code:{type:String,trim:true,uppercase:true,maxlength:30},
+  name:{type:String,required:true,trim:true,maxlength:120},
+  nameNp:{type:String,trim:true,maxlength:120},
+  category:{type:String,trim:true,maxlength:60,default:'other'},
+  unit:{type:String,trim:true,lowercase:true,maxlength:30,default:'g',required:true},
+  baseUnit:{type:String,trim:true,lowercase:true,maxlength:30},
+  conversions:{type:[{unit:{type:String,trim:true,lowercase:true,maxlength:30,required:true},factor:{type:Number,required:true,min:Number.EPSILON,max:1000000},description:{type:String,trim:true,maxlength:120}}],default:undefined},
+  unitConversions:{type:Map,of:Number,default:undefined},
+  active:{type:Boolean,default:true,index:true},
+  minimumStock:{...money,default:0},
+  reorderQty:{...money,default:0},
+  reorderLevel:{...money,default:0},
+  lastPurchasePrice:{...money,default:0},
+  standardCost:{...money,default:0},
+  supplier:{type:Schema.Types.ObjectId,ref:'Supplier'},
+  primarySupplier:{type:Schema.Types.ObjectId,ref:'Supplier'},
+  supplierCount:{type:Number,default:0,min:0},
+  shelfLifeDays:{type:Number,min:0,max:3650},
+  storage:{type:String,trim:true,maxlength:120},
+  description:{type:String,trim:true,maxlength:500},
+  expiryDate:Date
+},{timestamps:true,strict:'throw',optimisticConcurrency:true});
+ingredientSchema.pre('validate',function(){
+  if(this.code) this.code=String(this.code).trim().toUpperCase().replace(/\s+/g,'');
+  if(this.name) this.name=String(this.name).trim().replace(/\s+/g,' ');
+  if(this.category) this.category=String(this.category).trim().toLowerCase();
+  if(this.unit) this.unit=String(this.unit).trim().toLowerCase();
+  if(this.baseUnit) this.baseUnit=String(this.baseUnit).trim().toLowerCase();
+  else this.baseUnit=this.unit;
+  // normalize conversions
+  if(Array.isArray(this.conversions)){
+    const seen=new Set();
+    this.conversions=this.conversions.filter(c=>{
+      const u=String(c.unit||'').trim().toLowerCase();
+      if(!u || seen.has(u) || u===this.baseUnit) return false;
+      seen.add(u);
+      c.unit=u;
+      c.factor=Number(c.factor);
+      return Number.isFinite(c.factor) && c.factor>0;
+    });
+    if(!this.conversions.length) this.conversions=undefined;
+  }
+  if(this.unitConversions && this.unitConversions instanceof Map){
+    for(const [k,v] of this.unitConversions.entries()){
+      if(!k || Number(v)<=0) this.unitConversions.delete(k);
+    }
+    if(this.unitConversions.size===0) this.unitConversions=undefined;
+  }
+});
 ingredientSchema.index({restaurant:1,code:1},{unique:true,name:'ingredient_restaurant_code',partialFilterExpression:{restaurant:{$type:'objectId'},code:{$type:'string'}}});
+ingredientSchema.index({restaurant:1,name:1},{name:'ingredient_restaurant_name'});
+ingredientSchema.index({restaurant:1,category:1,active:1},{name:'ingredient_restaurant_category'});
+ingredientSchema.index({restaurant:1,unit:1},{name:'ingredient_restaurant_unit'});
+ingredientSchema.index({restaurant:1,primarySupplier:1},{name:'ingredient_restaurant_supplier'});
 export const Ingredient=model('Ingredient',ingredientSchema);
 export const PriceHistory=model('PriceHistory',new Schema({ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},price:money,qty:money,unit:String,effectiveAt:{type:Date,default:Date.now},purchase:{type:Schema.Types.ObjectId,ref:'Purchase'},user:{type:Schema.Types.ObjectId,ref:'User'}}));
 export const MenuItem=model('MenuItem',new Schema({name:{type:String,required:true},nameNp:String,category:String,price:money,vatInclusive:{type:Boolean,default:true},active:{type:Boolean,default:true},recipe:[{ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient'},qty:money,unit:String}]},{timestamps:true}));
