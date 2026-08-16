@@ -22,19 +22,13 @@ function toBaseQty(qty, recipeUnit, ingredient){
   const base = normalizeUnit(ingredient.unit || ingredient.baseUnit || 'g');
   const from = normalizeUnit(recipeUnit);
   if(from === base) return Number(qty);
-  // Try ingredient conversions
   const conv = (ingredient.conversions||[]).find(c=> normalizeUnit(c.unit)===from);
   if(conv) {
-    // conv.factor is multiplier from conversion unit to base: 1 fromUnit = factor baseUnit
-    // But our earlier conversion definition was 1 conversion unit = factor baseUnit
-    // For recipe, qty in fromUnit needs to be converted to base: baseQty = qty * factor
     return Number(qty) * Number(conv.factor);
   }
-  // Try via ingredients service helper
   try{
     return convertQuantity(qty, from, base, ingredient);
   }catch{
-    // fallback: if units are kg<->g etc., use hints
     if((from==='kg' && base==='g') || (from==='g' && base==='kg')){
       return from==='kg' && base==='g' ? Number(qty)*1000 : Number(qty)/1000;
     }
@@ -51,12 +45,10 @@ export async function calculateRecipeCost(recipe, { restaurantId, branchId } = {
   if(!ingredientIds.length) return 0;
   const ingredients = await Ingredient.find({ _id: { $in: ingredientIds } }).lean();
   const ingMap = new Map(ingredients.map(i=>[String(i._id), i]));
-  // Need branch scope for averageCost
   let branchIds = null;
   if(branchId){
     branchIds = [new mongoose.Types.ObjectId(branchId)];
   } else if(restaurantId){
-    // restaurant-wide average across all branches
     const branches = await Branch.find({ restaurant: restaurantId }).distinct('_id');
     branchIds = branches;
   }
@@ -72,7 +64,6 @@ export async function calculateRecipeCost(recipe, { restaurantId, branchId } = {
     cur.fallback = avg;
     costMap.set(key, cur);
   }
-  // If no balances, fallback to ingredient lastPurchasePrice or standardCost or supplier price
   let total = 0;
   for(const line of recipe){
     const ingId = String(line.ingredient?._id || line.ingredient);
@@ -87,10 +78,8 @@ export async function calculateRecipeCost(recipe, { restaurantId, branchId } = {
       unitCost = costInfo.qty>0 ? costInfo.value / costInfo.qty : costInfo.fallback;
     }
     if(unitCost<=1e-9){
-      // fallback to ingredient costs or supplier
       unitCost = Number(ing.lastPurchasePrice || ing.standardCost || 0);
       if(unitCost<=1e-9){
-        // try supplier catalog base price
         const { SupplierIngredient } = await import('../models/supplierCatalog.js');
         const cat = await SupplierIngredient.findOne({ ingredient: ing._id, restaurant: restaurantId, active:true }).sort({ updatedAt:-1 }).lean();
         if(cat) unitCost = Number(cat.baseUnitPrice || cat.currentPrice / (cat.conversionFactor||1) || 0);
@@ -101,16 +90,23 @@ export async function calculateRecipeCost(recipe, { restaurantId, branchId } = {
   return Math.round(total * 100) / 100;
 }
 
+export function calculateFoodCost(recipeCost, packagingCost){
+  return Math.round((Number(recipeCost||0) + Number(packagingCost||0))*100)/100;
+}
+export function calculateGrossMargin(price, foodCost){
+  return Math.round((Number(price||0) - Number(foodCost||0))*100)/100;
+}
+export function calculateFoodCostPercent(foodCost, price){
+  if(!(Number(price)>0)) return 0;
+  return Math.round((Number(foodCost)/Number(price))*10000)/100;
+}
+
 export async function listMenuItems({ user, q, category, active, page=1, limit=50, branchId }){
   const restaurantId = await resolveRestaurant(user);
   const safePage = Math.max(1, Number(page)||1);
   const safeLimit = Math.min(100, Math.max(1, Number(limit)||50));
   const match = {};
-  // restaurant filter: include legacy null plus current restaurant
   match.$or = [{ restaurant: restaurantId }, { restaurant: null }, { restaurant: { $exists:false } }];
-  // Actually we want only current restaurant plus legacy, but for strict we filter by restaurant or null
-  // Simpler: match restaurant or null
-  // Use $or
   if(q){
     const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i');
     match.$and = [{ $or: [{ name: regex }, { code: regex }, { category: regex }] }];
@@ -120,21 +116,25 @@ export async function listMenuItems({ user, q, category, active, page=1, limit=5
     if(!['true','false'].includes(String(active))) throw httpError('Invalid active filter',400);
     match.active = String(active)==='true';
   }
-  // For branch-specific costing, we will compute cost per branch but still list
   const [rows, total] = await Promise.all([
     MenuItem.find(match).sort({ active:-1, name:1 }).skip((safePage-1)*safeLimit).limit(safeLimit).populate('recipe.ingredient','name code unit category baseUnit conversions').lean(),
     MenuItem.countDocuments(match)
   ]);
-  // Enrich with cost (branch-scoped if branchId given)
   const enriched = await Promise.all(rows.map(async r=>{
-    const cost = await calculateRecipeCost(r.recipe, { restaurantId, branchId }).catch(()=>0);
+    const recipeCost = await calculateRecipeCost(r.recipe, { restaurantId, branchId }).catch(()=> Number(r.recipeCost||0));
+    const packagingCost = Number(r.packagingCost||0);
+    const foodCost = calculateFoodCost(recipeCost, packagingCost);
     const price = Number(r.price||0);
     return {
       ...r,
-      recipeCost: cost,
-      foodCostPercent: price>0 ? Math.round((cost/price)*10000)/100 : 0,
-      margin: Math.round((price - cost)*100)/100,
-      ingredientCount: (r.recipe||[]).length
+      recipeCost,
+      packagingCost,
+      foodCost,
+      foodCostPercent: calculateFoodCostPercent(foodCost, price),
+      margin: calculateGrossMargin(price, foodCost),
+      grossMargin: calculateGrossMargin(price, foodCost),
+      ingredientCount: (r.recipe||[]).length,
+      recipeVersion: r.recipeVersion || 1
     };
   }));
   return { items: enriched, pagination: { page: safePage, limit: safeLimit, total, pages: Math.max(1, Math.ceil(total/safeLimit)) } };
@@ -145,12 +145,18 @@ export async function getMenuItem({ menuId, user, branchId }){
   const restaurantId = await resolveRestaurant(user);
   const row = await MenuItem.findOne({ _id: menuId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}] }).populate('recipe.ingredient','name code unit category baseUnit conversions').lean();
   if(!row) throw httpError('Menu item not found',404);
-  const cost = await calculateRecipeCost(row.recipe, { restaurantId, branchId });
+  const recipeCost = await calculateRecipeCost(row.recipe, { restaurantId, branchId });
+  const packagingCost = Number(row.packagingCost||0);
+  const foodCost = calculateFoodCost(recipeCost, packagingCost);
+  const price = Number(row.price||0);
   return {
     ...row,
-    recipeCost: cost,
-    foodCostPercent: row.price>0 ? Math.round((cost/row.price)*10000)/100 : 0,
-    margin: Math.round((Number(row.price||0)-cost)*100)/100,
+    recipeCost,
+    packagingCost,
+    foodCost,
+    foodCostPercent: calculateFoodCostPercent(foodCost, price),
+    margin: calculateGrossMargin(price, foodCost),
+    grossMargin: calculateGrossMargin(price, foodCost),
     recipe: (row.recipe||[]).map(line=>{
       const ing = line.ingredient;
       return {
@@ -160,8 +166,49 @@ export async function getMenuItem({ menuId, user, branchId }){
         ingredientUnit: ing?.unit || line.unit,
         baseUnit: ing?.baseUnit || ing?.unit || line.unit
       };
-    })
+    }),
+    recipeHistory: (row.recipeHistory||[]).map(h=> ({
+      version: h.version,
+      recipe: h.recipe,
+      recipeCost: h.recipeCost,
+      packagingCost: h.packagingCost,
+      foodCost: h.foodCost,
+      updatedAt: h.updatedAt,
+      reason: h.reason
+    }))
   };
+}
+
+export async function getRecipeVersions({ menuId, user }){
+  if(!mongoose.isValidObjectId(menuId)) throw httpError('Invalid menu item',400);
+  const restaurantId = await resolveRestaurant(user);
+  const row = await MenuItem.findOne({ _id: menuId, restaurant: restaurantId }).select('name code recipeVersion recipe recipeCost packagingCost foodCost recipeHistory').lean();
+  if(!row) {
+    const fallback = await MenuItem.findById(menuId).lean();
+    if(!fallback) throw httpError('Menu item not found',404);
+    // allow legacy without restaurant
+  }
+  const current = {
+    version: row.recipeVersion || 1,
+    recipe: row.recipe,
+    recipeCost: row.recipeCost,
+    packagingCost: row.packagingCost || 0,
+    foodCost: row.foodCost || calculateFoodCost(row.recipeCost, row.packagingCost),
+    updatedAt: row.updatedAt,
+    isCurrent: true
+  };
+  const history = (row.recipeHistory||[]).map(h=> ({
+    version: h.version,
+    recipe: h.recipe,
+    recipeCost: h.recipeCost,
+    packagingCost: h.packagingCost,
+    foodCost: h.foodCost,
+    updatedAt: h.updatedAt,
+    updatedBy: h.updatedBy,
+    reason: h.reason,
+    isCurrent: false
+  })).sort((a,b)=> b.version - a.version);
+  return { menuId: row._id, name: row.name, currentVersion: row.recipeVersion||1, current, history, all: [current, ...history].sort((a,b)=> b.version - a.version) };
 }
 
 export async function createMenuItem({ input, user }){
@@ -173,12 +220,10 @@ export async function createMenuItem({ input, user }){
   const code = input.code ? clean(input.code).toUpperCase() : undefined;
   if(code && !/^[A-Z0-9_-]{2,30}$/.test(code)) throw httpError('Code must be 2-30 chars A-Z 0-9 _ -',400);
   const category = input.category ? clean(input.category).toLowerCase() : 'main';
-  if(category && !MENU_CATEGORIES.includes(category) && category!=='main') {
-    // allow any but warn
-  }
   const price = Number(input.price);
   if(!Number.isFinite(price) || price <0) throw httpError('Invalid price',400);
-  // Validate recipe
+  const packagingCost = input.packagingCost!==undefined ? Number(input.packagingCost) : 0;
+  if(!Number.isFinite(packagingCost) || packagingCost<0) throw httpError('Invalid packaging cost',400);
   const recipe = [];
   if(input.recipe){
     if(!Array.isArray(input.recipe)) throw httpError('Recipe must be an array',400);
@@ -196,7 +241,6 @@ export async function createMenuItem({ input, user }){
       if(!Number.isFinite(qty) || qty<=0) throw httpError(`Invalid quantity for ${ing.name}`,400);
       const unit = normalizeUnit(line.unit || ing.unit);
       if(!unit) throw httpError(`Unit required for ${ing.name}`,400);
-      // Validate conversion exists if unit differs
       try{ toBaseQty(qty, unit, ing); }catch(e){ throw httpError(e.message,400); }
       recipe.push({ ingredient: ing._id, qty, unit, notes: clean(line.notes)||undefined });
     }
@@ -215,20 +259,19 @@ export async function createMenuItem({ input, user }){
     yield: yieldVal,
     yieldUnit: clean(input.yieldUnit)||'serving',
     recipe,
+    recipeVersion: 1,
+    recipeHistory: [],
+    packagingCost: Math.round(packagingCost*100)/100,
     description: clean(input.description)||undefined,
     imageUrl: clean(input.imageUrl)||undefined
   };
-  // Calculate cost
-  const cost = await calculateRecipeCost(recipe, { restaurantId });
-  doc.recipeCost = cost;
+  const recipeCost = await calculateRecipeCost(recipe, { restaurantId });
+  doc.recipeCost = recipeCost;
+  doc.foodCost = calculateFoodCost(recipeCost, doc.packagingCost);
   doc.recipeCostUpdatedAt = new Date();
-  // Also set cost per line
   for(const line of doc.recipe){
     const ing = await Ingredient.findById(line.ingredient).lean();
-    const baseQty = toBaseQty(line.qty, line.unit, ing);
-    // need average cost per base unit
-    const lineCost = await calculateRecipeCost([line], { restaurantId });
-    line.cost = lineCost;
+    line.cost = await calculateRecipeCost([line], { restaurantId });
   }
   try{
     const [row] = await MenuItem.create([doc]);
@@ -249,6 +292,11 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
   if(!row) throw httpError('Menu item not found',404);
   if(expectedVersion!==undefined && Number(expectedVersion)!==row.__v) throw httpError('Menu item changed since loaded; refresh',409);
   const before = row.toObject();
+  const beforeRecipe = JSON.stringify(row.recipe);
+  const beforePackaging = Number(row.packagingCost||0);
+  let recipeChanged = false;
+  let packagingChanged = false;
+
   if(patch.name!==undefined){
     const n=clean(patch.name);
     if(!n || n.length<2) throw httpError('Invalid name',400);
@@ -276,6 +324,12 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
   if(patch.yieldUnit!==undefined) row.yieldUnit=clean(patch.yieldUnit);
   if(patch.description!==undefined) row.description=clean(patch.description)||undefined;
   if(patch.imageUrl!==undefined) row.imageUrl=clean(patch.imageUrl)||undefined;
+  if(patch.packagingCost!==undefined){
+    const pc = Number(patch.packagingCost);
+    if(!Number.isFinite(pc) || pc<0) throw httpError('Invalid packaging cost',400);
+    if(Math.abs(pc - Number(row.packagingCost||0))>1e-9) packagingChanged = true;
+    row.packagingCost = Math.round(pc*100)/100;
+  }
   if(patch.recipe!==undefined){
     if(!Array.isArray(patch.recipe)) throw httpError('Recipe must be array',400);
     if(patch.recipe.length>50) throw httpError('Too many recipe lines',400);
@@ -294,19 +348,43 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
       try{ toBaseQty(qty, unit, ing); }catch(e){ throw httpError(e.message,400); }
       newRecipe.push({ ingredient: ing._id, qty, unit, notes: clean(line.notes)||undefined });
     }
+    // detect change
+    if(JSON.stringify(newRecipe.map(r=>({ingredient:String(r.ingredient),qty:r.qty,unit:r.unit}))) !== JSON.stringify((row.recipe||[]).map(r=>({ingredient:String(r.ingredient?._id||r.ingredient),qty:r.qty,unit:r.unit})))){
+      recipeChanged = true;
+    }
     row.recipe=newRecipe;
   }
-  // Recalculate costs if recipe changed
-  if(patch.recipe!==undefined){
+  // Handle versioning if recipe or packaging changed
+  if(recipeChanged || packagingChanged){
+    const prevVersion = Number(row.recipeVersion||1);
+    // push current state to history before recalc
+    const histEntry = {
+      version: prevVersion,
+      recipe: before.recipe || [],
+      recipeCost: Number(before.recipeCost||0),
+      packagingCost: Number(before.packagingCost||0),
+      foodCost: Number(before.foodCost|| calculateFoodCost(before.recipeCost, before.packagingCost)),
+      updatedAt: before.updatedAt || before.createdAt || new Date(),
+      updatedBy: before.updatedBy || null,
+      reason: clean(patch.reason) || (recipeChanged ? 'Recipe updated' : 'Packaging updated')
+    };
+    // ensure history array exists
+    if(!Array.isArray(row.recipeHistory)) row.recipeHistory = [];
+    row.recipeHistory.push(histEntry);
+    row.recipeVersion = prevVersion + 1;
+    // keep only last 20 versions
+    if(row.recipeHistory.length>20) row.recipeHistory = row.recipeHistory.slice(-20);
+  }
+  // Recalculate costs if recipe or packaging changed
+  if(recipeChanged || packagingChanged){
     const cost = await calculateRecipeCost(row.recipe, { restaurantId });
     row.recipeCost=cost;
+    row.foodCost = calculateFoodCost(cost, row.packagingCost);
     row.recipeCostUpdatedAt=new Date();
     for(const line of row.recipe){
       const ing=await Ingredient.findById(line.ingredient).lean();
       line.cost = await calculateRecipeCost([line], { restaurantId });
     }
-  } else if(patch.price!==undefined){
-    // price change doesn't need cost recalc, but we could keep
   }
   try{
     await row.save();
@@ -324,8 +402,32 @@ export async function deleteMenuItem({ menuId, user }){
   const restaurantId = await resolveRestaurant(user);
   const row = await MenuItem.findOne({ _id: menuId, restaurant: restaurantId });
   if(!row) throw httpError('Menu item not found',404);
-  // Soft delete via active false if has orders? For now allow deactivate only
   throw httpError('Menu items with order history cannot be deleted; deactivate instead',409);
+}
+
+export async function getFoodCosting({ menuId, user, branchId }){
+  const item = await getMenuItem({ menuId, user, branchId });
+  const ingredientCost = Number(item.recipeCost||0);
+  const packagingCost = Number(item.packagingCost||0);
+  const foodCost = calculateFoodCost(ingredientCost, packagingCost);
+  const price = Number(item.price||0);
+  const grossMargin = calculateGrossMargin(price, foodCost);
+  return {
+    menuId: item._id,
+    name: item.name,
+    recipeVersion: item.recipeVersion || 1,
+    ingredientCost,
+    recipeCost: ingredientCost,
+    packagingCost,
+    foodCost,
+    sellingPrice: price,
+    grossMargin,
+    foodCostPercent: calculateFoodCostPercent(foodCost, price),
+    yield: item.yield,
+    yieldUnit: item.yieldUnit,
+    recipe: item.recipe,
+    branchId: branchId || null
+  };
 }
 
 export async function ensureRecipeIndexes(){

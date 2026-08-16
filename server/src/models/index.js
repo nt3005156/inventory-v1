@@ -101,7 +101,26 @@ export const MenuItem=model('MenuItem',new Schema({
     cost:{...money,default:0},
     notes:{type:String,trim:true,maxlength:200}
   }],validate:{validator: function(v){ return !v || v.length<=50; }, message:'Recipe cannot have more than 50 ingredients'}},
+  recipeVersion:{type:Number,default:1,min:1},
+  recipeHistory:{type:[{
+    version:{type:Number,required:true,min:1},
+    recipe:{type:[{
+      ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient',required:true},
+      qty:{type:Number,required:true,min:Number.EPSILON},
+      unit:{type:String,required:true},
+      cost:{type:Number,default:0},
+      notes:String
+    }],required:true},
+    recipeCost:{type:Number,default:0},
+    packagingCost:{type:Number,default:0},
+    foodCost:{type:Number,default:0},
+    updatedAt:{type:Date,default:Date.now},
+    updatedBy:{type:Schema.Types.ObjectId,ref:'User'},
+    reason:{type:String,trim:true,maxlength:500}
+  }],default:[]},
   recipeCost:{...money,default:0},
+  packagingCost:{...money,default:0},
+  foodCost:{...money,default:0},
   recipeCostUpdatedAt:Date,
   description:{type:String,trim:true,maxlength:500},
   imageUrl:{type:String,trim:true,maxlength:500}

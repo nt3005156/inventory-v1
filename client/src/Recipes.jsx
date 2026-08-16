@@ -18,7 +18,7 @@ export default function Recipes({call}){
   const [pagination, setPagination] = useState({page:1, pages:1, total:0});
   const [editing, setEditing] = useState(null);
   const [editVersion, setEditVersion] = useState(0);
-  const [form, setForm] = useState({name:'', code:'', category:'main', price:'', yield:1, yieldUnit:'serving', recipe:[], description:'', active:true});
+  const [form, setForm] = useState({name:'', code:'', category:'main', price:'', packagingCost:0, yield:1, yieldUnit:'serving', recipe:[], description:'', active:true});
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState('');
   const [branchId, setBranchId] = useState('');
@@ -57,6 +57,7 @@ export default function Recipes({call}){
       code: row.code||'',
       category: row.category||'main',
       price: row.price||'',
+      packagingCost: row.packagingCost||0,
       yield: row.yield||1,
       yieldUnit: row.yieldUnit||'serving',
       recipe: (row.recipe||[]).map(r=>({ingredient: r.ingredient?._id || r.ingredient, qty: r.qty, unit: r.unit || 'g', notes: r.notes||''})),
@@ -68,7 +69,7 @@ export default function Recipes({call}){
   };
   const resetForm = ()=>{
     setEditing(null); setEditVersion(0);
-    setForm({name:'', code:'', category:'main', price:'', yield:1, yieldUnit:'serving', recipe:[], description:'', active:true});
+    setForm({name:'', code:'', category:'main', price:'', packagingCost:0, yield:1, yieldUnit:'serving', recipe:[], description:'', active:true});
   };
   const submit = async(e)=>{
     e.preventDefault();
@@ -79,6 +80,7 @@ export default function Recipes({call}){
         code: form.code || undefined,
         category: form.category,
         price: Number(form.price),
+        packagingCost: Number(form.packagingCost)||0,
         yield: Number(form.yield)||1,
         yieldUnit: form.yieldUnit,
         recipe: form.recipe.map(r=>({ingredient: r.ingredient, qty: Number(r.qty), unit: r.unit, notes: r.notes})),
@@ -147,6 +149,7 @@ export default function Recipes({call}){
           <label>Code<input value={form.code} onChange={e=>setForm({...form, code:e.target.value})} placeholder="CB01" maxLength={30}/></label>
           <label>Category<select value={form.category} onChange={e=>setForm({...form, category:e.target.value})}>{['main','appetizer','side','dessert','beverage','set','other'].map(c=> <option key={c} value={c}>{c}</option>)}</select></label>
           <label>Price (NPR)<input required type="number" step="0.01" value={form.price} onChange={e=>setForm({...form, price:e.target.value})}/></label>
+          <label>Packaging cost (NPR)<input type="number" step="0.01" value={form.packagingCost} onChange={e=>setForm({...form, packagingCost:e.target.value})} placeholder="0.00"/></label>
           <label>Yield<input type="number" step="any" value={form.yield} onChange={e=>setForm({...form, yield:e.target.value})}/></label>
           <label>Yield unit<input value={form.yieldUnit} onChange={e=>setForm({...form, yieldUnit:e.target.value})} placeholder="serving"/></label>
           <label style={{gridColumn:'1 / -1'}}>Description<input value={form.description} onChange={e=>setForm({...form, description:e.target.value})} placeholder="Recipe notes"/></label>
@@ -185,7 +188,7 @@ export default function Recipes({call}){
       {loading ? <p>Loading recipes…</p> : !rows.length ? <p className="empty">No menu items. Create the first recipe above.</p> :
         <div className="table-scroll">
           <table>
-            <thead><tr><th>Code / Name</th><th>Category</th><th>Price</th><th>Recipe Cost</th><th>Margin</th><th>Food %</th><th>Ingredients</th><th>Yield</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Code / Name</th><th>Category</th><th>Price</th><th>Recipe Cost</th><th>Packaging</th><th>Food Cost</th><th>Margin</th><th>Food %</th><th>Ingredients</th><th>Yield</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
               {rows.map(r=>(
                 <tr key={r._id} style={{opacity: r.active===false?0.6:1}}>
@@ -193,6 +196,8 @@ export default function Recipes({call}){
                   <td><span className="pill">{r.category}</span></td>
                   <td>{rs(r.price)}</td>
                   <td>{rs(r.recipeCost||0)}<br/><small>{r.ingredientCount|| (r.recipe||[]).length} items</small></td>
+                  <td>{rs(r.packagingCost||0)}</td>
+                  <td><b>{rs(r.foodCost||0)}</b><br/><small>{rs(r.recipeCost||0)}+{rs(r.packagingCost||0)}</small></td>
                   <td style={{color: (r.margin||0)>=100 ? '#15803d' : '#b45309'}}>{rs(r.margin||0)}</td>
                   <td>{(r.foodCostPercent||0).toFixed(1)}%</td>
                   <td>{(r.recipe||[]).map(line=> <small key={line.ingredient?._id||line.ingredient} style={{display:'block'}}>{line.ingredientName||line.ingredient?.name||'Ingredient'} — {qtyLabel(line.qty, line.unit)}</small>)}</td>
@@ -217,9 +222,13 @@ export default function Recipes({call}){
             <div className="title"><div><h2>{detail.name} — {detail.code}</h2><p>{detail.category} • {detail.yield} {detail.yieldUnit} • {detail.active?'Active':'Inactive'}</p></div><button onClick={()=>setDetail(null)}><X size={18}/></button></div>
             <div style={{display:'flex', gap:'12px', flexWrap:'wrap', marginTop:'10px'}}>
               <span style={{background:'#f0fdf4', padding:'8px', borderRadius:'6px'}}><small>Price</small><br/><strong>{rs(detail.price)}</strong></span>
-              <span style={{background:'#eff6ff', padding:'8px', borderRadius:'6px'}}><small>Recipe cost</small><br/><strong>{rs(detail.recipeCost)}</strong> <small>{detail.foodCostPercent}% food</small></span>
-              <span style={{background: (detail.margin||0)>=100 ? '#f0fdf4' : '#fffbeb', padding:'8px', borderRadius:'6px'}}><small>Margin</small><br/><strong>{rs(detail.margin)}</strong></span>
+              <span style={{background:'#eff6ff', padding:'8px', borderRadius:'6px'}}><small>Recipe cost</small><br/><strong>{rs(detail.recipeCost)}</strong></span>
+              <span style={{background:'#fefce8', padding:'8px', borderRadius:'6px'}}><small>Packaging</small><br/><strong>{rs(detail.packagingCost||0)}</strong></span>
+              <span style={{background:'#faf5ff', padding:'8px', borderRadius:'6px'}}><small>Food Cost</small><br/><strong>{rs(detail.foodCost||0)}</strong> <small>{detail.foodCostPercent}%</small></span>
+              <span style={{background: (detail.margin||0)>=100 ? '#f0fdf4' : '#fffbeb', padding:'8px', borderRadius:'6px'}}><small>Gross Margin</small><br/><strong>{rs(detail.margin)}</strong> <small>{detail.price?`Price - Food`:`-`}</small></span>
+              <span style={{background:'#e0f2fe', padding:'8px', borderRadius:'6px'}}><small>Version</small><br/><strong>V{detail.recipeVersion||1}</strong> <small>{(detail.recipeHistory||[]).length} history</small></span>
             </div>
+            {(detail.recipeHistory||[]).length>0 && <div style={{marginTop:'10px', background:'#f8fafc', padding:'8px', borderRadius:'6px', border:'1px solid #e2e8f0'}}><b>Recipe Versions</b><div style={{maxHeight:'120px', overflow:'auto', marginTop:'6px'}}>{detail.recipeHistory.slice().reverse().map(h=> <div key={h.version} style={{display:'flex', justifyContent:'space-between', fontSize:'12px', borderBottom:'1px dotted #cbd5e1', padding:'4px 0'}}><span>V{h.version} — {rs(h.recipeCost)}+{rs(h.packagingCost)}={rs(h.foodCost)} {h.reason||''}</span><span>{h.updatedAt? new Date(h.updatedAt).toLocaleDateString('en-NP'):''}</span></div>)}</div><small>Burger V1 → V2 preserved; old orders keep V1 cost</small></div>}
             <div style={{marginTop:'12px'}}>
               <b>Recipe — Ingredients → Quantity → Cost</b>
               <div style={{marginTop:'6px', display:'grid', gap:'6px'}}>

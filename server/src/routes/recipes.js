@@ -2,7 +2,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import { z } from 'zod';
 import { auth } from '../middleware/auth.js';
-import { listMenuItems, getMenuItem, createMenuItem, updateMenuItem } from '../services/recipes.js';
+import { listMenuItems, getMenuItem, createMenuItem, updateMenuItem, getRecipeVersions, getFoodCosting } from '../services/recipes.js';
 
 const r = Router();
 const fail = (res,e)=> res.status(e.status||400).json({message:e.message||'Failed'});
@@ -27,6 +27,7 @@ const createSchema = z.object({
   yield: z.number().positive().max(1000).optional(),
   yieldUnit: z.string().max(30).optional(),
   recipe: z.array(recipeLine).max(50).optional(),
+  packagingCost: z.number().min(0).max(100000).optional(),
   description: z.string().max(500).optional(),
   imageUrl: z.string().max(500).optional()
 }).strict();
@@ -44,8 +45,10 @@ const updateSchema = z.object({
   yield: z.number().positive().max(1000).optional(),
   yieldUnit: z.string().max(30).optional(),
   recipe: z.array(recipeLine).max(50).optional(),
+  packagingCost: z.number().min(0).max(100000).optional(),
   description: z.string().max(500).optional().nullable(),
-  imageUrl: z.string().max(500).optional().nullable()
+  imageUrl: z.string().max(500).optional().nullable(),
+  reason: z.string().max(500).optional()
 }).strict();
 
 r.get('/menu-items', auth(['owner','manager','staff']), async(req,res)=>{
@@ -89,10 +92,22 @@ r.delete('/menu-items/:id', auth(['owner']), async(req,res)=>{
   res.status(409).json({message:'Menu items with order history cannot be deleted; deactivate instead'});
 });
 
+r.get('/menu-items/:id/versions', auth(['owner','manager','staff']), async(req,res)=>{
+  try{
+    res.json(await getRecipeVersions({menuId:req.params.id, user:req.user}));
+  }catch(e){ fail(res,e); }
+});
+
+r.get('/menu-items/:id/food-costing', auth(['owner','manager','staff']), async(req,res)=>{
+  try{
+    res.json(await getFoodCosting({menuId:req.params.id, user:req.user, branchId:req.query.branch}));
+  }catch(e){ fail(res,e); }
+});
+
 r.get('/menu-items/:id/cost', auth(['owner','manager','staff']), async(req,res)=>{
   try{
-    const data = await getMenuItem({menuId:req.params.id, user:req.user, branchId:req.query.branch});
-    res.json({ recipeCost: data.recipeCost, price: data.price, margin: data.margin, foodCostPercent: data.foodCostPercent, recipe: data.recipe });
+    const data = await getFoodCosting({menuId:req.params.id, user:req.user, branchId:req.query.branch});
+    res.json({ recipeCost: data.recipeCost, packagingCost: data.packagingCost, foodCost: data.foodCost, price: data.sellingPrice, margin: data.grossMargin, foodCostPercent: data.foodCostPercent, recipe: data.recipe, recipeVersion: data.recipeVersion });
   }catch(e){ fail(res,e); }
 });
 
