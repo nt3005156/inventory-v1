@@ -1,0 +1,249 @@
+import mongoose from 'mongoose';
+import {Coupon, CouponRedemption} from '../models/index.js';
+import {money} from './billing.js';
+
+// Phase 4C — Discounts & Promotions.
+export const DISCOUNT_KINDS = Object.freeze(['percentage', 'fixed']);
+export const DISCOUNT_SCOPES = Object.freeze(['item', 'order']);
+// Manual discounts are audited rather than capped; coupons carry their own rules.
+export const DISCOUNT_SOURCES = Object.freeze(['manual', 'coupon']);
+
+function httpError(message, status = 400) {
+  return Object.assign(new Error(message), {status});
+}
+
+const clean = value => String(value ?? '').trim();
+export const normalizeCode = value => clean(value).toUpperCase();
+
+/**
+ * Resolves a percentage or fixed discount against a base amount.
+ *
+ * Percentages are bounded to 0–100 and applied to the base; fixed amounts are
+ * taken as NPR off. Either way the result is clamped to the base so a discount
+ * can never exceed what is being discounted or turn a line negative.
+ */
+export function computeDiscountAmount({kind, value, base, maxDiscount = null}) {
+  const amount = Number(value);
+  const target = money(base || 0);
+  if (!DISCOUNT_KINDS.includes(kind)) throw httpError(`Discount kind must be one of ${DISCOUNT_KINDS.join(', ')}`, 400);
+  if (!Number.isFinite(amount) || amount < 0) throw httpError('Discount value must be a non-negative number', 400);
+  if (target < 0) throw httpError('Discount base must be a non-negative amount', 400);
+
+  let discount;
+  if (kind === 'percentage') {
+    if (amount > 100) throw httpError('Percentage discount cannot exceed 100%', 400);
+    discount = money(target * amount / 100);
+  } else {
+    discount = money(amount);
+  }
+  if (maxDiscount !== null && maxDiscount !== undefined && Number(maxDiscount) >= 0) {
+    discount = money(Math.min(discount, Number(maxDiscount)));
+  }
+  // Never discount more than the base being discounted.
+  return money(Math.min(discount, target));
+}
+
+/**
+ * Applies per-item discounts to priced lines.
+ *
+ * An item discount reduces that line's net directly, so it must be resolved
+ * before order-level maths: the order discount and any coupon then work from
+ * the already-reduced subtotal rather than the list price.
+ */
+export function applyItemDiscounts({lines, itemDiscounts = []}) {
+  if (!Array.isArray(itemDiscounts) || !itemDiscounts.length) {
+    return {lines: lines.map(line => ({...line, discount: 0, discountedNet: line.lineNet})), itemDiscountTotal: 0};
+  }
+  const byIndex = new Map();
+  for (const entry of itemDiscounts) {
+    const index = Number(entry.index);
+    if (!Number.isInteger(index) || index < 0 || index >= lines.length) {
+      throw httpError('Item discount refers to a line that is not on the order', 400);
+    }
+    if (byIndex.has(index)) throw httpError('Only one discount may be applied per line', 400);
+    byIndex.set(index, entry);
+  }
+
+  let itemDiscountTotal = 0;
+  const priced = lines.map((line, index) => {
+    const entry = byIndex.get(index);
+    if (!entry) return {...line, discount: 0, discountedNet: line.lineNet};
+    if (entry.kind === 'fixed' && money(entry.value) > money(line.lineNet)) {
+      throw httpError('Item discount cannot exceed the line total', 400);
+    }
+    const discount = computeDiscountAmount({kind: entry.kind, value: entry.value, base: line.lineNet});
+    itemDiscountTotal = money(itemDiscountTotal + discount);
+    return {
+      ...line,
+      discount,
+      discountKind: entry.kind,
+      discountValue: Number(entry.value),
+      discountReason: clean(entry.reason) || undefined,
+      discountedNet: money(line.lineNet - discount)
+    };
+  });
+  return {lines: priced, itemDiscountTotal};
+}
+
+function isWithinWindow(coupon, now) {
+  if (coupon.startsAt && now < new Date(coupon.startsAt)) return 'not_started';
+  if (coupon.endsAt && now > new Date(coupon.endsAt)) return 'expired';
+  return null;
+}
+
+/**
+ * Validates a coupon against the order in hand and returns the discount it
+ * would grant. Every rule the coupon carries is enforced here: active flag,
+ * validity window, branch/order-type/menu-item scope, minimum spend, and both
+ * the global and per-customer usage limits.
+ *
+ * `eligibleNet` is the portion of the order the coupon may discount — the whole
+ * order, or just the matching lines when the coupon is scoped to menu items.
+ */
+export async function validateCoupon({
+  code, restaurantId, branchId, orderType, customerId, lines = [], subtotal,
+  now = new Date(), session, excludeOrderId = null
+}) {
+  const normalized = normalizeCode(code);
+  if (!normalized) throw httpError('Coupon code is required', 400);
+
+  const coupon = await Coupon.findOne({restaurant: restaurantId, code: normalized}).session(session || null);
+  if (!coupon) throw httpError(`Coupon ${normalized} was not found`, 404);
+  if (!coupon.active) throw httpError(`Coupon ${normalized} is not active`, 409);
+
+  const window = isWithinWindow(coupon, now);
+  if (window === 'not_started') throw httpError(`Coupon ${normalized} is not valid yet`, 409);
+  if (window === 'expired') throw httpError(`Coupon ${normalized} has expired`, 409);
+
+  if (coupon.branches?.length && branchId && !coupon.branches.some(b => String(b) === String(branchId))) {
+    throw httpError(`Coupon ${normalized} is not valid at this branch`, 409);
+  }
+  if (coupon.orderTypes?.length && orderType && !coupon.orderTypes.includes(orderType)) {
+    throw httpError(`Coupon ${normalized} is not valid for ${orderType} orders`, 409);
+  }
+
+  // Menu-item scoping narrows the discountable base to the matching lines.
+  let eligibleNet = money(subtotal);
+  if (coupon.menuItems?.length) {
+    const scoped = lines.filter(line => coupon.menuItems.some(id => String(id) === String(line.menuItem)));
+    if (!scoped.length) throw httpError(`Coupon ${normalized} does not apply to any item on this order`, 409);
+    eligibleNet = money(scoped.reduce((sum, line) => sum + Number(line.discountedNet ?? line.lineNet ?? 0), 0));
+  }
+
+  if (Number(coupon.minOrderAmount || 0) > 0 && money(subtotal) < money(coupon.minOrderAmount)) {
+    throw httpError(`Coupon ${normalized} needs a minimum order of ${money(coupon.minOrderAmount)}`, 409);
+  }
+
+  if (Number(coupon.usageLimit || 0) > 0) {
+    const used = await CouponRedemption.countDocuments({
+      coupon: coupon._id,
+      ...(excludeOrderId ? {order: {$ne: excludeOrderId}} : {})
+    }).session(session || null);
+    if (used >= Number(coupon.usageLimit)) throw httpError(`Coupon ${normalized} has reached its usage limit`, 409);
+  }
+
+  if (Number(coupon.perCustomerLimit || 0) > 0) {
+    if (!customerId) throw httpError(`Coupon ${normalized} requires an identified customer`, 409);
+    const usedByCustomer = await CouponRedemption.countDocuments({
+      coupon: coupon._id,
+      customer: customerId,
+      ...(excludeOrderId ? {order: {$ne: excludeOrderId}} : {})
+    }).session(session || null);
+    if (usedByCustomer >= Number(coupon.perCustomerLimit)) {
+      throw httpError(`Coupon ${normalized} has already been used by this customer`, 409);
+    }
+  }
+
+  const amount = computeDiscountAmount({
+    kind: coupon.kind,
+    value: coupon.value,
+    base: eligibleNet,
+    maxDiscount: coupon.maxDiscount
+  });
+  if (!(amount > 0)) throw httpError(`Coupon ${normalized} would not discount this order`, 409);
+
+  return {coupon, code: normalized, amount, eligibleNet};
+}
+
+/**
+ * Combines the manual order discount with a coupon.
+ *
+ * Both are applied to the item-discounted subtotal and the sum is clamped so
+ * the order can never go below zero.
+ */
+export function resolveOrderDiscount({subtotalAfterItems, manual, couponAmount = 0}) {
+  const base = money(subtotalAfterItems);
+  let manualAmount = 0;
+  if (manual && (manual.value !== undefined && manual.value !== null && manual.value !== '')) {
+    // A keyed-in amount above the order is almost always a mistake (a mistyped
+    // 1000 for 100), so it is rejected rather than silently clamped. A coupon's
+    // value is set by management, so that one is clamped instead.
+    if (manual.kind === 'fixed' && money(manual.value) > base) {
+      throw httpError('Discount cannot exceed the order subtotal', 400);
+    }
+    manualAmount = computeDiscountAmount({kind: manual.kind, value: manual.value, base});
+  }
+  const total = money(Math.min(money(manualAmount + money(couponAmount)), base));
+  return {manualAmount, couponAmount: money(couponAmount), orderDiscountTotal: total};
+}
+
+/** Records a redemption so usage limits hold across orders. */
+export async function recordRedemption({coupon, order, restaurantId, branchId, customerId, amount, user, session}) {
+  const [row] = await CouponRedemption.create([{
+    coupon: coupon._id,
+    restaurant: restaurantId,
+    branch: branchId || null,
+    order: order._id,
+    customer: customerId || null,
+    code: coupon.code,
+    amount: money(amount),
+    redeemedBy: user?.id || user?._id || null
+  }], {session});
+  await Coupon.updateOne({_id: coupon._id}, {$inc: {timesRedeemed: 1}}, {session});
+  return row;
+}
+
+/** Validates and normalizes a coupon definition before it is stored. */
+export function normalizeCouponInput(input = {}) {
+  const code = normalizeCode(input.code);
+  if (!code) throw httpError('Coupon code is required', 400);
+  if (!/^[A-Z0-9][A-Z0-9_-]{1,39}$/.test(code)) {
+    throw httpError('Coupon code may use letters, numbers, hyphen and underscore', 400);
+  }
+  if (!DISCOUNT_KINDS.includes(input.kind)) throw httpError(`Coupon kind must be one of ${DISCOUNT_KINDS.join(', ')}`, 400);
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= 0) throw httpError('Coupon value must be greater than zero', 400);
+  if (input.kind === 'percentage' && value > 100) throw httpError('Percentage coupon cannot exceed 100%', 400);
+
+  const startsAt = input.startsAt ? new Date(input.startsAt) : null;
+  const endsAt = input.endsAt ? new Date(input.endsAt) : null;
+  if (startsAt && Number.isNaN(startsAt.getTime())) throw httpError('Invalid coupon start date', 400);
+  if (endsAt && Number.isNaN(endsAt.getTime())) throw httpError('Invalid coupon end date', 400);
+  if (startsAt && endsAt && startsAt > endsAt) throw httpError('Coupon start date must be before its end date', 400);
+
+  for (const [label, raw] of [['usage limit', input.usageLimit], ['per-customer limit', input.perCustomerLimit]]) {
+    if (raw !== undefined && raw !== null && (!Number.isInteger(Number(raw)) || Number(raw) < 0)) {
+      throw httpError(`Coupon ${label} must be a non-negative whole number`, 400);
+    }
+  }
+  for (const id of [...(input.branches || []), ...(input.menuItems || [])]) {
+    if (!mongoose.isValidObjectId(id)) throw httpError('Coupon scope contains an invalid id', 400);
+  }
+
+  return {
+    code,
+    description: clean(input.description) || undefined,
+    kind: input.kind,
+    value: money(value),
+    maxDiscount: input.maxDiscount === undefined || input.maxDiscount === null ? null : money(input.maxDiscount),
+    minOrderAmount: money(input.minOrderAmount || 0),
+    startsAt,
+    endsAt,
+    usageLimit: Number(input.usageLimit || 0),
+    perCustomerLimit: Number(input.perCustomerLimit || 0),
+    branches: input.branches || [],
+    menuItems: input.menuItems || [],
+    orderTypes: input.orderTypes || [],
+    active: input.active !== false
+  };
+}

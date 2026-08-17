@@ -190,5 +190,45 @@ const monthlySnapshotSchema=new Schema({
 },{timestamps:true,autoIndex:false});
 monthlySnapshotSchema.index({restaurant:1,scopeKey:1,month:1,revision:1},{unique:true,name:'monthly_snapshot_restaurant_revision'});
 monthlySnapshotSchema.index({restaurant:1,scopeKey:1,month:1,status:1},{name:'monthly_snapshot_restaurant_status'});
+// Phase 4C — Discounts & Promotions.
+const couponSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',required:true,index:true},
+  code:{type:String,required:true,trim:true,uppercase:true,maxlength:40},
+  description:{type:String,trim:true,maxlength:300},
+  kind:{type:String,enum:['percentage','fixed'],required:true},
+  // Percentage 0<v<=100; fixed is an NPR amount off the eligible net.
+  value:{type:Number,required:true,min:0},
+  maxDiscount:{type:Number,min:0,default:null},
+  minOrderAmount:{type:Number,min:0,default:0},
+  startsAt:{type:Date,default:null},
+  endsAt:{type:Date,default:null},
+  usageLimit:{type:Number,min:0,default:0},
+  perCustomerLimit:{type:Number,min:0,default:0},
+  timesRedeemed:{type:Number,default:0,min:0},
+  branches:[{type:Schema.Types.ObjectId,ref:'Branch'}],
+  menuItems:[{type:Schema.Types.ObjectId,ref:'MenuItem'}],
+  orderTypes:[{type:String}],
+  active:{type:Boolean,default:true,index:true},
+  createdBy:{type:Schema.Types.ObjectId,ref:'User'},
+  updatedBy:{type:Schema.Types.ObjectId,ref:'User'}
+},{timestamps:true});
+couponSchema.index({restaurant:1,code:1},{unique:true,name:'coupon_restaurant_code'});
+export const Coupon=model('Coupon',couponSchema);
+
+const couponRedemptionSchema=new Schema({
+  coupon:{type:Schema.Types.ObjectId,ref:'Coupon',required:true,index:true},
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',required:true,index:true},
+  branch:{type:Schema.Types.ObjectId,ref:'Branch'},
+  order:{type:Schema.Types.ObjectId,ref:'Order',required:true},
+  customer:{type:Schema.Types.ObjectId,ref:'Customer',default:null},
+  code:{type:String,required:true,uppercase:true},
+  amount:{type:Number,required:true,min:0},
+  redeemedBy:{type:Schema.Types.ObjectId,ref:'User'}
+},{timestamps:true});
+// One redemption row per order guarantees usage counts cannot double-count.
+couponRedemptionSchema.index({coupon:1,order:1},{unique:true,name:'coupon_redemption_order'});
+couponRedemptionSchema.index({coupon:1,customer:1},{name:'coupon_redemption_customer'});
+export const CouponRedemption=model('CouponRedemption',couponRedemptionSchema);
+
 export const MonthlySnapshot=model('MonthlySnapshot',monthlySnapshotSchema);
 export const Audit=model('Audit',auditSchema);

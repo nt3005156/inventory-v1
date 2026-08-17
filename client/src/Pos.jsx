@@ -17,6 +17,9 @@ export default function POS({menu = [], branches = [], user, call}) {
   const [tableId, setTableId] = useState('');
   const [tables, setTables] = useState([]);
   const [posError, setPosError] = useState('');
+  const [orderDiscount, setOrderDiscount] = useState({kind: 'percentage', value: '', reason: ''});
+  const [couponCode, setCouponCode] = useState('');
+  const [couponInfo, setCouponInfo] = useState(null);
 
   useEffect(() => {
     if (locked && assigned && branchId !== assigned) setBranchId(assigned);
@@ -104,10 +107,26 @@ export default function POS({menu = [], branches = [], user, call}) {
   const itemVat = round(cart.reduce((s, x) => s + (x.vatInclusive
     ? x.price * x.qty - (x.price * x.qty) / (1 + VAT_RATE / 100)
     : x.price * x.qty * VAT_RATE / 100), 0));
-  const serviceCharge = type === 'dine-in' ? round(net * 0.1) : 0;
+  const itemDiscountTotal = round(cart.reduce((s, x) => {
+    if (!x.discount || !Number(x.discount.value)) return s;
+    const lineNet = x.vatInclusive ? (x.price * x.qty) / (1 + VAT_RATE / 100) : x.price * x.qty;
+    return s + (x.discount.kind === 'percentage'
+      ? lineNet * Number(x.discount.value) / 100
+      : Math.min(Number(x.discount.value), lineNet));
+  }, 0));
+  const netAfterItems = round(net - itemDiscountTotal);
+  const manualDiscount = Number(orderDiscount.value) > 0
+    ? round(orderDiscount.kind === 'percentage'
+      ? netAfterItems * Number(orderDiscount.value) / 100
+      : Math.min(Number(orderDiscount.value), netAfterItems))
+    : 0;
+  const couponDiscount = couponInfo?.valid ? round(Math.min(couponInfo.amount, netAfterItems - manualDiscount)) : 0;
+  const discountTotal = round(Math.min(manualDiscount + couponDiscount, netAfterItems));
+  const discountedNet = round(netAfterItems - discountTotal);
+  const serviceCharge = type === 'dine-in' ? round(discountedNet * 0.1) : 0;
   const fee = type === 'delivery' ? round(Number(deliveryFee) || 0) : 0;
-  const vat = round(itemVat + serviceCharge * VAT_RATE / 100);
-  const total = round(net + serviceCharge + vat + fee);
+  const vat = round(Math.max(0, discountedNet * VAT_RATE / 100 + serviceCharge * VAT_RATE / 100));
+  const total = round(discountedNet + serviceCharge + vat + fee);
   const ready = cart.length && branchId
     && (type !== 'dine-in' || tableId)
     && (type !== 'delivery' || (customerId && address.trim()));
@@ -223,6 +242,26 @@ export default function POS({menu = [], branches = [], user, call}) {
               {' '}{x.qty}{' '}
               <button onClick={() => bump(x, 1)}>+</button>
               {' · '}{rs(x.price * x.qty)}
+              <input
+                className="line-discount"
+                type="number"
+                min="0"
+                placeholder="Disc."
+                value={x.discount?.value || ''}
+                onChange={e => setCart(c => c.map(y => y.sig === x.sig
+                  ? {...y, discount: {kind: y.discount?.kind || 'percentage', value: e.target.value}}
+                  : y))}
+              />
+              <select
+                className="line-discount-kind"
+                value={x.discount?.kind || 'percentage'}
+                onChange={e => setCart(c => c.map(y => y.sig === x.sig
+                  ? {...y, discount: {kind: e.target.value, value: y.discount?.value || ''}}
+                  : y))}
+              >
+                <option value="percentage">%</option>
+                <option value="fixed">Rs.</option>
+              </select>
             </span>
           </div>
         )) : <p className="empty">Add menu items to begin.</p>}
@@ -265,7 +304,62 @@ export default function POS({menu = [], branches = [], user, call}) {
           <option>Khalti</option>
           <option>card</option>
         </select>
+        <div className="discount-box">
+          <label>Order discount</label>
+          <div className="discount-row">
+            <input
+              type="number"
+              min="0"
+              placeholder="0"
+              value={orderDiscount.value}
+              onChange={e => setOrderDiscount(d => ({...d, value: e.target.value}))}
+            />
+            <select value={orderDiscount.kind} onChange={e => setOrderDiscount(d => ({...d, kind: e.target.value}))}>
+              <option value="percentage">%</option>
+              <option value="fixed">Rs.</option>
+            </select>
+            <input
+              placeholder="Reason (optional)"
+              value={orderDiscount.reason}
+              onChange={e => setOrderDiscount(d => ({...d, reason: e.target.value}))}
+            />
+          </div>
+          <label>Coupon</label>
+          <div className="discount-row">
+            <input
+              placeholder="Code"
+              value={couponCode}
+              onChange={e => { setCouponCode(e.target.value); setCouponInfo(null); }}
+            />
+            <button
+              className="receive"
+              disabled={!couponCode.trim() || !netAfterItems}
+              onClick={async () => {
+                setPosError('');
+                try {
+                  const info = await call('/coupons/validate', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      code: couponCode.trim(),
+                      subtotal: netAfterItems,
+                      branch: branchId || undefined,
+                      orderType: type
+                    })
+                  });
+                  setCouponInfo({...info, code: info.code});
+                } catch (e) {
+                  setCouponInfo(null);
+                  setPosError(e.message || 'Coupon could not be applied');
+                }
+              }}
+            >Apply</button>
+          </div>
+          {couponInfo?.valid && <p className="coupon-ok">{couponInfo.code} applied · −{rs(couponDiscount)}</p>}
+        </div>
         <div className="metric"><span>Subtotal (net)</span><b>{rs(net)}</b></div>
+        {itemDiscountTotal > 0 && <div className="metric"><span>Item discounts</span><b>−{rs(itemDiscountTotal)}</b></div>}
+        {manualDiscount > 0 && <div className="metric"><span>Order discount</span><b>−{rs(manualDiscount)}</b></div>}
+        {couponDiscount > 0 && <div className="metric"><span>Coupon {couponInfo?.code}</span><b>−{rs(couponDiscount)}</b></div>}
         {serviceCharge > 0 && <div className="metric"><span>Service charge 10%</span><b>{rs(serviceCharge)}</b></div>}
         <div className="metric"><span>VAT {VAT_RATE}%</span><b>{rs(vat)}</b></div>
         {fee > 0 && <div className="metric"><span>Delivery fee</span><b>{rs(fee)}</b></div>}
@@ -287,13 +381,20 @@ export default function POS({menu = [], branches = [], user, call}) {
                     menuItem: x._id,
                     qty: x.qty,
                     modifiers: x.modifiers?.length ? x.modifiers : undefined,
-                    specialInstructions: x.specialInstructions || undefined
+                    specialInstructions: x.specialInstructions || undefined,
+                    discount: x.discount && Number(x.discount.value) > 0
+                      ? {kind: x.discount.kind, value: Number(x.discount.value)}
+                      : undefined
                   })),
                   type,
                   table: type === 'dine-in' ? tableId : undefined,
                   customer: type === 'delivery' ? customerId : undefined,
                   deliveryAddress: type === 'delivery' ? address.trim() : undefined,
                   deliveryFee: type === 'delivery' && Number(deliveryFee) > 0 ? Number(deliveryFee) : undefined,
+                  discount: Number(orderDiscount.value) > 0
+                    ? {kind: orderDiscount.kind, value: Number(orderDiscount.value), reason: orderDiscount.reason || undefined}
+                    : undefined,
+                  coupon: couponInfo?.valid ? couponInfo.code : undefined,
                   vatRate: VAT_RATE
                 })
               });
@@ -303,6 +404,9 @@ export default function POS({menu = [], branches = [], user, call}) {
               });
               setCart([]);
               setTableId('');
+              setOrderDiscount({kind: 'percentage', value: '', reason: ''});
+              setCouponCode('');
+              setCouponInfo(null);
               setCustomerId('');
               setAddress('');
               setDeliveryFee('');

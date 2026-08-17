@@ -22,16 +22,28 @@ export function money(n) {
 // the dine-in service charge is recomputed from its stored rate.
 export function recountOrder(order) {
   const vatRate = Number(order.vatRate ?? 13);
-  const lines = (order.items || []).map(item => priceLine({
-    unitPrice: item.unitPrice,
-    qty: item.qty,
-    vatInclusive: item.vatInclusive === true,
-    vatRate
-  }));
+  const lines = (order.items || []).map(item => {
+    const line = priceLine({
+      unitPrice: item.unitPrice,
+      qty: item.qty,
+      vatInclusive: item.vatInclusive === true,
+      vatRate
+    });
+    // Phase 4C: a line's own discount survives splits and re-counts. It is
+    // rescaled with the quantity so half a discounted line carries half the
+    // discount rather than the whole of it.
+    const stored = Number(item.discount || 0);
+    if (stored <= 0) return {...line, discount: 0, discountedNet: line.lineNet};
+    const discount = item.discountKind === 'percentage'
+      ? money(line.lineNet * Number(item.discountValue || 0) / 100)
+      : money(Math.min(stored, line.lineNet));
+    return {...line, discount, discountedNet: money(line.lineNet - discount)};
+  });
   (order.items || []).forEach((item, i) => {
     item.lineNet = lines[i].lineNet;
     item.lineVat = lines[i].lineVat;
     item.lineTotal = lines[i].lineGross;
+    if (Number(item.discount || 0) > 0) item.discount = lines[i].discount;
   });
   const totals = computeOrderTotals({
     lines,
@@ -41,6 +53,8 @@ export function recountOrder(order) {
     vatRate
   });
   order.subtotal = totals.subtotal;
+  order.itemDiscount = totals.itemDiscount;
+  order.discountTotal = totals.discountTotal;
   order.vat = totals.vat;
   order.serviceCharge = totals.serviceCharge;
   order.total = totals.total;
@@ -131,6 +145,10 @@ export async function splitOrder({orderId, items, user, session}) {
         qty: take,
         unitPrice: line.unitPrice,
         vatInclusive: line.vatInclusive === true,
+        discount: line.discount,
+        discountKind: line.discountKind,
+        discountValue: line.discountValue,
+        discountReason: line.discountReason,
         foodCost: line.foodCost,
         notes: line.notes,
         basePrice: line.basePrice,

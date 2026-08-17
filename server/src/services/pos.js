@@ -1,4 +1,5 @@
 import {money} from './billing.js';
+import {applyItemDiscounts} from './discounts.js';
 
 // Phase 4A — POS Core.
 // The four service channels the POS sells through.
@@ -132,12 +133,21 @@ export function computeOrderTotals({lines, discount = 0, serviceChargeRate = 0, 
   if (!Number.isFinite(rate) || rate < 0 || rate > 100) throw httpError('VAT rate must be between 0 and 100', 400);
 
   const subtotal = money(lines.reduce((sum, line) => sum + line.lineNet, 0));
-  const itemVat = money(lines.reduce((sum, line) => sum + line.lineVat, 0));
+  // Item-level discounts (Phase 4C) reduce their line before order maths run.
+  const itemDiscount = money(lines.reduce((sum, line) => sum + Number(line.discount || 0), 0));
+  const netAfterItems = money(subtotal - itemDiscount);
+  const itemVat = money(lines.reduce((sum, line) => {
+    const lineNet = Number(line.lineNet || 0);
+    if (lineNet <= 0) return sum + Number(line.lineVat || 0);
+    // VAT follows the discounted portion of the line.
+    const share = Number(line.discountedNet ?? lineNet) / lineNet;
+    return sum + Number(line.lineVat || 0) * share;
+  }, 0));
   const discountAmount = money(discount || 0);
   if (discountAmount < 0) throw httpError('Discount must be a non-negative amount', 400);
-  if (discountAmount > subtotal) throw httpError('Discount cannot exceed the order subtotal', 400);
+  if (discountAmount > netAfterItems) throw httpError('Discount cannot exceed the order subtotal', 400);
 
-  const discountedNet = money(subtotal - discountAmount);
+  const discountedNet = money(netAfterItems - discountAmount);
   const serviceCharge = money(discountedNet * Number(serviceChargeRate || 0) / 100);
   // Discounting removes tax with it; the service charge adds tax of its own.
   const discountVat = money(discountAmount * rate / 100);
@@ -148,7 +158,10 @@ export function computeOrderTotals({lines, discount = 0, serviceChargeRate = 0, 
 
   return {
     subtotal,
+    itemDiscount,
+    netAfterItems,
     discount: discountAmount,
+    discountTotal: money(itemDiscount + discountAmount),
     serviceChargeRate: Number(serviceChargeRate || 0),
     serviceCharge,
     vatRate: rate,
@@ -163,16 +176,17 @@ export function computeOrderTotals({lines, discount = 0, serviceChargeRate = 0, 
 /**
  * Full POS pricing pass: validate the channel, price every line, total it up.
  */
-export function priceOrder({type, table, customer, deliveryAddress, items, discount, serviceChargeRate, deliveryFee, vatRate = DEFAULT_VAT_RATE}) {
+export function priceOrder({type, table, customer, deliveryAddress, items, discount, itemDiscounts, serviceChargeRate, deliveryFee, vatRate = DEFAULT_VAT_RATE}) {
   const orderType = assertTypeRules({type, table, customer, deliveryAddress});
   if (!Array.isArray(items) || !items.length) throw httpError('An order needs at least one item', 400);
 
-  const lines = items.map(item => priceLine({
+  const rawLines = items.map(item => priceLine({
     unitPrice: item.unitPrice,
     qty: item.qty,
     vatInclusive: item.vatInclusive,
     vatRate
   }));
+  const {lines} = applyItemDiscounts({lines: rawLines, itemDiscounts});
   const totals = computeOrderTotals({
     lines,
     discount,

@@ -90,6 +90,32 @@ POST /api/orders
 }
 ```
 
+## Discounts & promotions (Phase 4C)
+
+Discounts apply at two levels, each as a **percentage** or a **fixed** NPR amount:
+
+| Level | Field | Applied to |
+|---|---|---|
+| Item | `items[].discount` | That line's net, before order maths |
+| Order | `discount` | The subtotal after item discounts |
+| Coupon | `coupon` | The same post-item base; stacks with a manual discount |
+
+VAT always follows the discounted base, so reducing a line reduces its tax with it. The
+dine-in service charge is calculated after discounts. A mistyped **manual** amount above the
+order is rejected outright, while a management-set **coupon** worth more than the order simply
+clamps to it — a keying error should fail loudly, a generous promotion should not.
+
+**Coupons** (`/api/coupons`) support percentage or fixed value, `maxDiscount` cap,
+`minOrderAmount`, a validity window, total and per-customer usage limits, and scoping to
+branches, order types, or specific menu items. `POST /api/coupons/validate` previews a code
+without consuming it. Redemptions are recorded per order, so usage limits hold and a failed
+order leaves no redemption behind.
+
+**Authorization.** Any staff member may apply a manual discount; every discount is written to
+the audit log with the amount, reason, and who applied it. Creating and editing coupons is
+owner/manager only, and retiring one is owner-only — coupons are deactivated rather than
+deleted so redemption history survives.
+
 ## Test dates
 
 The API validates against the real Asia/Kathmandu clock: statement and report windows may not end
