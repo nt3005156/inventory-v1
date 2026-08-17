@@ -47,7 +47,11 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
       {$match: orderMatch},
       {$group: {
         _id: null,
-        revenue: {$sum: '$total'},
+        // Phase 4D: a partial refund leaves the order 'completed', so refunded
+        // money must be netted out of revenue explicitly or it stays counted.
+        revenue: {$sum: {$subtract: ['$total', {$ifNull: ['$refundAmount', 0]}]}},
+        grossRevenue: {$sum: '$total'},
+        refunds: {$sum: {$ifNull: ['$refundAmount', 0]}},
         orders: {$sum: 1},
         discounts: {$sum: '$discount'},
         vat: {$sum: '$vat'},
@@ -69,8 +73,10 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     InventoryTransaction.find(wasteMatch)
   ]);
 
-  const raw = salesAgg[0] || {revenue: 0, orders: 0, discounts: 0, vat: 0, cogs: 0};
+  const raw = salesAgg[0] || {revenue: 0, grossRevenue: 0, refunds: 0, orders: 0, discounts: 0, vat: 0, cogs: 0};
   const revenue = money(raw.revenue);
+  const grossRevenue = money(raw.grossRevenue);
+  const refunds = money(raw.refunds);
   const cogs = money(raw.cogs);
   const vat = money(raw.vat);
   const discounts = money(raw.discounts);
@@ -89,6 +95,8 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     from: from || null,
     to: to || null,
     revenue,
+    grossRevenue,
+    refunds,
     cogs,
     grossProfit,
     purchases,
@@ -98,6 +106,8 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     sales: {
       orders: raw.orders || 0,
       revenue,
+      grossRevenue,
+      refunds,
       vat,
       discounts,
       cogs,

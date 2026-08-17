@@ -116,6 +116,29 @@ the audit log with the amount, reason, and who applied it. Creating and editing 
 owner/manager only, and retiring one is owner-only — coupons are deactivated rather than
 deleted so redemption history survives.
 
+## Payments (Phase 4D)
+
+Tickets settle through `POST /api/orders/:id/payments` in **cash**, **card**, **eSewa** or
+**khalti** (plus `wallet`/`online`). eSewa and Khalti are recorded as tenders with an optional
+`transactionId`; no gateway call is made from the API.
+
+- **Multiple payments** — a ticket accepts as many tenders as needed; the order stays open until
+  the balance clears, then closes as `completed` and releases its table.
+- **Partial payment** — any amount up to the balance due. Overpaying is rejected.
+- **Split payment** — pay only selected item quantities (`items: [{itemId, qty}]`), or split the
+  check onto a second ticket with `POST /api/orders/:id/split` and settle each independently.
+- `GET /api/orders/:id/payment-summary` reports what was taken, by tender, and what is refundable.
+
+**Refunds** (`POST /api/orders/:id/refunds`, owner/manager only) reverse money that was actually
+taken. Each refund is written as its own negative `Payment` row linked to the tender it reverses
+via `refundOf`, so the ledger stays append-only and money goes back the way it came — refunds
+allocate against the newest tender first. Omitting `amount` refunds whatever is left.
+
+A partial refund leaves the order `completed` with a running `refundAmount` so the till still
+sees what was settled; the order only becomes `refunded` once every rupee is returned, and a
+partially refunded ticket can be topped up again. Refunded money is netted out of P&L revenue
+(`revenue`, with `grossRevenue` and `refunds` reported alongside).
+
 ## Test dates
 
 The API validates against the real Asia/Kathmandu clock: statement and report windows may not end

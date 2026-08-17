@@ -14,6 +14,8 @@ export default function POS({menu = [], branches = [], user, call}) {
   const [address, setAddress] = useState('');
   const [deliveryFee, setDeliveryFee] = useState('');
   const [payment, setPayment] = useState('cash');
+  const [tenders, setTenders] = useState([]);
+  const [tenderAmount, setTenderAmount] = useState('');
   const [tableId, setTableId] = useState('');
   const [tables, setTables] = useState([]);
   const [posError, setPosError] = useState('');
@@ -127,6 +129,8 @@ export default function POS({menu = [], branches = [], user, call}) {
   const fee = type === 'delivery' ? round(Number(deliveryFee) || 0) : 0;
   const vat = round(Math.max(0, discountedNet * VAT_RATE / 100 + serviceCharge * VAT_RATE / 100));
   const total = round(discountedNet + serviceCharge + vat + fee);
+  const tenderedTotal = round(tenders.reduce((s, t) => s + Number(t.amount || 0), 0));
+  const tenderRemaining = round(Math.max(0, total - tenderedTotal));
   const ready = cart.length && branchId
     && (type !== 'dine-in' || tableId)
     && (type !== 'delivery' || (customerId && address.trim()));
@@ -298,12 +302,51 @@ export default function POS({menu = [], branches = [], user, call}) {
             <input type="number" min="0" step="10" placeholder="Delivery fee (Rs.)" value={deliveryFee} onChange={e => setDeliveryFee(e.target.value)} />
           </>
         )}
-        <select value={payment} onChange={e => setPayment(e.target.value)}>
-          <option>cash</option>
-          <option>eSewa</option>
-          <option>Khalti</option>
-          <option>card</option>
-        </select>
+        <div className="tender-box">
+          <label>Payment</label>
+          <div className="discount-row">
+            <select value={payment} onChange={e => setPayment(e.target.value)}>
+              <option value="cash">Cash</option>
+              <option value="card">Card</option>
+              <option value="esewa">eSewa</option>
+              <option value="khalti">Khalti</option>
+            </select>
+            <input
+              type="number"
+              min="0"
+              step="10"
+              placeholder={`Part amount (max ${rs(tenderRemaining)})`}
+              value={tenderAmount}
+              onChange={e => setTenderAmount(e.target.value)}
+            />
+            <button
+              className="receive"
+              disabled={!(Number(tenderAmount) > 0) || Number(tenderAmount) > tenderRemaining + 0.001}
+              onClick={() => {
+                setTenders(t => [...t, {method: payment, amount: round(Number(tenderAmount))}]);
+                setTenderAmount('');
+              }}
+            >Add</button>
+          </div>
+          {!!tenders.length && (
+            <ul className="tender-list">
+              {tenders.map((t, i) => (
+                <li key={i}>
+                  <span>{t.method}</span>
+                  <b>{rs(t.amount)}</b>
+                  <button onClick={() => setTenders(list => list.filter((_, j) => j !== i))}>×</button>
+                </li>
+              ))}
+              <li className="tender-remaining">
+                <span>{tenderRemaining > 0 ? 'Remaining' : 'Fully tendered'}</span>
+                <b>{rs(tenderRemaining)}</b>
+              </li>
+            </ul>
+          )}
+          <p className="tender-hint">
+            Leave blank to settle the whole bill with {payment}. Add parts to split across tenders.
+          </p>
+        </div>
         <div className="discount-box">
           <label>Order discount</label>
           <div className="discount-row">
@@ -398,12 +441,20 @@ export default function POS({menu = [], branches = [], user, call}) {
                   vatRate: VAT_RATE
                 })
               });
-              await call(`/orders/${order._id}/payments`, {
-                method: 'POST',
-                body: JSON.stringify({amount: order.total, method: payment === 'eSewa' ? 'esewa' : payment.toLowerCase()})
-              });
+              // No explicit parts means one tender for the whole bill.
+              const parts = tenders.length
+                ? [...tenders, ...(tenderRemaining > 0 ? [{method: payment, amount: tenderRemaining}] : [])]
+                : [{method: payment, amount: order.total}];
+              for (const part of parts) {
+                await call(`/orders/${order._id}/payments`, {
+                  method: 'POST',
+                  body: JSON.stringify({amount: part.amount, method: part.method})
+                });
+              }
               setCart([]);
               setTableId('');
+              setTenders([]);
+              setTenderAmount('');
               setOrderDiscount({kind: 'percentage', value: '', reason: ''});
               setCouponCode('');
               setCouponInfo(null);

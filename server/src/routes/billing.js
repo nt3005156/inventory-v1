@@ -5,6 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder} from '../services/billing.js';
+import {refundOrder, summarisePayments} from '../services/refunds.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
 const r = Router();
@@ -17,6 +18,11 @@ const paySchema = z.object({
   transactionId: z.string().optional(),
   items: z.array(z.object({itemId: z.string(), qty: z.number().positive()})).optional()
 }).refine(x => x.amount || (x.items && x.items.length), {message: 'Payment amount or items are required'});
+
+const refundSchema = z.object({
+  amount: z.number().positive().optional(),
+  reason: z.string().trim().max(300).optional()
+}).strict();
 
 const splitSchema = z.object({
   items: z.array(z.object({itemId: z.string(), qty: z.number().positive()})).min(1)
@@ -68,6 +74,45 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
     fail(res, e);
   } finally {
     session.endSession();
+  }
+});
+
+// Refunds move money out of the till, so they are a supervisor action.
+r.post('/orders/:id/refunds', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const body = refundSchema.parse(req.body);
+    let result;
+    await session.withTransaction(async () => {
+      result = await refundOrder({
+        orderId: req.params.id,
+        amount: body.amount,
+        reason: body.reason,
+        user: req.user,
+        session
+      });
+    });
+    await publishKitchenOrder(result.order, 'kitchen:status');
+    if (result.order?.table) {
+      publishTableEvent(result.order.branch, {reason: 'refund', tableIds: [String(result.order.table)]});
+    }
+    res.status(201).json(result);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+r.get('/orders/:id/payment-summary', auth(roles), async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({message: 'Order not found'});
+    assertBranchAccess(req.user, order.branch);
+    const payments = await Payment.find({order: order._id}).sort({createdAt: 1});
+    res.json(summarisePayments(order, payments));
+  } catch (e) {
+    fail(res, e);
   }
 });
 
