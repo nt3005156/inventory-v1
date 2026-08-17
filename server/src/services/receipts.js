@@ -16,6 +16,27 @@ function httpError(message, status = 400) {
   return Object.assign(new Error(message), {status});
 }
 
+/**
+ * Tax registration required before a numbered tax invoice may be issued.
+ *
+ * A Nepal tax invoice must carry the seller's PAN. Rather than fabricate or
+ * silently omit it, issuing is refused so the invoice sequence is never spent
+ * on a document that is not legally valid. A branch PAN overrides the
+ * restaurant's when set.
+ */
+export function resolveSellerPan(restaurant, branch) {
+  return clean(branch?.pan) || clean(restaurant?.pan) || null;
+}
+
+export function assertTaxConfig(restaurant, branch) {
+  if (!resolveSellerPan(restaurant, branch)) {
+    throw httpError(
+      'Cannot issue a tax invoice: the restaurant PAN/VAT number is not configured. Set Restaurant.pan (or Branch.pan) first.',
+      409
+    );
+  }
+}
+
 /** Kathmandu-local timestamp for the printed document. */
 export function kathmanduStamp(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-GB', {
@@ -108,6 +129,7 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
 
   return {
     document: order.invoiceNo ? 'tax_invoice' : 'receipt',
+    taxConfigured: Boolean(resolveSellerPan(restaurant, branch)),
     invoiceNo: order.invoiceNo || null,
     orderNo: order.orderNo,
     issuedAt: order.invoicedAt || order.updatedAt || order.createdAt,
@@ -119,7 +141,7 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
     timezone: 'Asia/Kathmandu',
     seller: {
       name: restaurant?.name || 'Restaurant',
-      pan: restaurant?.pan || null,
+      pan: resolveSellerPan(restaurant, branch),
       branch: branch?.name || null,
       branchCode: branch?.code || null,
       address: branch?.address || restaurant?.address || null,
@@ -179,6 +201,9 @@ export async function getReceipt({orderId, user, issue = false, session}) {
   // A tax invoice number is only allocated for a real sale, and only once.
   if (issue) {
     if (['cancelled'].includes(order.status)) throw httpError('A cancelled order cannot be invoiced', 409);
+    // Checked before the counter is touched, so a misconfigured tenant cannot
+    // burn invoice numbers on documents that are not valid tax invoices.
+    assertTaxConfig(restaurant, branch);
     if (!order.invoiceNo) {
       order.invoiceNo = await nextInvoiceNumber({
         restaurantId: branch.restaurant,

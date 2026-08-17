@@ -159,8 +159,13 @@ on the order. Reprints reuse that number and are stamped `REPRINT (n)`. A cancel
 be invoiced.
 
 Every figure is read from the stored order, never recalculated, so a reprint months later shows
-exactly what the guest was charged even after menu prices or VAT settings change. Set
-`Restaurant.pan` and `Restaurant.receiptFooter` to print your VAT registration and a footer line.
+exactly what the guest was charged even after menu prices or VAT settings change.
+
+**Tax registration is required to issue.** A Nepal tax invoice must carry the seller's PAN, so
+issuing is refused with HTTP 409 when neither `Branch.pan` nor `Restaurant.pan` is set — the PAN
+is never fabricated or silently omitted, and the invoice sequence is not spent on a document that
+would be invalid. A read-only preview still works and reports `taxConfigured: false` so the till
+can warn before printing. A branch PAN overrides the restaurant's.
 
 ## Test dates
 

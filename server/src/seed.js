@@ -14,7 +14,10 @@ await Promise.all([
 ]);
 
 const business = await Restaurant.create({
-  name: 'Mittho Biryani House', currency: 'NPR', vatRate: 13, address: 'Kathmandu, Nepal'
+  name: 'Mittho Biryani House', currency: 'NPR', vatRate: 13, address: 'Kathmandu, Nepal',
+  // Demo PAN so seeded data can issue tax invoices. Replace with the real
+  // registration before issuing invoices to guests.
+  pan: '301234567', receiptFooter: 'Thank you for dining with us'
 });
 const [ktm, lalitpur, bhaktapur] = await Branch.create([
   {restaurant: business._id, name: 'Kathmandu Branch', code: 'KTM', address: 'Kalanki, Kathmandu'},
