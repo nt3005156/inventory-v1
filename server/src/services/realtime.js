@@ -121,10 +121,53 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
   return io;
 }
 
+/**
+ * Re-checks every socket currently in a branch room against the stored user
+ * assignment, evicting any whose access has since been revoked.
+ *
+ * Room membership is decided at join time, but a JWT outlives a reassignment:
+ * a cook moved to another branch keeps a live socket in the old room and would
+ * otherwise keep receiving that branch's tickets until they reconnect. This
+ * closes that window at the moment of delivery.
+ */
+export async function evictStaleBranchSockets(branchId) {
+  if (!io || !branchId) return 0;
+  const id = String(branchId);
+  let evicted = 0;
+  let sockets = [];
+  try {
+    sockets = await io.in(branchRoom(id)).fetchSockets();
+  } catch {
+    return 0;
+  }
+  for (const socket of sockets) {
+    try {
+      await purchaseBranchContext({user: socket.user, branchId: id, allowInactive: true});
+    } catch {
+      socket.leave(branchRoom(id));
+      socket.leave(purchasingManagementRoom(id));
+      if (socket.data) {
+        socket.data.branchId = null;
+        socket.data.role = null;
+      }
+      socket.emit('branch:revoked', {branch: id, reason: 'Branch access revoked'});
+      evicted += 1;
+    }
+  }
+  return evicted;
+}
+
 export function emitKitchenEvent(branchId, event, payload) {
   if (!io || !branchId) return false;
   io.to(branchRoom(branchId)).emit(event, payload);
   return true;
+}
+
+/** Emits only after revalidating the room, for branch-sensitive kitchen data. */
+export async function emitKitchenEventChecked(branchId, event, payload) {
+  if (!io || !branchId) return false;
+  await evictStaleBranchSockets(branchId);
+  return emitKitchenEvent(branchId, event, payload);
 }
 
 export function publishTableEvent(branchId, extra = {}) {
@@ -169,7 +212,7 @@ export async function publishKitchenOrder(order, event, extra = {}) {
     if (!order?._id) return;
     const full = await Order.findById(order._id).populate('table', 'name area seats status').populate('customer', 'name phone');
     if (!full) return;
-    emitKitchenEvent(full.branch, event, {order: full.toJSON(), ...extra});
+    await emitKitchenEventChecked(full.branch, event, {order: full.toJSON(), ...extra});
   } catch (error) {
     console.error('kitchen realtime publish failed', error.message);
   }

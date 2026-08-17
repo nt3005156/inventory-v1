@@ -151,6 +151,28 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## KDS realtime (Phase 5B)
+
+Socket.IO delivers kitchen tickets to branch-scoped rooms named `branch:<id>`.
+
+| Event | Emitted when |
+|---|---|
+| `kitchen:new-order` | An order is placed, or a bill split creates a second ticket |
+| `kitchen:status` | Any stage transition, a rush flag, or payment settlement (carries `previousStatus`) |
+| `branch:revoked` | The socket's branch access was withdrawn mid-session |
+
+**No unauthorized branch access.** The handshake verifies the JWT, rejects roles outside
+owner/manager/staff, and tenant-checks any branch named in `auth.branch`. `join:branch` re-resolves
+the *stored* user assignment on every room change, so a valid but stale token cannot open a room,
+and joining a new branch leaves the previous one. A branch belonging to another restaurant is
+refused with 403.
+
+Room membership is also re-verified **at emit time**: a JWT outlives a reassignment, so a cook
+moved to another branch would otherwise keep receiving the old branch's tickets on their open
+socket until they reconnected. Before each kitchen event the room is revalidated against stored
+assignments, any socket whose access was revoked is evicted and told via `branch:revoked`, and
+unaffected sockets are untouched.
+
 ## Payments (Phase 4D)
 
 Tickets settle through `POST /api/orders/:id/payments` in **cash**, **card**, **eSewa** or

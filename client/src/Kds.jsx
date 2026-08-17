@@ -170,6 +170,13 @@ export default function Kds({call, branches = [], user, token}) {
     socket.on('connect_error', () => setLive('reconnecting'));
     socket.on('kitchen:new-order', applyNew);
     socket.on('kitchen:status', applyStatus);
+    // The server evicts sockets whose branch assignment was revoked mid-session.
+    socket.on('branch:revoked', payload => {
+      if (String(payload?.branch) !== String(branchId)) return;
+      setOrders([]);
+      setError('Your access to this branch was changed. Sign in again to continue.');
+      setLive('offline');
+    });
 
     return () => {
       socket.off('kitchen:new-order', applyNew);
