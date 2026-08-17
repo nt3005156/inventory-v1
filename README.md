@@ -166,6 +166,29 @@ performed, derived from the stage timestamps the KDS writes rather than re-infer
 
 Query with `from`/`to`, `station`, `limit` (slowest/delayed list size) and `includeCancelled`.
 
+**Counting semantics.** `summary.orders` counts each order **exactly once** (a partition).
+`stations[].orders` counts an order **once per station it touches** (an attribution, not a
+partition), so a Burger/Fries/Drink ticket appears on the grill, fry and beverage rows and the
+station counts intentionally sum to more than `summary.orders`. `stations[].items` sums the item
+quantities for that station only.
+
+**Completion timestamps.** `completedAt` is stamped on every path that can complete an order —
+the kitchen status route, payment settlement, both sides of a split, and delivery hand-off — and
+is written exactly once, so a repeat request never moves the original instant.
+
+Orders completed before this stamping existed may have `completedAt` null. A controlled,
+idempotent migration recovers them from the audit log, which records the exact completion
+instant:
+
+```bash
+node scripts/backfill-completed-at.js          # dry run
+node scripts/backfill-completed-at.js --apply  # write
+```
+
+It never overwrites a valid `completedAt`, and where the audit log holds no evidence the value is
+**left null rather than invented** — such tickets still count as completed but contribute no
+service time.
+
 A ticket's target is the slowest item on it, else the channel default (delivery 10m,
 counter/takeaway 12m, dine-in 15m). **Open tickets are judged against the clock**, so a stalled
 ticket counts as delayed now rather than only once someone closes it. Cancelled tickets are
