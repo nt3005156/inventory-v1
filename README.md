@@ -151,6 +151,31 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Table operations (Phase 6B)
+
+| Operation | Endpoint | Notes |
+|---|---|---|
+| Move / transfer | `POST /api/tables/:id/move` | Re-tables an open check; refuses across branches |
+| Merge | `POST /api/tables/:id/merge` | Combines two checks onto one table |
+| Split | `POST /api/orders/:id/split` | Splits selected item quantities onto a second check |
+| **Reopen** | `POST /api/orders/:id/reopen` | Restores a settled check (owner/manager) |
+| **History** | `GET /api/tables/:id/history` | Table audit trail plus the checks seated there |
+
+**Reopen** exists for the guest who returns and the payment keyed against the wrong ticket.
+It returns the check to `ready` — the pass, not the kitchen queue, since the food was already
+made — and re-seats the table even from `cleaning`. **Money is never touched**: payments already
+taken stay recorded and only the outstanding balance is recomputed. `completedAt` is cleared so a
+reopened check is not counted as finished by kitchen performance, and is re-stamped when it closes
+again. Each reopen increments `reopenCount` and is audited with its reason and actor.
+
+Refunded and cancelled checks are **not** reopenable — those are deliberate financial
+terminations, and reversing one must go through the refund flow so the money trail stays intact.
+A reopen is also refused if another party has since been seated at that table.
+
+**History** correlates the audit trail already written for a table (status changes, moves, merges,
+configuration edits, retirement) with the orders seated there, returning per-table revenue,
+completed/cancelled/reopened counts and average turn time. Supports `from`, `to` and `limit`.
+
 ## Multi-tenant access control
 
 Every branch-scoped endpoint enforces **user → restaurant → branch → resource**. An owner has

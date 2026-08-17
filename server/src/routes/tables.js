@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, MAX_SEATS} from '../services/tables.js';
+import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, reopenOrder, getTableHistory, MAX_SEATS} from '../services/tables.js';
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
@@ -152,6 +152,40 @@ r.post('/tables/:id/merge', auth(roles), async (req, res) => {
     await publishKitchenOrder(result.mergedOrder, 'kitchen:status');
     await publishKitchenOrder(result.order, 'kitchen:status');
     publishTableEvent(result.order.branch, {reason: 'merge', tableIds: [String(result.fromTable._id), String(result.intoTable._id)]});
+    res.json(result);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+// Table activity: audit trail correlated with the orders seated there.
+r.get('/tables/:id/history', auth(['owner', 'manager']), async (req, res) => {
+  try {
+    res.json(await getTableHistory({
+      tableId: req.params.id, user: req.user,
+      from: req.query.from, to: req.query.to, limit: req.query.limit
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+// Reopening a settled check moves money-affecting state, so it is a
+// supervisor action.
+r.post('/orders/:id/reopen', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const body = z.object({reason: z.string().trim().max(300).optional()}).strict().parse(req.body ?? {});
+    let result;
+    await session.withTransaction(async () => {
+      result = await reopenOrder({orderId: req.params.id, reason: body.reason, user: req.user, session});
+    });
+    await publishKitchenOrder(result.order, 'kitchen:status');
+    if (result.table) {
+      publishTableEvent(result.table.branch, {reason: 'reopen', tableIds: [String(result.table._id)]});
+    }
     res.json(result);
   } catch (e) {
     fail(res, e);

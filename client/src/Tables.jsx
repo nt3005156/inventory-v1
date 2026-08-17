@@ -35,6 +35,8 @@ export default function Tables({call, branches = [], user, token}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [historyFor, setHistoryFor] = useState(null);
+  const [historyData, setHistoryData] = useState(null);
   const [form, setForm] = useState({name: '', area: 'Main Floor', seats: 4});
   const [plan, setPlan] = useState(null);
   const [ops, setOps] = useState({});
@@ -254,6 +256,73 @@ export default function Tables({call, branches = [], user, token}) {
       )}
       {loading && <p>Loading tables…</p>}
       {!loading && !rows.length && !error && <p className="empty">No tables at this branch.</p>}
+      {historyFor && (
+        <div className="table-history">
+          <div className="title">
+            <div>
+              <h3>{historyFor.name} · activity</h3>
+              <p>Audit trail and the checks seated at this table.</p>
+            </div>
+            <button className="receive" onClick={() => { setHistoryFor(null); setHistoryData(null); }}>Close</button>
+          </div>
+          {!historyData && <p>Loading history…</p>}
+          {historyData && (
+            <>
+              <div className="kpis">
+                <article><small>Checks</small><strong>{historyData.summary.orders}</strong><em>{historyData.summary.completedOrders} completed</em></article>
+                <article><small>Revenue</small><strong>{rs(historyData.summary.revenue)}</strong><em>{historyData.summary.cancelledOrders} cancelled</em></article>
+                <article><small>Avg turn</small><strong>{historyData.summary.averageTurnMinutes ?? '—'}{historyData.summary.averageTurnMinutes != null && 'm'}</strong><em>{historyData.summary.reopenedOrders} reopened</em></article>
+                <article><small>Events</small><strong>{historyData.summary.events}</strong><em>audit entries</em></article>
+              </div>
+              {!!historyData.orders.length && (
+                <table>
+                  <thead><tr><th>Check</th><th>Status</th><th>Total</th><th>Seated</th><th></th></tr></thead>
+                  <tbody>
+                    {historyData.orders.map(o => (
+                      <tr key={o.id}>
+                        <td><b>{o.orderNo}</b>{o.reopened > 0 && <small>reopened ×{o.reopened}</small>}</td>
+                        <td><label className={'pill ' + o.status}>{o.status}</label></td>
+                        <td>{rs(o.total)}</td>
+                        <td>{new Date(o.seatedAt).toLocaleString('en-NP')}</td>
+                        <td>
+                          {o.status === 'completed' && (
+                            <button
+                              className="kds-go"
+                              disabled={!!busy}
+                              onClick={async () => {
+                                setBusy(o.id + 'reopen');
+                                try {
+                                  await call('/orders/' + o.id + '/reopen', {
+                                    method: 'POST',
+                                    body: JSON.stringify({reason: 'Reopened from floor'})
+                                  });
+                                  setHistoryData(await call('/tables/' + historyFor._id + '/history'));
+                                  await loadRef.current();
+                                } catch (e) { setError(e.message); } finally { setBusy(''); }
+                              }}
+                            >{busy === o.id + 'reopen' ? 'Reopening…' : 'Reopen'}</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {!!historyData.events.length && (
+                <ul className="history-events">
+                  {historyData.events.map((e, i) => (
+                    <li key={i}>
+                      <time>{new Date(e.at).toLocaleString('en-NP')}</time>
+                      <span>{e.kind.replace(/_/g, ' ')}{e.from && e.to ? `: ${e.from} → ${e.to}` : ''}</span>
+                      {e.by && <em>{e.by.name}</em>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
       {areas.map(area => {
         const areaPlan = plan?.areas?.find(a => a.area === area);
         return (
@@ -332,6 +401,22 @@ export default function Tables({call, branches = [], user, token}) {
                       </button>
                     ))}
                   </div>
+                  {canManage && (
+                    <div className="kds-actions">
+                      <button
+                        className="receive"
+                        disabled={!!busy}
+                        onClick={async () => {
+                          setBusy(table._id + 'hist');
+                          setHistoryFor(table);
+                          setHistoryData(null);
+                          try {
+                            setHistoryData(await call('/tables/' + table._id + '/history'));
+                          } catch (e) { setError(e.message); } finally { setBusy(''); }
+                        }}
+                      >History</button>
+                    </div>
+                  )}
                   {canManage && !orders.length && table.active !== false && (
                     <div className="kds-actions">
                       <button

@@ -1,6 +1,7 @@
 import {Audit} from '../models/index.js';
 import {Branch, Order, Payment, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess, assertTenantBranchAccess} from './kitchen.js';
+import {money} from './billing.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
@@ -447,4 +448,159 @@ export async function archiveTable({table, user, session}) {
     action: 'archive', before, after: {active: false, status: 'disabled'}, user: user.id
   }], {session: session || undefined});
   return table;
+}
+
+
+/**
+ * Reopens a settled check.
+ *
+ * A guest who returns, or a payment keyed against the wrong ticket, currently
+ * has no recovery path: the order ends at `completed` and the table has already
+ * been released. Reopening restores the check to an open status and re-seats
+ * the table, without touching money — payments already taken stay recorded and
+ * the balance is recomputed from what is still owed.
+ *
+ * Refunded and cancelled orders are NOT reopenable: those are deliberate
+ * financial terminations, and reversing one must go through the refund flow so
+ * the money trail stays intact.
+ */
+export async function reopenOrder({orderId, reason, user, session}) {
+  const {Order: OrderModel} = await import('../models/operations.js');
+  const order = await OrderModel.findById(orderId).session(session || null);
+  if (!order) throw httpError('Order not found', 404);
+  await assertTenantBranchAccess(user, order.branch, {session});
+
+  if (order.status !== 'completed') {
+    throw httpError(`Only a completed check can be reopened; this one is ${order.status}`, 409);
+  }
+  const note = String(reason ?? '').trim();
+  if (note.length > 300) throw httpError('Reopen reason must be 300 characters or fewer', 400);
+
+  // A table may only hold one open check at a time.
+  if (order.table) {
+    const existing = await findOpenTableOrder(order.table, session, order._id);
+    if (existing) throw httpError('That table already has an open check', 409);
+  }
+
+  const before = {status: order.status, dueAmount: order.dueAmount, completedAt: order.completedAt};
+  // Back to the pass, not to the kitchen queue: the food was already made.
+  order.status = 'ready';
+  // Money is untouched; only what is still owed is recomputed.
+  order.dueAmount = money(Math.max(0, Number(order.total || 0) - Number(order.paidAmount || 0)));
+  // The original completion instant is cleared so kitchen metrics do not count
+  // a reopened check as finished. It is re-stamped when it closes again.
+  order.completedAt = undefined;
+  order.reopenedAt = new Date();
+  order.reopenedBy = user.id;
+  order.reopenCount = Number(order.reopenCount || 0) + 1;
+  order.reopenReason = note || undefined;
+  await order.save({session: session || undefined});
+
+  let table = null;
+  if (order.table) {
+    table = await RestaurantTable.findById(order.table).session(session || null);
+    if (table && table.active !== false && table.status !== 'disabled') {
+      // Released tables sit in 'cleaning', which occupyTable refuses, so the
+      // seat is reclaimed directly here.
+      const previous = table.status;
+      if (table.status !== 'occupied') {
+        table.status = 'occupied';
+        await table.save({session: session || undefined});
+        await Audit.create([{
+          entity: 'table', entityId: table._id, branch: table.branch,
+          action: 'status', before: {status: previous},
+          after: {status: 'occupied', order: order._id, reason: 'reopen'}, user: user.id
+        }], {session: session || undefined});
+      }
+    }
+  }
+
+  await Audit.create([{
+    entity: 'order', entityId: order._id, branch: order.branch,
+    action: 'order_reopen', before,
+    after: {status: order.status, dueAmount: order.dueAmount, reopenCount: order.reopenCount},
+    reason: note || undefined, user: user.id
+  }], {session: session || undefined});
+
+  return {order, table};
+}
+
+/**
+ * Activity history for a table.
+ *
+ * Correlates the audit trail already written for the table (status changes,
+ * moves, merges, configuration edits) with the orders seated there, so a
+ * manager can answer "what happened on table 7 tonight" from one call.
+ */
+export async function getTableHistory({tableId, user, from, to, limit = 100, session}) {
+  const {Order: OrderModel} = await import('../models/operations.js');
+  const mongooseLib = (await import('mongoose')).default;
+  if (!mongooseLib.isValidObjectId(tableId)) throw httpError('Invalid table', 400);
+  const table = await RestaurantTable.findById(tableId).session(session || null);
+  if (!table) throw httpError('Table not found', 404);
+  await assertTenantBranchAccess(user, table.branch, {session});
+
+  const cap = Math.min(500, Math.max(1, Number(limit) || 100));
+  const range = {};
+  if (from) range.$gte = new Date(from);
+  if (to) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    range.$lte = end;
+  }
+  const hasRange = Object.keys(range).length > 0;
+
+  const [auditRows, orders] = await Promise.all([
+    Audit.find({entity: 'table', entityId: table._id, ...(hasRange ? {at: range} : {})})
+      .sort({at: -1}).limit(cap).populate('user', 'name role').lean(),
+    OrderModel.find({table: table._id, ...(hasRange ? {createdAt: range} : {})})
+      .sort({createdAt: -1}).limit(cap)
+      .select('orderNo status type total paidAmount dueAmount createdAt completedAt reopenCount')
+      .lean()
+  ]);
+
+  const events = auditRows.map(row => ({
+    at: row.at,
+    kind: row.action,
+    from: row.before?.status ?? null,
+    to: row.after?.status ?? null,
+    order: row.after?.order ? String(row.after.order) : null,
+    reason: row.reason || row.after?.reason || null,
+    by: row.user ? {name: row.user.name, role: row.user.role} : null,
+    detail: row.after ?? null
+  }));
+
+  const served = orders.filter(o => !['cancelled'].includes(o.status));
+  const revenue = money(served.reduce((sum, o) => sum + Number(o.total || 0), 0));
+  const durations = orders
+    .filter(o => o.completedAt)
+    .map(o => (new Date(o.completedAt) - new Date(o.createdAt)) / 60000)
+    .filter(m => Number.isFinite(m) && m >= 0);
+
+  return {
+    table: {
+      id: table._id, name: table.name, area: table.area,
+      seats: table.seats, status: table.status, active: table.active !== false
+    },
+    from: from || null,
+    to: to || null,
+    summary: {
+      events: events.length,
+      orders: orders.length,
+      completedOrders: orders.filter(o => o.status === 'completed').length,
+      cancelledOrders: orders.filter(o => o.status === 'cancelled').length,
+      reopenedOrders: orders.filter(o => Number(o.reopenCount || 0) > 0).length,
+      revenue,
+      averageTurnMinutes: durations.length
+        ? Math.round((durations.reduce((a, b) => a + b, 0) / durations.length) * 100) / 100
+        : null
+    },
+    events,
+    orders: orders.map(o => ({
+      id: o._id, orderNo: o.orderNo, status: o.status, type: o.type,
+      total: money(o.total), paid: money(o.paidAmount), due: money(o.dueAmount),
+      seatedAt: o.createdAt, closedAt: o.completedAt || null,
+      reopened: Number(o.reopenCount || 0)
+    }))
+  };
 }
