@@ -118,6 +118,30 @@ export const MenuItem=model('MenuItem',new Schema({
     updatedBy:{type:Schema.Types.ObjectId,ref:'User'},
     reason:{type:String,trim:true,maxlength:500}
   }],default:[]},
+  // Phase 4B — POS modifiers. A group is a choice presented at the till
+  // (Size, Extras, Remove...); each option may re-price the line and may map
+  // to an ingredient so stock and food cost follow the guest's choice.
+  modifierGroups:{type:[{
+    key:{type:String,trim:true,maxlength:40,required:true},
+    name:{type:String,trim:true,maxlength:80,required:true},
+    kind:{type:String,enum:['variant','extra','addon','removal'],default:'extra'},
+    selection:{type:String,enum:['single','multi'],default:'multi'},
+    required:{type:Boolean,default:false},
+    minSelect:{type:Number,default:0,min:0,max:50},
+    maxSelect:{type:Number,default:0,min:0,max:50},
+    options:{type:[{
+      key:{type:String,trim:true,maxlength:40,required:true},
+      name:{type:String,trim:true,maxlength:80,required:true},
+      // Variants replace the line price; every other kind is a delta.
+      priceDelta:{...money,default:0},
+      priceOverride:{type:Number,min:0,default:null},
+      isDefault:{type:Boolean,default:false},
+      ingredient:{type:Schema.Types.ObjectId,ref:'Ingredient',default:null},
+      // Positive consumes extra stock; a removal credits the qty back.
+      qty:{type:Number,default:0,min:0},
+      unit:{type:String,trim:true,maxlength:30}
+    }],default:[]}
+  }],default:[]},
   recipeCost:{...money,default:0},
   packagingCost:{...money,default:0},
   foodCost:{...money,default:0},

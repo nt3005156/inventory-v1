@@ -162,21 +162,38 @@ function requirementSignature(line) {
     .join('|');
 }
 
+// Two lines of the same dish are only the same line if the guest asked for the
+// same modifiers and the same special instructions. Without this, moving a
+// table would merge "extra cheese" into a plain one and lose the request.
+function modifierSignature(line) {
+  const mods = (line.modifiers || [])
+    .map(m => `${m.groupKey || ''}:${m.optionKey || m.name || ''}:${Number(m.price || 0)}`)
+    .sort()
+    .join('|');
+  return `${mods}#${String(line.specialInstructions || '').trim()}#${Number(line.unitPrice || 0)}`;
+}
+
+function lineSignature(line) {
+  return `${requirementSignature(line)}~${modifierSignature(line)}`;
+}
+
 export function combineItems(destItems = [], sourceItems = []) {
   const list = destItems.map(i => ({
     menuItem: i.menuItem,
     name: i.name,
     qty: i.qty,
     unitPrice: i.unitPrice,
+    basePrice: i.basePrice,
     foodCost: i.foodCost,
     notes: i.notes,
+    specialInstructions: i.specialInstructions,
     modifiers: i.modifiers,
     inventoryRequirements: copyInventoryRequirements(i)
   }));
   for (const line of sourceItems) {
-    const signature = requirementSignature(line);
+    const signature = lineSignature(line);
     const match = list.find(i =>
-      String(i.menuItem) === String(line.menuItem) && requirementSignature(i) === signature
+      String(i.menuItem) === String(line.menuItem) && lineSignature(i) === signature
     );
     if (match) {
       match.qty += line.qty;
@@ -189,8 +206,10 @@ export function combineItems(destItems = [], sourceItems = []) {
         name: line.name,
         qty: line.qty,
         unitPrice: line.unitPrice,
+        basePrice: line.basePrice,
         foodCost: line.foodCost,
         notes: line.notes,
+        specialInstructions: line.specialInstructions,
         modifiers: line.modifiers,
         inventoryRequirements: copyInventoryRequirements(line)
       });

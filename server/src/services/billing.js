@@ -133,6 +133,8 @@ export async function splitOrder({orderId, items, user, session}) {
         vatInclusive: line.vatInclusive === true,
         foodCost: line.foodCost,
         notes: line.notes,
+        basePrice: line.basePrice,
+        specialInstructions: line.specialInstructions,
         modifiers: line.modifiers,
         inventoryRequirements: line.inventoryRequirements
       });

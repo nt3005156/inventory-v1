@@ -101,6 +101,48 @@ export function calculateFoodCostPercent(foodCost, price){
   return Math.round((Number(foodCost)/Number(price))*10000)/100;
 }
 
+
+// Phase 4B — validate a modifier catalog before it is stored on a menu item.
+export function normalizeModifierGroups(groups){
+  if(groups===undefined) return undefined;
+  if(!Array.isArray(groups)) throw httpError('Modifier groups must be a list',400);
+  const seenGroups=new Set();
+  return groups.map(g=>{
+    const key=clean(g.key).toLowerCase();
+    if(!key) throw httpError('Modifier group key is required',400);
+    if(seenGroups.has(key)) throw httpError(`Duplicate modifier group "${g.key}"`,400);
+    seenGroups.add(key);
+    const kind=g.kind||'extra';
+    const selection=g.selection||(kind==='variant'?'single':'multi');
+    const seenOptions=new Set();
+    const options=(g.options||[]).map(o=>{
+      const optKey=clean(o.key).toLowerCase();
+      if(!optKey) throw httpError('Modifier option key is required',400);
+      if(seenOptions.has(optKey)) throw httpError(`Duplicate option "${o.key}" in ${g.name}`,400);
+      seenOptions.add(optKey);
+      const qty=Number(o.qty||0);
+      if(qty>0 && !o.ingredient) throw httpError(`Option "${o.name}" sets a quantity but no ingredient`,400);
+      if(kind==='removal' && o.ingredient && !(qty>0)) throw httpError(`Removal "${o.name}" needs the quantity to remove`,400);
+      return {
+        key:clean(o.key),
+        name:clean(o.name),
+        priceDelta:Math.round(Number(o.priceDelta||0)*100)/100,
+        priceOverride:o.priceOverride===undefined||o.priceOverride===null?null:Math.round(Number(o.priceOverride)*100)/100,
+        isDefault:Boolean(o.isDefault),
+        ingredient:o.ingredient||null,
+        qty,
+        unit:clean(o.unit)||undefined
+      };
+    });
+    if(!options.length) throw httpError(`Modifier group "${g.name}" needs at least one option`,400);
+    if(selection==='single' && options.filter(o=>o.isDefault).length>1) throw httpError(`${g.name} can only have one default`,400);
+    const minSelect=Number(g.minSelect||0), maxSelect=Number(g.maxSelect||0);
+    if(maxSelect>0 && minSelect>maxSelect) throw httpError(`${g.name} has a minimum above its maximum`,400);
+    if(selection==='single' && maxSelect>1) throw httpError(`${g.name} is single-select but allows ${maxSelect}`,400);
+    return {key:clean(g.key),name:clean(g.name),kind,selection,required:Boolean(g.required),minSelect,maxSelect,options};
+  });
+}
+
 export async function listMenuItems({ user, q, category, active, page=1, limit=50, branchId }){
   const restaurantId = await resolveRestaurant(user);
   const safePage = Math.max(1, Number(page)||1);
@@ -259,6 +301,7 @@ export async function createMenuItem({ input, user }){
     yield: yieldVal,
     yieldUnit: clean(input.yieldUnit)||'serving',
     recipe,
+    modifierGroups: normalizeModifierGroups(input.modifierGroups)||[],
     recipeVersion: 1,
     recipeHistory: [],
     packagingCost: Math.round(packagingCost*100)/100,
@@ -314,6 +357,7 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
     row.price=Math.round(p*100)/100;
   }
   if(patch.vatInclusive!==undefined) row.vatInclusive=Boolean(patch.vatInclusive);
+  if(patch.modifierGroups!==undefined) row.modifierGroups=normalizeModifierGroups(patch.modifierGroups);
   if(patch.vatRate!==undefined) row.vatRate=Number(patch.vatRate);
   if(patch.active!==undefined) row.active=Boolean(patch.active);
   if(patch.yield!==undefined){

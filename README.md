@@ -56,6 +56,40 @@ taxable, and the delivery fee is a pass-through added after VAT and never taxed.
 larger than the subtotal is rejected. Split checks inherit the parent channel's service-charge
 rate and per-line VAT treatment, so a split ticket totals exactly like the original.
 
+## POS modifiers (Phase 4B)
+
+Menu items may declare modifier groups, and the POS validates every selection against that
+catalog — a till can never invent a modifier or set its own price.
+
+| Kind | Effect on price | Effect on stock |
+|---|---|---|
+| `variant` | `priceOverride` replaces the line price (Small/Medium/Large) | Optional ingredient mapping |
+| `extra` | `priceDelta` added | Consumes additional stock |
+| `addon` | `priceDelta` added | Usually price-only |
+| `removal` | `priceDelta` (often 0 or negative) | **Credits** the ingredient back |
+
+Groups support `required`, `single`/`multi` selection, and `minSelect`/`maxSelect`; unknown
+groups or options, duplicates, and cardinality breaches are all rejected. Each line also accepts
+free-text `specialInstructions` (500 chars).
+
+Modifiers mapped to an ingredient flow through the lot-aware ledger: an extra deducts more
+stock and raises the line's food cost, a removal credits stock back and lowers it. A removal can
+never take out more than the recipe uses, and a movement that nets to zero writes no ledger
+entry at all. Lines are only merged across tables when their modifiers *and* instructions match,
+so a plain dish is never combined with a customised one.
+
+```jsonc
+POST /api/orders
+{
+  "branch": "...", "type": "counter",
+  "items": [{
+    "menuItem": "...", "qty": 2,
+    "modifiers": [{"group": "size", "option": "large"}, {"group": "extras", "option": "cheese"}],
+    "specialInstructions": "Less oil"
+  }]
+}
+```
+
 ## Recommended local start: Docker Compose
 
 Docker Compose starts a single-member MongoDB replica set, waits for a writable primary, runs API migrations, waits for API readiness, and then starts the web proxy.

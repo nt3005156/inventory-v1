@@ -31,10 +31,71 @@ export default function POS({menu = [], branches = [], user, call}) {
     call('/customers?branch=' + branchId).then(r => setCustomers(Array.isArray(r) ? r : [])).catch(() => setCustomers([]));
   }, [branchId]);
 
-  const add = m => setCart(c => {
-    const x = c.find(i => i._id === m._id);
-    return x ? c.map(i => i._id === m._id ? {...i, qty: i.qty + 1} : i) : [...c, {...m, qty: 1}];
-  });
+  const [configuring, setConfiguring] = useState(null);
+  const [picks, setPicks] = useState({});
+  const [instructions, setInstructions] = useState('');
+
+  const sigOf = (id, mods, note) =>
+    id + '|' + mods.map(m => m.group + ':' + m.option).sort().join(',') + '|' + (note || '');
+
+  const priceWith = (item, mods) => {
+    let price = Number(item.price || 0);
+    let delta = 0;
+    for (const pick of mods) {
+      const group = (item.modifierGroups || []).find(g => g.key === pick.group);
+      const option = (group?.options || []).find(o => o.key === pick.option);
+      if (!option) continue;
+      if (group.kind === 'variant' && option.priceOverride !== null && option.priceOverride !== undefined) {
+        price = Number(option.priceOverride);
+      } else {
+        delta += Number(option.priceDelta || 0);
+      }
+    }
+    return Math.round((price + delta) * 100) / 100;
+  };
+
+  const pushLine = (item, mods, note) => {
+    const sig = sigOf(item._id, mods, note);
+    setCart(c => {
+      const found = c.find(i => i.sig === sig);
+      if (found) return c.map(i => i.sig === sig ? {...i, qty: i.qty + 1} : i);
+      return [...c, {
+        sig,
+        _id: item._id,
+        name: item.name,
+        vatInclusive: item.vatInclusive,
+        price: priceWith(item, mods),
+        basePrice: Number(item.price || 0),
+        modifiers: mods,
+        specialInstructions: note || '',
+        modifierNames: mods.map(pick => {
+          const group = (item.modifierGroups || []).find(g => g.key === pick.group);
+          return (group?.options || []).find(o => o.key === pick.option)?.name || pick.option;
+        }),
+        qty: 1
+      }];
+    });
+  };
+
+  // Items with choices open a chooser; plain items drop straight into the cart.
+  const add = m => {
+    if ((m.modifierGroups || []).length) {
+      const preset = {};
+      for (const group of m.modifierGroups) {
+        const fallback = (group.options || []).find(o => o.isDefault);
+        if (group.selection === 'single' && fallback) preset[group.key] = [fallback.key];
+      }
+      setPicks(preset);
+      setInstructions('');
+      setConfiguring(m);
+      return;
+    }
+    pushLine(m, [], '');
+  };
+
+  const bump = (line, by) => setCart(c => c
+    .map(i => i.sig === line.sig ? {...i, qty: Math.max(0, i.qty + by)} : i)
+    .filter(i => i.qty > 0));
   const VAT_RATE = 13;
   const round = n => Math.round((Number(n) || 0) * 100) / 100;
   const net = round(cart.reduce((s, x) => s + (x.vatInclusive
@@ -78,15 +139,89 @@ export default function POS({menu = [], branches = [], user, call}) {
           ))}
         </div>
       </section>
+      {configuring && (() => {
+        const item = configuring;
+        const chosen = Object.entries(picks).flatMap(([g, keys]) => keys.map(k => ({group: g, option: k})));
+        const missing = (item.modifierGroups || []).filter(g => g.required && !(picks[g.key] || []).length);
+        const toggle = (group, option) => setPicks(p => {
+          const current = p[group.key] || [];
+          if (group.selection === 'single') return {...p, [group.key]: current[0] === option.key ? [] : [option.key]};
+          const max = Number(group.maxSelect || 0);
+          if (current.includes(option.key)) return {...p, [group.key]: current.filter(k => k !== option.key)};
+          if (max > 0 && current.length >= max) return p;
+          return {...p, [group.key]: [...current, option.key]};
+        });
+        return (
+          <section className="panel modifier-sheet">
+            <div className="title">
+              <div>
+                <h2>{item.name}</h2>
+                <p>Choose options for this item. Base price {rs(item.price)}.</p>
+              </div>
+              <button className="receive" onClick={() => setConfiguring(null)}>Cancel</button>
+            </div>
+            {(item.modifierGroups || []).map(group => (
+              <div key={group.key} className="modifier-group">
+                <h3>
+                  {group.name}
+                  <small>
+                    {group.required ? 'Required' : 'Optional'}
+                    {group.selection === 'single' ? ' · choose one' : group.maxSelect > 0 ? ` · up to ${group.maxSelect}` : ' · choose any'}
+                  </small>
+                </h3>
+                <div className="modifier-options">
+                  {(group.options || []).map(option => {
+                    const active = (picks[group.key] || []).includes(option.key);
+                    const override = group.kind === 'variant' && option.priceOverride !== null && option.priceOverride !== undefined;
+                    return (
+                      <button
+                        key={option.key}
+                        className={'modifier-option' + (active ? ' active' : '')}
+                        onClick={() => toggle(group, option)}
+                      >
+                        <b>{option.name}</b>
+                        <small>
+                          {override ? rs(option.priceOverride)
+                            : Number(option.priceDelta || 0) > 0 ? '+' + rs(option.priceDelta)
+                            : Number(option.priceDelta || 0) < 0 ? '−' + rs(Math.abs(option.priceDelta))
+                            : group.kind === 'removal' ? 'Removed' : 'No charge'}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            <textarea
+              className="receive-notes"
+              maxLength={500}
+              placeholder="Special instructions (e.g. less oil, no coriander)"
+              value={instructions}
+              onChange={e => setInstructions(e.target.value)}
+            />
+            <div className="total"><span>Line price</span><b>{rs(priceWith(item, chosen))}</b></div>
+            {!!missing.length && <p className="warn">Choose: {missing.map(g => g.name).join(', ')}</p>}
+            <button
+              className="checkout"
+              disabled={!!missing.length}
+              onClick={() => { pushLine(item, chosen, instructions.trim()); setConfiguring(null); }}
+            >Add to order</button>
+          </section>
+        );
+      })()}
       <section className="panel order">
         <h2>Current order</h2>
         {cart.length ? cart.map(x => (
-          <div className="cart" key={x._id}>
-            <b>{x.name}</b>
+          <div className="cart" key={x.sig}>
+            <b>
+              {x.name}
+              {!!x.modifierNames?.length && <small>{x.modifierNames.join(' · ')}</small>}
+              {x.specialInstructions && <small>“{x.specialInstructions}”</small>}
+            </b>
             <span>
-              <button onClick={() => setCart(c => c.map(y => y._id === x._id ? {...y, qty: Math.max(1, y.qty - 1)} : y))}>−</button>
+              <button onClick={() => bump(x, -1)}>−</button>
               {' '}{x.qty}{' '}
-              <button onClick={() => add(x)}>+</button>
+              <button onClick={() => bump(x, 1)}>+</button>
               {' · '}{rs(x.price * x.qty)}
             </span>
           </div>
@@ -148,7 +283,12 @@ export default function POS({menu = [], branches = [], user, call}) {
                 method: 'POST',
                 body: JSON.stringify({
                   branch: branchId,
-                  items: cart.map(x => ({menuItem: x._id, qty: x.qty})),
+                  items: cart.map(x => ({
+                    menuItem: x._id,
+                    qty: x.qty,
+                    modifiers: x.modifiers?.length ? x.modifiers : undefined,
+                    specialInstructions: x.specialInstructions || undefined
+                  })),
                   type,
                   table: type === 'dine-in' ? tableId : undefined,
                   customer: type === 'delivery' ? customerId : undefined,

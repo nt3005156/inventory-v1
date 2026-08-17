@@ -39,7 +39,8 @@ function App() {
     setLoading(true);
     try {
       const [menu, branches] = await Promise.all(['/menu-items', '/branches'].map(call));
-      setData({menu, branches});
+      // /menu-items is paginated ({items, pagination}); older builds returned a bare array.
+      setData({menu: Array.isArray(menu) ? menu : (menu?.items || []), branches});
     } catch (e) {
       if (e.message === 'Authentication required') logout();
     } finally {

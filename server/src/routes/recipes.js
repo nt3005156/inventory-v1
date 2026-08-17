@@ -15,6 +15,29 @@ const recipeLine = z.object({
   notes: z.string().max(200).optional()
 });
 
+
+const modifierOption = z.object({
+  key: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(80),
+  priceDelta: z.number().min(-100000).max(100000).optional(),
+  priceOverride: z.number().min(0).max(1000000).nullable().optional(),
+  isDefault: z.boolean().optional(),
+  ingredient: z.string().min(1).nullable().optional(),
+  qty: z.number().min(0).max(1000000).optional(),
+  unit: z.string().max(30).optional()
+}).strict();
+
+const modifierGroup = z.object({
+  key: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(80),
+  kind: z.enum(['variant', 'extra', 'addon', 'removal']).optional(),
+  selection: z.enum(['single', 'multi']).optional(),
+  required: z.boolean().optional(),
+  minSelect: z.number().int().min(0).max(50).optional(),
+  maxSelect: z.number().int().min(0).max(50).optional(),
+  options: z.array(modifierOption).min(1).max(50)
+}).strict();
+
 const createSchema = z.object({
   name: z.string().trim().min(2).max(120),
   nameNp: z.string().trim().max(120).optional(),
@@ -27,6 +50,7 @@ const createSchema = z.object({
   yield: z.number().positive().max(1000).optional(),
   yieldUnit: z.string().max(30).optional(),
   recipe: z.array(recipeLine).max(50).optional(),
+  modifierGroups: z.array(modifierGroup).max(20).optional(),
   packagingCost: z.number().min(0).max(100000).optional(),
   description: z.string().max(500).optional(),
   imageUrl: z.string().max(500).optional()
@@ -45,6 +69,7 @@ const updateSchema = z.object({
   yield: z.number().positive().max(1000).optional(),
   yieldUnit: z.string().max(30).optional(),
   recipe: z.array(recipeLine).max(50).optional(),
+  modifierGroups: z.array(modifierGroup).max(20).optional(),
   packagingCost: z.number().min(0).max(100000).optional(),
   description: z.string().max(500).optional().nullable(),
   imageUrl: z.string().max(500).optional().nullable(),
