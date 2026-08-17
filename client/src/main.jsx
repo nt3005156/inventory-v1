@@ -14,6 +14,7 @@ import Recipes from './Recipes.jsx';
 import POS from './Pos.jsx';
 import Expenses from './Expenses.jsx';
 import MonthClose from './MonthClose.jsx';
+import Reservations from './Reservations.jsx';
 import './style.css';
 
 const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
@@ -81,6 +82,7 @@ function App() {
     ['Expenses', Receipt],
     ['Supplier Catalog', ShoppingCart],
     ['Tables', Armchair],
+    ['Reservations', CalendarCheck2],
     ['POS', ChefHat],
     ['KDS', UtensilsCrossed],
     ...(user?.role !== 'staff' ? [['Month Close', CalendarCheck2]] : []),
@@ -154,6 +156,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'Ingredients') return <Ingredients call={call}/>;
   if (page === 'Recipes') return <Recipes call={call}/>;
   if (page === 'Tables') return <Tables call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'Reservations') return <Reservations call={call} branches={branches} user={user}/>;
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;

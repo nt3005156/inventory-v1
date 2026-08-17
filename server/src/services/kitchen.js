@@ -93,7 +93,9 @@ export async function assertTenantBranchAccess(user, branchId, {session} = {}) {
     err.status = 400;
     throw err;
   }
-  const branch = await Branch.findById(branchId).select('restaurant').session(session || null).lean();
+  // `code` and `name` are returned so callers can label documents without a
+  // second query; the authorization decision still turns only on `restaurant`.
+  const branch = await Branch.findById(branchId).select('restaurant code name active').session(session || null).lean();
   if (!branch) {
     const err = new Error('Branch not found');
     err.status = 404;

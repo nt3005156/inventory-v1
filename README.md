@@ -151,6 +151,35 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Reservations (Phase 6C)
+
+`/api/reservations` books a table for a **window of time** rather than blocking it outright, so a
+table booked for 20:00 stays sellable all afternoon.
+
+| Field | Notes |
+|---|---|
+| Customer | An existing `Customer`, or a name + phone captured inline for a phone booking |
+| Date / time | Local `YYYY-MM-DD` and `HH:MM`, resolved to absolute instants so overlap checks are timezone-proof |
+| Party size | Validated against the table's capacity |
+| Table | Optional at booking; a host can assign it later |
+| Status | `booked → confirmed → seated → completed`, with `cancelled` and `no_show` as terminal outcomes |
+
+Two bookings whose windows overlap on the same table are rejected, naming the clashing reference.
+Back-to-back bookings are allowed. Cancelling or marking a no-show frees the slot immediately and
+releases a held table, while the record itself is kept for history — reservations are never
+deleted. Every booking gets a sequential `RES-<BRANCH>-<YEAR>-#####` reference.
+
+- `GET /api/reservations?branch=&date=` — the day's diary with covers and status counts
+- `GET /api/reservations/availability?branch=&date=&time=&partySize=` — which tables are free,
+  and which are taken and by whom
+- `POST /api/reservations/:id/hold` — flips the table to `reserved` when arrival is imminent
+- `PATCH /api/reservations/:id/status` — guarded lifecycle transitions; seating claims the table
+  through the existing table machinery
+- `DELETE /api/reservations/:id` — cancels with a reason, recording who and when
+
+Impossible calendar dates are rejected: JavaScript rolls `2026-02-30` forward to March 2, which
+would silently book a guest onto the wrong day.
+
 ## Table operations (Phase 6B)
 
 | Operation | Endpoint | Notes |

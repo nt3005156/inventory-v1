@@ -224,6 +224,51 @@ export const StockCount=model('StockCount',stockCountSchema);
 
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
 export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));
+// Phase 6C — reservations.
+const reservationSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true},
+  branch:{...oid,ref:'Branch',required:true,index:true},
+  reference:{type:String,required:true,trim:true,uppercase:true,maxlength:24},
+  // Either a known customer, or walk-in details captured on the booking.
+  customer:{...oid,ref:'Customer',default:null},
+  guestName:{type:String,trim:true,maxlength:120,required:true},
+  guestPhone:{type:String,trim:true,maxlength:30,required:true},
+  guestEmail:{type:String,trim:true,maxlength:160},
+  partySize:{type:Number,required:true,min:1,max:200},
+  // The booked slot. startsAt/endsAt are absolute instants so overlap checks
+  // are timezone-proof; date/time keep the host-facing local values.
+  date:{type:String,required:true,match:/^\d{4}-\d{2}-\d{2}$/},
+  time:{type:String,required:true,match:/^([01]\d|2[0-3]):[0-5]\d$/},
+  durationMinutes:{type:Number,default:90,min:15,max:600},
+  startsAt:{type:Date,required:true,index:true},
+  endsAt:{type:Date,required:true},
+  table:{...oid,ref:'RestaurantTable',default:null,index:true},
+  status:{type:String,enum:['booked','confirmed','seated','completed','cancelled','no_show'],default:'booked',index:true},
+  order:{...oid,ref:'Order',default:null},
+  notes:{type:String,trim:true,maxlength:500},
+  seatedAt:Date,
+  completedAt:Date,
+  cancelledAt:Date,
+  cancelledBy:{...oid,ref:'User'},
+  cancellationReason:{type:String,trim:true,maxlength:300},
+  createdBy:{...oid,ref:'User'},
+  updatedBy:{...oid,ref:'User'}
+},{timestamps:true});
+reservationSchema.index({restaurant:1,reference:1},{unique:true,name:'reservation_reference'});
+// Serves the diary view and the overlap query.
+reservationSchema.index({branch:1,startsAt:1,status:1},{name:'reservation_branch_slot'});
+reservationSchema.index({table:1,startsAt:1},{name:'reservation_table_slot'});
+export const Reservation=model('Reservation',reservationSchema);
+
+const reservationCounterSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},
+  branchCode:{type:String,required:true,trim:true,uppercase:true,maxlength:8,immutable:true},
+  year:{type:Number,required:true,immutable:true},
+  value:{type:Number,default:0,min:0}
+},{timestamps:true,autoIndex:false});
+reservationCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'reservation_counter_scope'});
+export const ReservationCounter=model('ReservationCounter',reservationCounterSchema);
+
 export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
 Order.schema.index({inventorySourceOrders:1},{name:'order_inventory_source_orders'});
 // Phase 5D — serves the kitchen board and performance report, which always
