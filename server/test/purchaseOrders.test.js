@@ -6,6 +6,13 @@ import {Branch, PurchaseOrder, PurchaseOrderCounter, Restaurant} from '../src/mo
 import {SupplierIngredient} from '../src/models/supplierCatalog.js';
 import {ensurePurchaseOrderIndexes} from '../src/services/purchaseOrderMigration.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
+import {daysAgo, daysAhead, daysFromToday} from './dates.js';
+
+
+// Expected delivery must fall after the order date; neither is clock-validated.
+const PO_ORDER_DATE = daysAgo(2);
+const PO_DELIVERY_DATE = daysAhead(1);
+const PO_BEFORE_ORDER = daysAgo(3);
 
 let world;
 let supplier;
@@ -28,7 +35,7 @@ const manualBody = (overrides = {}) => ({
   branch: String(world.branchA._id),
   supplier: String(supplier._id),
   items: [{ingredient: String(world.ingredient._id), orderedQty: 100, unit: 'g', unitPrice: 1}],
-  orderDate: '2026-08-15',
+  orderDate: PO_ORDER_DATE,
   notes: 'Weekly replenishment',
   ...overrides
 });
@@ -151,7 +158,7 @@ describe('purchase order migration', () => {
 
 describe('purchase order creation', () => {
   it('persists net, 13% VAT and gross snapshots with a counter-backed Kathmandu-year number and audit', async () => {
-    const created = await createPo({orderDate: '2026-08-15', expectedDeliveryDate: '2026-08-18'});
+    const created = await createPo({orderDate: PO_ORDER_DATE, expectedDeliveryDate: PO_DELIVERY_DATE});
     assert.equal(created.status, 201, created.body?.message);
     assert.match(created.body.poNo, /^PO-KTM-2026-000001$/);
     assert.equal(created.body.status, 'draft');
@@ -203,7 +210,7 @@ describe('purchase order creation', () => {
 
   it('rejects impossible Kathmandu dates and delivery dates before the order date', async () => {
     const impossible = await createPo({orderDate: '2026-02-30'});
-    const backwards = await createPo({orderDate: '2026-08-15', expectedDeliveryDate: '2026-08-14'});
+    const backwards = await createPo({orderDate: PO_ORDER_DATE, expectedDeliveryDate: PO_BEFORE_ORDER});
     assert.equal(impossible.status, 400);
     assert.match(impossible.body.message, /invalid date/i);
     assert.equal(backwards.status, 400);
@@ -247,7 +254,11 @@ describe('purchase order creation', () => {
     assert.equal(created.body.items[0].lineVat, 26);
     assert.equal(created.body.items[0].lineTotal, 226);
     assert.equal(created.body.total, 226);
-    assert.equal(created.body.expectedDeliveryDate, '2026-08-16T18:15:00.000Z');
+    // leadDays: 2 from the order date, as a Kathmandu midnight instant.
+    assert.equal(
+      created.body.expectedDeliveryDate,
+      new Date(`${daysFromToday(0)}T00:00:00.000+05:45`).toISOString()
+    );
   });
 
   it('replays same-key requests and rejects key reuse with a different payload without duplicate writes', async () => {

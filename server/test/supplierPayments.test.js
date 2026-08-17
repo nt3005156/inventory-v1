@@ -11,6 +11,15 @@ import {
 } from '../src/models/operations.js';
 import {ensureSupplierPaymentIndexes} from '../src/services/supplierPaymentMigration.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
+import {daysAgo, daysAhead} from './dates.js';
+
+
+// Anchored to the real clock: the API rejects future payment dates, so these
+// stay relative rather than pinned to a calendar day.
+const FUTURE_DATE = daysAhead(1);
+const PAYMENT_DATE = daysAgo(1);
+const INVOICE_DATE = daysAgo(2);
+const BEFORE_INVOICE = daysAgo(3);
 
 let world;
 let supplier;
@@ -41,7 +50,7 @@ function createInvoice(overrides = {}, {user = world.manager, key} = {}) {
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
       invoiceNo: `PAY-INV-${sequence}`,
-      invoiceDate: '2026-08-15',
+      invoiceDate: INVOICE_DATE,
       subtotal: 1000,
       ...overrides
     }
@@ -90,10 +99,10 @@ describe('supplier payment migration and index repair', () => {
       amount: 100,
       method: 'bank',
       reference: 'OLD-BANK-1',
-      paidAt: new Date('2026-08-15T00:00:00.000Z'),
+      paidAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`),
       createdBy: world.manager._id,
-      createdAt: new Date('2026-08-15T00:00:00.000Z'),
-      updatedAt: new Date('2026-08-15T00:00:00.000Z')
+      createdAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`),
+      updatedAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`)
     });
 
     const result = await ensureSupplierPaymentIndexes();
@@ -154,7 +163,7 @@ describe('supplier payment migration and index repair', () => {
       supplier: supplier._id,
       amount: 100,
       method: 'cash',
-      paidAt: new Date('2026-08-15T00:00:00.000Z'),
+      paidAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`),
       createdBy: world.manager._id
     });
     const originalBulkWrite = SupplierInvoice.collection.bulkWrite;
@@ -184,7 +193,7 @@ describe('supplier payment migration and index repair', () => {
         branch: world.branchB._id,
         amount: 1200,
         method: 'cash',
-        paidAt: new Date('2026-08-15T00:00:00.000Z'),
+        paidAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`),
         createdBy: world.manager._id
       },
       {
@@ -192,7 +201,7 @@ describe('supplier payment migration and index repair', () => {
         supplier: supplier._id,
         amount: 10,
         method: 'cash',
-        paidAt: new Date('2026-08-15T00:00:00.000Z'),
+        paidAt: new Date(`${INVOICE_DATE}T00:00:00.000Z`),
         createdBy: world.manager._id
       }
     ]);
@@ -216,14 +225,14 @@ describe('POST /api/supplier-invoices/:id/payments', () => {
     assert.equal((await postPayment(invoice, {amount: 1.001}, {key: 'bad-decimal'})).status, 400);
     assert.equal((await postPayment(invoice, {method: 'bank'}, {key: 'missing-reference'})).status, 400);
     assert.equal((await postPayment(invoice, {method: 'cheque'}, {key: 'bad-method'})).status, 400);
-    assert.equal((await postPayment(invoice, {paidAt: '2026-08-14'}, {key: 'before-invoice'})).status, 400);
-    assert.equal((await postPayment(invoice, {paidAt: '2026-08-17'}, {key: 'future-payment'})).status, 400);
+    assert.equal((await postPayment(invoice, {paidAt: BEFORE_INVOICE}, {key: 'before-invoice'})).status, 400);
+    assert.equal((await postPayment(invoice, {paidAt: FUTURE_DATE}, {key: 'future-payment'})).status, 400);
 
     const posted = await postPayment(invoice, {
       amount: 100.25,
       method: 'bank',
       reference: 'BANK-100',
-      paidAt: '2026-08-16',
+      paidAt: PAYMENT_DATE,
       expectedInvoiceVersion: invoice.__v
     }, {key: 'valid-payment'});
     assert.equal(posted.status, 201, posted.body?.message);
@@ -232,7 +241,7 @@ describe('POST /api/supplier-invoices/:id/payments', () => {
     assert.equal(posted.body.payment.currency, 'NPR');
     assert.equal(posted.body.payment.status, 'posted');
     assert.equal(posted.body.payment.origin, 'recorded');
-    assert.match(posted.body.payment.paymentNo, /^PAY-KTM-2026-\d{6}$/);
+    assert.match(posted.body.payment.paymentNo, new RegExp(`^PAY-KTM-${INVOICE_DATE.slice(0, 4)}-\\d{6}$`));
     assert.equal(posted.body.invoice.paidAmount, 100.25);
     assert.equal(posted.body.invoice.status, 'partial');
     assert.equal(posted.body.payment.idempotencyKey, undefined);

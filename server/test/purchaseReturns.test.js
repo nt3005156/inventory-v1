@@ -7,6 +7,15 @@ import {PurchaseReturn, PurchaseReturnCounter} from '../src/models/purchasing.js
 import {ensurePurchaseReturnIndexes} from '../src/services/purchaseReturnMigration.js';
 import {returnPurchaseOrder} from '../src/services/returns.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
+import {daysAhead} from './dates.js';
+
+
+// FEFO ordering depends on EARLY < NEAR < LATE < FAR, all still in the future.
+const EXPIRY_NEAR = daysAhead(120);
+const EXPIRY_EARLY = daysAhead(300);
+const EXPIRY_LATE = daysAhead(500);
+const EXPIRY_FAR = daysAhead(700);
+const EXPIRY_PAST = '2026-01-15';
 
 let world;
 let supplier;
@@ -96,8 +105,8 @@ async function optionsFor(po, user = world.manager) {
 describe('durable purchase returns', () => {
   it('splits one PO line across exact receipt lots with durable evidence and server-owned NPR/VAT values', async () => {
     let po = await createApprovedPo({qty: 30, unitPrice: 10, vatRate: 13});
-    po = await receiveLot(po, {qty: 10, batchNumber: 'LOT-LATE', expiryDate: '2027-12-31'});
-    po = await receiveLot(po, {qty: 12, batchNumber: 'LOT-EARLY', expiryDate: '2027-06-30'});
+    po = await receiveLot(po, {qty: 10, batchNumber: 'LOT-LATE', expiryDate: EXPIRY_LATE});
+    po = await receiveLot(po, {qty: 12, batchNumber: 'LOT-EARLY', expiryDate: EXPIRY_EARLY});
 
     const options = await optionsFor(po);
     assert.equal(options.status, 200, options.body?.message);
@@ -141,7 +150,7 @@ describe('durable purchase returns', () => {
 
   it('keeps supplier credit at the authoritative PO cost while removing stock at immutable lot valuation', async () => {
     let po = await createApprovedPo({qty: 10, unitPrice: 20, vatRate: 13});
-    po = await receiveLot(po, {qty: 10, batchNumber: 'VALUATION', expiryDate: '2028-01-01'});
+    po = await receiveLot(po, {qty: 10, batchNumber: 'VALUATION', expiryDate: EXPIRY_FAR});
     const options = await optionsFor(po);
     const batchId = options.body.items[0].batches[0].batchId;
     await InventoryBatch.collection.updateOne({_id: new mongoose.Types.ObjectId(batchId)}, {$set: {unitCost: 6}});
@@ -219,7 +228,7 @@ describe('durable purchase returns', () => {
 
   it('offers only receipt-created lots and constrains returns by their current availability', async () => {
     let po = await createApprovedPo({qty: 20});
-    po = await receiveLot(po, {qty: 20, batchNumber: 'PO-LOT', expiryDate: '2027-01-01'});
+    po = await receiveLot(po, {qty: 20, batchNumber: 'PO-LOT', expiryDate: EXPIRY_NEAR});
     const firstOptions = await optionsFor(po);
     const receiptBatch = firstOptions.body.items[0].batches[0];
     assert.equal(firstOptions.body.items[0].batches.length, 1);
@@ -287,7 +296,7 @@ describe('durable purchase returns', () => {
 
   it('requires a stable key, rejects browser-owned cost and stale selectors, and validates Other details', async () => {
     let po = await createApprovedPo({qty: 10});
-    po = await receiveLot(po, {qty: 10, batchNumber: 'VALIDATE', expiryDate: '2027-01-01'});
+    po = await receiveLot(po, {qty: 10, batchNumber: 'VALIDATE', expiryDate: EXPIRY_NEAR});
     const options = await optionsFor(po);
     const batchId = options.body.items[0].batches[0].batchId;
     const line = {itemId: String(po.items[0]._id), batchId: String(batchId), qty: 1};
@@ -304,7 +313,7 @@ describe('durable purchase returns', () => {
 
   it('replays the same request without another movement and rejects key reuse with changed payload', async () => {
     let po = await createApprovedPo({qty: 12});
-    po = await receiveLot(po, {qty: 12, batchNumber: 'REPLAY', expiryDate: '2027-01-01'});
+    po = await receiveLot(po, {qty: 12, batchNumber: 'REPLAY', expiryDate: EXPIRY_NEAR});
     const options = await optionsFor(po);
     const item = {itemId: String(po.items[0]._id), batchId: String(options.body.items[0].batches[0].batchId), qty: 4};
     const first = await postReturn(po, [item], {key: 'same-durable-return'});
@@ -323,7 +332,7 @@ describe('durable purchase returns', () => {
 
   it('serializes concurrent returns so one cannot overdraw the same PO line or lot', async () => {
     let po = await createApprovedPo({qty: 10});
-    po = await receiveLot(po, {qty: 10, batchNumber: 'RACE', expiryDate: '2027-01-01'});
+    po = await receiveLot(po, {qty: 10, batchNumber: 'RACE', expiryDate: EXPIRY_NEAR});
     const options = await optionsFor(po);
     const item = {itemId: String(po.items[0]._id), batchId: String(options.body.items[0].batches[0].batchId), qty: 7};
     const results = await Promise.all([
@@ -340,7 +349,7 @@ describe('durable purchase returns', () => {
 
   it('enforces manager write access, staff read-only access, branch isolation and tenant isolation', async () => {
     let po = await createApprovedPo({qty: 10});
-    po = await receiveLot(po, {qty: 10, batchNumber: 'SCOPE', expiryDate: '2027-01-01'});
+    po = await receiveLot(po, {qty: 10, batchNumber: 'SCOPE', expiryDate: EXPIRY_NEAR});
     const options = await optionsFor(po);
     const item = {itemId: String(po.items[0]._id), batchId: String(options.body.items[0].batches[0].batchId), qty: 1};
 

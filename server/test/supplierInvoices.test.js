@@ -5,6 +5,16 @@ import {Audit, Supplier, User} from '../src/models/index.js';
 import {Branch, PurchaseOrder, Restaurant, SupplierInvoice, SupplierPayment} from '../src/models/operations.js';
 import {ensureSupplierInvoiceIndexes} from '../src/services/supplierInvoiceMigration.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
+import {daysAgo} from './dates.js';
+
+
+// Invoice dates must not be in the future, and the list filter window has to
+// include FILTER-A while excluding FILTER-B.
+const INVOICE_DATE = daysAgo(2);
+const BEFORE_INVOICE = daysAgo(3);
+const FILTER_FROM = daysAgo(16);
+const FILTER_TO = daysAgo(15);
+const FILTER_OUTSIDE = daysAgo(7);
 
 let world;
 let supplier;
@@ -34,7 +44,7 @@ function postInvoice(body = {}, {user = world.manager, key = `invoice-${++sequen
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
       invoiceNo: `SUP-${sequence || 1}`,
-      invoiceDate: '2026-08-15',
+      invoiceDate: INVOICE_DATE,
       subtotal: 1000,
       ...body
     }
@@ -165,7 +175,7 @@ describe('supplier invoice migration and indexes', () => {
       subtotal: 10,
       vat: 1.3,
       total: 11.3,
-      invoiceDate: new Date('2026-08-01T00:00:00.000Z'),
+      invoiceDate: new Date(`${FILTER_FROM}T00:00:00.000Z`),
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -210,7 +220,7 @@ describe('supplier invoice migration and indexes', () => {
     const base = {
       restaurant: String(world.restaurant._id),
       branch: String(world.branchA._id),
-      invoiceDate: new Date('2026-08-01T00:00:00.000Z'),
+      invoiceDate: new Date(`${FILTER_FROM}T00:00:00.000Z`),
       subtotal: 100,
       vat: 13,
       total: 113,
@@ -275,7 +285,7 @@ describe('POST /api/supplier-invoices', () => {
     const mismatch = await postInvoice({invoiceNo: 'VAT-FORGED', subtotal: 1000, vat: 1, total: 1001});
     assert.equal(mismatch.status, 400);
     assert.match(mismatch.body.message, /VAT does not match/);
-    const badDueDate = await postInvoice({invoiceNo: 'BAD-DATE', dueDate: '2026-08-14'});
+    const badDueDate = await postInvoice({invoiceNo: 'BAD-DATE', dueDate: BEFORE_INVOICE});
     assert.equal(badDueDate.status, 400);
     assert.match(badDueDate.body.message, /Due date/);
   });
@@ -606,13 +616,13 @@ describe('supplier invoice update and query concurrency', () => {
   });
 
   it('scopes manager list/detail access and filters status, supplier, dates and text', async () => {
-    const first = await postInvoice({invoiceNo: 'FILTER-A', invoiceDate: '2026-08-01', notes: 'rice shipment'});
+    const first = await postInvoice({invoiceNo: 'FILTER-A', invoiceDate: FILTER_FROM, notes: 'rice shipment'});
     assert.equal(first.status, 201, first.body?.message);
     const otherSupplier = await Supplier.create({restaurant: world.restaurant._id, name: 'Second Supplier'});
-    const second = await postInvoice({supplier: String(otherSupplier._id), invoiceNo: 'FILTER-B', invoiceDate: '2026-08-10'});
+    const second = await postInvoice({supplier: String(otherSupplier._id), invoiceNo: 'FILTER-B', invoiceDate: FILTER_OUTSIDE});
     assert.equal(second.status, 201, second.body?.message);
 
-    const filtered = await request(`/api/supplier-invoices?branch=${world.branchA._id}&supplier=${supplier._id}&status=unpaid&from=2026-08-01&to=2026-08-02&q=rice`, {
+    const filtered = await request(`/api/supplier-invoices?branch=${world.branchA._id}&supplier=${supplier._id}&status=unpaid&from=${FILTER_FROM}&to=${FILTER_TO}&q=rice`, {
       token: tokenFor(world.manager)
     });
     assert.equal(filtered.status, 200, filtered.body?.message);

@@ -14,8 +14,17 @@ import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {SupplierIngredient, SupplierPriceHistory} from '../src/models/supplierCatalog.js';
 import {ensureOperationalIndexes} from '../src/services/startup.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
+import {daysAgo, daysAhead, today} from './dates.js';
 
 let baseUrl;
+
+// The lifecycle records receipts, returns and payments at the current instant,
+// so the reporting window has to include today rather than a fixed date.
+const TODAY = today();
+const ORDER_DATE = daysAgo(1);
+const EXPECTED_DELIVERY = daysAhead(1);
+const DUE_DATE = daysAhead(14);
+
 let world;
 const sockets = [];
 
@@ -115,8 +124,8 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     const poInput = {
       branch: String(world.branchA._id),
       supplier: supplier._id,
-      orderDate: '2026-08-16',
-      expectedDeliveryDate: '2026-08-18',
+      orderDate: ORDER_DATE,
+      expectedDeliveryDate: EXPECTED_DELIVERY,
       notes: 'Phase 1 replenishment lifecycle',
       items: [{
         catalogItem: catalog._id,
@@ -127,7 +136,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     const createdPo = expectStatus(await request('/api/purchase-orders', {
       method: 'POST', token: managerToken, headers: {'Idempotency-Key': 'phase1-po'}, body: poInput
     }), 201);
-    assert.match(createdPo.poNo, /^PO-KTM-2026-\d{6}$/);
+    assert.match(createdPo.poNo, new RegExp(`^PO-KTM-${TODAY.slice(0, 4)}-\\d{6}$`));
     assert.equal(createdPo.status, 'draft');
     assert.equal(createdPo.items[0].orderedQty, 1000);
     assert.equal(createdPo.items[0].unit, 'g');
@@ -165,8 +174,8 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
         damagedQty: 100,
         damageReason: 'packaging_damage',
         damageNotes: 'Inner liner torn during transport',
-        batchNumber: 'HP-LOT-2026-08',
-        expiryDate: '2027-08-31'
+        batchNumber: `HP-LOT-${TODAY.slice(0, 7)}`,
+        expiryDate: daysAhead(365)
       }]
     };
     const received = expectStatus(await request(`/api/purchase-orders/${approved._id}/receive`, {
@@ -188,7 +197,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
       token: managerToken
     }), 200);
     const returnBatch = returnOptions.items[0].batches[0];
-    assert.equal(returnBatch.batchNumber, 'HP-LOT-2026-08');
+    assert.equal(returnBatch.batchNumber, `HP-LOT-${TODAY.slice(0, 7)}`);
     assert.equal(returnBatch.availableQty, 900);
     const returnInput = {
       reason: 'quality',
@@ -218,9 +227,9 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
       branch: String(world.branchA._id),
       supplier: supplier._id,
       purchaseOrder: approved._id,
-      invoiceNo: 'HP-INV-2026-0816',
-      invoiceDate: '2026-08-16',
-      dueDate: '2026-08-30',
+      invoiceNo: `HP-INV-${TODAY.replace(/-/g, '')}`,
+      invoiceDate: ORDER_DATE,
+      dueDate: DUE_DATE,
       subtotal: 800,
       priceIncludesVat: false,
       vatRate: 13,
@@ -246,7 +255,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
       amount: 904,
       method: 'bank',
       reference: 'NCHL-PHASE1-0001',
-      paidAt: '2026-08-16',
+      paidAt: ORDER_DATE,
       expectedInvoiceVersion: invoice.__v
     };
     const paid = expectStatus(await request(`/api/supplier-invoices/${invoice._id}/payments`, {
@@ -255,7 +264,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     }), 201);
     assert.equal(paid.invoice.status, 'paid');
     assert.equal(paid.invoice.paidAmount, 904);
-    assert.match(paid.payment.paymentNo, /^PAY-KTM-2026-\d{6}$/);
+    assert.match(paid.payment.paymentNo, new RegExp(`^PAY-KTM-${TODAY.slice(0, 4)}-\\d{6}$`));
     const paymentReplay = expectStatus(await request(`/api/supplier-invoices/${invoice._id}/payments`, {
       method: 'POST', token: managerToken,
       headers: {'Idempotency-Key': 'phase1-payment'}, body: paymentInput
@@ -264,7 +273,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     assert.equal(paymentReplay.payment._id, paid.payment._id);
 
     const statement = expectStatus(await request(
-      `/api/suppliers/${supplier._id}/statement?branch=${world.branchA._id}&from=2026-08-16&to=2026-08-16`,
+      `/api/suppliers/${supplier._id}/statement?branch=${world.branchA._id}&from=${ORDER_DATE}&to=${TODAY}`,
       {token: ownerToken}
     ), 200);
     assert.equal(statement.invoiced, 904);
@@ -274,7 +283,7 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     assert.deepEqual(statement.lines.map(line => line.type), ['invoice', 'payment']);
 
     const report = expectStatus(await request(
-      `/api/reports/purchasing?branch=${world.branchA._id}&from=2026-08-16&to=2026-08-16`,
+      `/api/reports/purchasing?branch=${world.branchA._id}&from=${ORDER_DATE}&to=${TODAY}`,
       {token: ownerToken}
     ), 200);
     assert.equal(report.purchaseOrders.count, 1);

@@ -8,6 +8,11 @@ import {acceptedQty, remainingQty} from '../src/services/receiving.js';
 import {canReceivePo, canTransitionPo} from '../src/services/purchaseOrders.js';
 import {returnableQty} from '../src/services/returns.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
+import {daysAhead} from './dates.js';
+
+
+// Expiry must stay in the future so these lots never read as expired stock.
+const FUTURE_EXPIRY = daysAhead(365);
 
 let world;
 let supplier;
@@ -106,7 +111,7 @@ describe('POST /api/purchase-orders/:id/receive', () => {
       receivedQty: 400,
       damagedQty: 50,
       batchNumber: 'LOT-A',
-      expiryDate: '2026-12-31'
+      expiryDate: FUTURE_EXPIRY
     }], {notes: 'First truck', key: 'gr-1'});
     assert.equal(res.status, 201, res.body?.message);
     assert.equal(res.body.purchaseOrder.status, 'partially_received');
@@ -122,7 +127,7 @@ describe('POST /api/purchase-orders/:id/receive', () => {
     });
     assert.ok(lot);
     assert.equal(lot.quantity, 350);
-    assert.equal(lot.expiryDate.toISOString().slice(0, 10), '2026-12-31');
+    assert.equal(lot.expiryDate.toISOString().slice(0, 10), FUTURE_EXPIRY);
     const txs = await InventoryTransaction.find({type: 'PURCHASE', referenceType: 'goods_receipt'});
     assert.equal(txs.length, 1);
     assert.equal(txs[0].changeQty, 350);
@@ -723,7 +728,7 @@ describe('purchasing E2E workflow', () => {
       receivedQty: 400,
       damagedQty: 50,
       batchNumber: 'LOT-E2E',
-      expiryDate: '2026-12-31'
+      expiryDate: FUTURE_EXPIRY
     }], {notes: 'First truck', key: 'e2e-gr'});
     assert.equal(rec.status, 201, rec.body?.message);
     assert.equal(rec.body.purchaseOrder.status, 'partially_received');

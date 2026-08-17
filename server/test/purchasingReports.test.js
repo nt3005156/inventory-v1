@@ -6,6 +6,15 @@ import {InventoryTransaction, PurchaseOrder, SupplierInvoice, SupplierPayment} f
 import {GoodsReceipt, PurchaseReturn} from '../src/models/purchasing.js';
 import {purchasingReportPeriod} from '../src/services/purchasingReport.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
+import {daysAgo} from './dates.js';
+
+
+// Report windows must sit at or before today, and the reversal/void instants
+// they reconstruct have to fall inside those windows.
+const EVENT_DAY = daysAgo(1);
+const BEFORE_EVENT = daysAgo(2);
+const DAY_TWO = daysAgo(6);
+const DAY_ONE = daysAgo(7);
 
 let world;
 let supplier;
@@ -83,7 +92,7 @@ async function pay(invoice, overrides = {}) {
     method: 'POST',
     token: tokenFor(world.manager),
     headers: {'Idempotency-Key': `report-payment-${sequence}`},
-    body: {amount: 20, method: 'cash', paidAt: '2026-08-10', ...overrides}
+    body: {amount: 20, method: 'cash', paidAt: DAY_ONE, ...overrides}
   });
   assert.equal(response.status, 201, response.body?.message);
   return response.body.payment;
@@ -148,7 +157,7 @@ describe('purchasing report periods', () => {
       referenceId: {$in: [receiptId, returnId]}
     }, {$set: {createdAt: canonical}});
 
-    const day = await report({from: '2026-08-10', to: '2026-08-10'});
+    const day = await report({from: DAY_ONE, to: DAY_ONE});
     assert.equal(day.status, 200, day.body?.message);
     assert.equal(day.body.purchaseOrders.count, 1);
     assert.equal(day.body.receipts.count, 1);
@@ -166,13 +175,13 @@ describe('purchasing report periods', () => {
       {referenceId: receiptId, type: 'PURCHASE'},
       {$set: {totalCost: 19}}
     );
-    const mismatch = await report({from: '2026-08-10', to: '2026-08-10'});
+    const mismatch = await report({from: DAY_ONE, to: DAY_ONE});
     assert.equal(mismatch.status, 200, mismatch.body?.message);
     assert.equal(mismatch.body.reconciliation.balanced, false);
     assert.equal(mismatch.body.reconciliation.receiptsToPurchaseLedger.difference, 1);
     assert.ok(mismatch.body.dataQuality.warnings.includes('Accepted receipt value does not match purchase ledger value for the period'));
 
-    const nextDay = await report({from: '2026-08-11', to: '2026-08-11'});
+    const nextDay = await report({from: DAY_TWO, to: DAY_TWO});
     assert.equal(nextDay.status, 200, nextDay.body?.message);
     assert.equal(nextDay.body.activity.empty, true);
   });
@@ -183,7 +192,7 @@ describe('purchasing report financial history', () => {
     const invoice = await createInvoice();
     await pay(invoice);
 
-    const response = await report({from: '2026-08-10', to: '2026-08-10'});
+    const response = await report({from: DAY_ONE, to: DAY_ONE});
     assert.equal(response.status, 200, response.body?.message);
     assert.equal(response.body.invoices.count, 0);
     assert.equal(response.body.invoices.grossInvoiced, 0);
@@ -210,16 +219,16 @@ describe('purchasing report financial history', () => {
     assert.equal(reversed.status, 201, reversed.body?.message);
     await SupplierPayment.collection.updateOne(
       {_id: new mongoose.Types.ObjectId(payment._id)},
-      {$set: {reversedAt: new Date('2026-08-16T06:00:00.000Z')}}
+      {$set: {reversedAt: new Date(`${EVENT_DAY}T06:00:00.000Z`)}}
     );
 
-    const before = await report({from: '2026-08-10', to: '2026-08-15'});
+    const before = await report({from: DAY_ONE, to: BEFORE_EVENT});
     assert.equal(before.status, 200, before.body?.message);
     assert.equal(before.body.invoices.paid, 20);
     assert.equal(before.body.invoices.reversed, 0);
     assert.equal(before.body.invoices.due, 93);
 
-    const reversalDay = await report({from: '2026-08-16', to: '2026-08-16'});
+    const reversalDay = await report({from: EVENT_DAY, to: EVENT_DAY});
     assert.equal(reversalDay.status, 200, reversalDay.body?.message);
     assert.equal(reversalDay.body.invoices.grossPaid, 0);
     assert.equal(reversalDay.body.invoices.reversed, 20);
@@ -235,16 +244,16 @@ describe('purchasing report financial history', () => {
     assert.equal(voided.status, 200, voided.body?.message);
     await SupplierInvoice.collection.updateOne(
       {_id: new mongoose.Types.ObjectId(invoice._id)},
-      {$set: {voidedAt: new Date('2026-08-16T06:00:00.000Z')}}
+      {$set: {voidedAt: new Date(`${EVENT_DAY}T06:00:00.000Z`)}}
     );
 
-    const historical = await report({to: '2026-08-15'});
+    const historical = await report({to: BEFORE_EVENT});
     assert.equal(historical.status, 200, historical.body?.message);
     assert.equal(historical.body.invoices.grossInvoiced, 113);
     assert.equal(historical.body.invoices.voided, 0);
     assert.equal(historical.body.invoices.due, 113);
 
-    const voidDay = await report({from: '2026-08-16', to: '2026-08-16'});
+    const voidDay = await report({from: EVENT_DAY, to: EVENT_DAY});
     assert.equal(voidDay.status, 200, voidDay.body?.message);
     assert.equal(voidDay.body.invoices.grossInvoiced, 0);
     assert.equal(voidDay.body.invoices.voided, 113);

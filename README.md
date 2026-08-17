@@ -90,6 +90,16 @@ POST /api/orders
 }
 ```
 
+## Test dates
+
+The API validates against the real Asia/Kathmandu clock: statement and report windows may not end
+in the future, and supplier payments may not be post-dated. Tests therefore derive their dates
+from `server/test/dates.js` (`today`, `daysAgo`, `daysAhead`, `daysFromToday`) instead of hardcoding
+a calendar day, so a suite keeps testing the same relationships whenever it runs.
+
+Literal dates are still used where the value is deliberately time-independent — malformed input
+such as `2026-02-30`, reversed ranges, or fixed ISO instants asserted by pure period arithmetic.
+
 ## Recommended local start: Docker Compose
 
 Docker Compose starts a single-member MongoDB replica set, waits for a writable primary, runs API migrations, waits for API readiness, and then starts the web proxy.
