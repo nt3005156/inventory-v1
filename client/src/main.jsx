@@ -26,11 +26,18 @@ function App() {
   const [loading, setLoading] = useState(false);
 
   const call = async (path, opts = {}) => {
+    const {raw, ...init} = opts;
     const r = await fetch(API + path, {
-      ...opts,
-      headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...opts.headers}
+      ...init,
+      headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...init.headers}
     });
-    if (!r.ok) throw new Error((await r.json()).message);
+    if (!r.ok) {
+      // Error bodies are JSON even when the success body is not (e.g. receipts).
+      let message = 'Request failed';
+      try { message = (await r.json()).message || message; } catch { message = await r.text() || message; }
+      throw new Error(message);
+    }
+    if (raw) return r.text();
     return r.status === 204 ? null : r.json();
   };
 

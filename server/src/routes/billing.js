@@ -6,6 +6,7 @@ import {Order, Payment} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder} from '../services/billing.js';
 import {refundOrder, summarisePayments} from '../services/refunds.js';
+import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
 const r = Router();
@@ -113,6 +114,33 @@ r.get('/orders/:id/payment-summary', auth(roles), async (req, res) => {
     res.json(summarisePayments(order, payments));
   } catch (e) {
     fail(res, e);
+  }
+});
+
+// Receipt / tax invoice. `issue=true` (or format=html) allocates the invoice
+// number on first print and records the reprint count.
+r.get('/orders/:id/receipt', auth(roles), async (req, res) => {
+  const wantsHtml = String(req.query.format || '').toLowerCase() === 'html';
+  const issue = wantsHtml || String(req.query.issue || '') === 'true';
+  const session = await mongoose.startSession();
+  try {
+    let receipt;
+    if (issue) {
+      await session.withTransaction(async () => {
+        receipt = await getReceipt({orderId: req.params.id, user: req.user, issue: true, session});
+      });
+    } else {
+      receipt = await getReceipt({orderId: req.params.id, user: req.user, issue: false});
+    }
+    if (wantsHtml) {
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.send(renderReceiptHtml(receipt));
+    }
+    res.json(receipt);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 

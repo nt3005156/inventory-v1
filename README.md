@@ -139,6 +139,29 @@ sees what was settled; the order only becomes `refunded` once every rupee is ret
 partially refunded ticket can be topped up again. Refunded money is netted out of P&L revenue
 (`revenue`, with `grossRevenue` and `refunds` reported alongside).
 
+## Receipts (Phase 4E)
+
+`GET /api/orders/:id/receipt` returns the receipt as JSON; `?format=html` returns a
+self-contained 80mm thermal-printer document that prints straight from the browser. The HTML
+references no external stylesheet, font or image, so it renders identically on a till with no
+network access.
+
+The receipt carries the full **order details** (number, channel, table or delivery address,
+customer, every line with its modifiers, special instructions and per-line discount), the
+**VAT breakdown** (taxable value, rate, and tax amount, with per-line net and VAT), and the
+**payment details** (each tender with its transaction id, refunds with reasons, and any balance
+due).
+
+**Tax invoice numbers.** A preview does not consume a number. Printing (`?format=html`, or
+`?issue=true`) allocates an immutable `INV-<BRANCH>-<YEAR>-######` from a per-branch, per-year
+counter — the same gapless pattern used for purchase orders and supplier payments — and stores it
+on the order. Reprints reuse that number and are stamped `REPRINT (n)`. A cancelled order cannot
+be invoiced.
+
+Every figure is read from the stored order, never recalculated, so a reprint months later shows
+exactly what the guest was charged even after menu prices or VAT settings change. Set
+`Restaurant.pan` and `Restaurant.receiptFooter` to print your VAT registration and a footer line.
+
 ## Test dates
 
 The API validates against the real Asia/Kathmandu clock: statement and report windows may not end

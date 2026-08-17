@@ -19,6 +19,7 @@ export default function POS({menu = [], branches = [], user, call}) {
   const [tableId, setTableId] = useState('');
   const [tables, setTables] = useState([]);
   const [posError, setPosError] = useState('');
+  const [lastOrder, setLastOrder] = useState(null);
   const [orderDiscount, setOrderDiscount] = useState({kind: 'percentage', value: '', reason: ''});
   const [couponCode, setCouponCode] = useState('');
   const [couponInfo, setCouponInfo] = useState(null);
@@ -451,6 +452,7 @@ export default function POS({menu = [], branches = [], user, call}) {
                   body: JSON.stringify({amount: part.amount, method: part.method})
                 });
               }
+              setLastOrder({id: order._id, orderNo: order.orderNo, total: order.total});
               setCart([]);
               setTableId('');
               setTenders([]);
@@ -467,6 +469,26 @@ export default function POS({menu = [], branches = [], user, call}) {
             }
           }}
         >Complete order</button>
+        {lastOrder && (
+          <div className="last-order">
+            <div>
+              <b>{lastOrder.orderNo}</b>
+              <small>Settled · {rs(lastOrder.total)}</small>
+            </div>
+            <button
+              className="receive"
+              onClick={() => {
+                // Opened in a new tab so the browser print dialog targets the
+                // 80mm receipt document, not the POS screen.
+                const win = window.open('', '_blank');
+                if (!win) { setPosError('Allow pop-ups to print the receipt'); return; }
+                call(`/orders/${lastOrder.id}/receipt?format=html`, {raw: true})
+                  .then(html => { win.document.write(html); win.document.close(); })
+                  .catch(e => { win.close(); setPosError(e.message || 'Could not load the receipt'); });
+              }}
+            >Print receipt</button>
+          </div>
+        )}
       </section>
     </div>
   );
