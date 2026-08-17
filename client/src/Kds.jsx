@@ -3,10 +3,37 @@ import {connectBranchSocket} from './socket.js';
 
 const COLUMNS = [
   {key: 'new', title: 'New', statuses: ['pending', 'confirmed']},
-  {key: 'accepted', title: 'Accepted', statuses: ['accepted']},
-  {key: 'preparing', title: 'Preparing', statuses: ['preparing']},
+  {key: 'preparing', title: 'Preparing', statuses: ['accepted', 'preparing']},
   {key: 'ready', title: 'Ready', statuses: ['ready']}
 ];
+
+const TARGET_BY_TYPE = {'dine-in': 15, counter: 12, takeaway: 12, delivery: 10};
+
+// Mirrors the server's escalation so the board ages between polls.
+function targetFor(order) {
+  const itemMax = (order.items || []).reduce((m, i) => Math.max(m, Number(i.prepMinutes || 0)), 0);
+  return itemMax > 0 ? itemMax : (TARGET_BY_TYPE[order.type] ?? 15);
+}
+
+function ageOf(order, nowMs) {
+  return Math.max(0, Math.floor((nowMs - new Date(order.createdAt).getTime()) / 60000));
+}
+
+function priorityOf(order, nowMs) {
+  if (order.priority === 'rush') return 'overdue';
+  const target = targetFor(order);
+  const age = ageOf(order, nowMs);
+  if (age >= target * 1.5) return 'overdue';
+  if (age >= target) return 'late';
+  if (age >= target * 0.75) return 'due';
+  return 'normal';
+}
+
+const RANK = {overdue: 0, late: 1, due: 2, normal: 3};
+
+function stationsOf(order) {
+  return [...new Set((order.items || []).map(i => String(i.station || 'kitchen').toLowerCase()))].sort();
+}
 
 const QUEUE = ['pending', 'confirmed', 'accepted', 'preparing', 'ready'];
 
@@ -59,6 +86,9 @@ export default function Kds({call, branches = [], user, token}) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [live, setLive] = useState('connecting');
+  const [station, setStation] = useState('');
+  const [stations, setStations] = useState([]);
+  const [nowMs, setNowMs] = useState(Date.now());
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
 
   const canAdvance = ['owner', 'manager', 'staff'].includes(user?.role);
@@ -85,6 +115,18 @@ export default function Kds({call, branches = [], user, token}) {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    call('/kitchen/stations')
+      .then(r => setStations(r?.stations || []))
+      .catch(() => setStations([]));
+  }, []);
+
+  // Age and priority are time-derived, so re-render every 30s even when idle.
+  useEffect(() => {
+    const tick = setInterval(() => setNowMs(Date.now()), 30000);
+    return () => clearInterval(tick);
+  }, []);
 
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -160,6 +202,19 @@ export default function Kds({call, branches = [], user, token}) {
 
   const liveLabel = live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting' : live === 'offline' ? 'Offline' : 'Connecting';
 
+  // Station filter and priority ordering are applied client-side so the live
+  // socket feed stays authoritative and the board never waits on a refetch.
+  const visible = orders
+    .filter(o => !station || stationsOf(o).includes(station))
+    .map(o => ({...o, _priority: priorityOf(o, nowMs), _age: ageOf(o, nowMs)}))
+    .sort((a, b) => {
+      const aRush = a.priority === 'rush', bRush = b.priority === 'rush';
+      if (aRush !== bRush) return aRush ? -1 : 1;
+      const rank = RANK[a._priority] - RANK[b._priority];
+      if (rank !== 0) return rank;
+      return new Date(a.createdAt) - new Date(b.createdAt);
+    });
+
   return (
     <section className="panel kds-panel">
       <div className="title">
@@ -169,6 +224,15 @@ export default function Kds({call, branches = [], user, token}) {
         </div>
         <div className="kds-toolbar">
           <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{liveLabel}</span>
+          <select
+            className="kds-branch"
+            value={station}
+            onChange={e => setStation(e.target.value)}
+            title="Station filter"
+          >
+            <option value="">All stations</option>
+            {stations.map(st => <option key={st} value={st}>{st}</option>)}
+          </select>
           <select
             className="kds-branch"
             value={branchId}
@@ -181,11 +245,13 @@ export default function Kds({call, branches = [], user, token}) {
       </div>
       {error && <p className="danger">{error}</p>}
       {loading && <p>Loading kitchen queue…</p>}
-      {!loading && !orders.length && !error && <p className="empty">No tickets in the kitchen queue.</p>}
-      {!loading && !!orders.length && (
+      {!loading && !visible.length && !error && (
+        <p className="empty">{station ? `No tickets for the ${station} station.` : 'No tickets in the kitchen queue.'}</p>
+      )}
+      {!loading && !!visible.length && (
         <div className="kds-board">
           {COLUMNS.map(col => {
-            const tickets = orders.filter(o => col.statuses.includes(o.status));
+            const tickets = visible.filter(o => col.statuses.includes(o.status));
             return (
               <div className="kds-col" key={col.key}>
                 <header className="kds-colhead">
@@ -196,25 +262,56 @@ export default function Kds({call, branches = [], user, token}) {
                   const action = nextAction(order.status);
                   const tableName = order.table?.name;
                   return (
-                    <article className={'kds-ticket kds-' + order.status} key={order._id}>
+                    <article className={'kds-ticket kds-' + order.status + ' kds-p-' + order._priority} key={order._id}>
                       <div className="kds-tickethead">
                         <b>{order.orderNo || 'Order'}</b>
-                        <label className="pill">{order.status}</label>
+                        <label className={'pill kds-prio kds-prio-' + order._priority}>
+                          {order.priority === 'rush' ? 'RUSH' : order._priority}
+                        </label>
                       </div>
                       <div className="kds-meta">
                         <span>{order.type || 'counter'}</span>
                         {tableName && <span>Table {tableName}</span>}
-                        <span>{clock(order.createdAt)} · {elapsed(order.createdAt)}</span>
+                        <span className={order._age >= targetFor(order) ? 'kds-agelate' : ''}>
+                          {order._age}m / {targetFor(order)}m
+                        </span>
+                        <span>{clock(order.createdAt)}</span>
                       </div>
+                      {!station && stationsOf(order).length > 1 && (
+                        <div className="kds-stations">
+                          {stationsOf(order).map(st => <span key={st}>{st}</span>)}
+                        </div>
+                      )}
                       <ul className="kds-items">
-                        {(order.items || []).map((item, i) => (
+                        {(order.items || [])
+                          .filter(item => !station || String(item.station || 'kitchen').toLowerCase() === station)
+                          .map((item, i) => (
                           <li key={order._id + '-' + i}>
                             <b>{item.qty}×</b> {item.name}
+                            {item.station && !station && <em className="kds-st">{item.station}</em>}
                             {item.notes && <small>{item.notes}</small>}
+                            {item.specialInstructions && <small>“{item.specialInstructions}”</small>}
                           </li>
                         ))}
                       </ul>
                       <div className="kds-actions">
+                        {canAdvance && (
+                          <button
+                            className={'kds-rush' + (order.priority === 'rush' ? ' on' : '')}
+                            disabled={!!busy}
+                            title="Toggle rush priority"
+                            onClick={async () => {
+                              setBusy(order._id + 'rush');
+                              try {
+                                await call(`/orders/${order._id}/priority`, {
+                                  method: 'PATCH',
+                                  body: JSON.stringify({priority: order.priority === 'rush' ? 'normal' : 'rush'})
+                                });
+                                await loadRef.current();
+                              } catch (e) { setError(e.message); } finally { setBusy(''); }
+                            }}
+                          >{order.priority === 'rush' ? 'Un-rush' : 'Rush'}</button>
+                        )}
                         {canAdvance && action && (
                           <button
                             className="kds-go"

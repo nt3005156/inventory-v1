@@ -118,6 +118,10 @@ export const MenuItem=model('MenuItem',new Schema({
     updatedBy:{type:Schema.Types.ObjectId,ref:'User'},
     reason:{type:String,trim:true,maxlength:500}
   }],default:[]},
+  // Phase 5A — KDS: which kitchen section prepares this item, and how long it
+  // is expected to take. Drives station filtering and age-based priority.
+  station:{type:String,trim:true,lowercase:true,maxlength:40,default:'kitchen',index:true},
+  prepMinutes:{type:Number,min:0,max:600,default:0},
   // Phase 4B — POS modifiers. A group is a choice presented at the till
   // (Size, Extras, Remove...); each option may re-price the line and may map
   // to an ingredient so stock and food cost follow the guest's choice.

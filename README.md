@@ -116,6 +116,41 @@ the audit log with the amount, reason, and who applied it. Creating and editing 
 owner/manager only, and retiring one is owner-only — coupons are deactivated rather than
 deleted so redemption history survives.
 
+## KDS & kitchen operations (Phase 5A)
+
+`GET /api/kitchen/board?branch=...` returns the kitchen queue as four working stages:
+
+```
+New  →  Preparing  →  Ready  →  Completed
+```
+
+The underlying order statuses are unchanged — billing, tables and the realtime feed depend on
+them — so the five queue statuses map onto the stages the kitchen thinks in: `pending`/`confirmed`
+are **New**, `accepted`/`preparing` are **Preparing**, then **Ready** and **Completed**. Completed
+tickets leave the board unless `includeCompleted=true`.
+
+| Filter | Query | Behaviour |
+|---|---|---|
+| Branch | `branch` (required) | Enforced by role; staff cannot read another branch |
+| Station | `station` | Ticket appears only if it has work there, and shows *only* that station's lines |
+| Stage | `stage` | One of `new`, `preparing`, `ready`, `completed` |
+| Priority | `priority` | One of `normal`, `due`, `late`, `overdue` |
+
+**Stations** are declared per menu item (`station`, `prepMinutes`) from
+`grill, fry, tandoor, curry, cold, bakery, dessert, bar, expo, kitchen`, and are copied onto the
+order line at creation so a ticket can be routed without re-reading the menu.
+`GET /api/kitchen/stations` lists them.
+
+**Priority** escalates automatically with order age against the ticket's target prep time — the
+slowest item on the ticket, or a per-channel default (delivery 10m, counter/takeaway 12m, dine-in
+15m). A ticket is `due` at 75% of target, `late` at target, and `overdue` at 1.5×. `PATCH
+/api/orders/:id/priority` flags a manual **rush**, which always sorts first and reports the top
+level so an expediter's call is never downgraded by the clock. The board sorts rush → escalation →
+oldest first, so nothing is starved behind a newer urgent ticket.
+
+Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
+once on first entry, so time-in-stage is measurable rather than estimated.
+
 ## Payments (Phase 4D)
 
 Tickets settle through `POST /api/orders/:id/payments` in **cash**, **card**, **eSewa** or
