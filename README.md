@@ -151,6 +151,39 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Tables & floor (Phase 6A)
+
+A branch floor is a set of **areas**, each holding tables with a **capacity** and a **status**.
+
+| Status | Meaning |
+|---|---|
+| `available` | Free to seat |
+| `occupied` | Party seated / open check |
+| `reserved` | Held for a booking |
+| `cleaning` | Being turned over |
+| `disabled` | Out of service (management only) |
+
+Transitions are guarded: `available → occupied/reserved/cleaning/disabled`,
+`reserved → occupied/available`, `occupied → cleaning/available`, `cleaning → available/disabled`,
+`disabled → available`. Seating and release are driven by the order lifecycle, and every change
+is broadcast to the branch room as `table:update`.
+
+`GET /api/tables/floor?branch=...` returns the floor plan grouped by area, with per-area table
+and seat counts plus a branch summary — table/seat totals, status counts, and both table and seat
+**occupancy rates** (computed over in-service tables only). Pass `includeRetired=true` to include
+retired tables.
+
+**Capacity** is required and bounded 1–40; a table that seats nobody is not a table. **Areas** are
+trimmed, whitespace-collapsed, capped at 60 characters and default to `Main Floor`. Table names
+are unique per branch **case-insensitively** — `T9` and `t9` are one table to a host.
+
+`DELETE /api/tables/:id` **retires** a table rather than deleting it, because orders, audit
+history and past receipts still reference it. Retiring is refused while the table is occupied or
+holds an open check, and is audited.
+
+All table endpoints are tenant-scoped: the branch must belong to the caller's restaurant, so an
+owner of another restaurant cannot read or modify this floor.
+
 ## Kitchen performance (Phase 5D)
 
 `GET /api/kitchen/performance?branch=...` (owner/manager) reports how the kitchen actually

@@ -35,7 +35,8 @@ export default function Tables({call, branches = [], user, token}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
-  const [form, setForm] = useState({name: '', area: 'Main Hall', seats: 4});
+  const [form, setForm] = useState({name: '', area: 'Main Floor', seats: 4});
+  const [plan, setPlan] = useState(null);
   const [ops, setOps] = useState({});
   const [live, setLive] = useState('connecting');
   const authToken = token || (typeof localStorage !== 'undefined' ? localStorage.token : '');
@@ -51,6 +52,7 @@ export default function Tables({call, branches = [], user, token}) {
     if (!branchId) {
       setLoading(false);
       setRows([]);
+      setPlan(null);
       return;
     }
     setLoading(true);
@@ -59,6 +61,11 @@ export default function Tables({call, branches = [], user, token}) {
       .then(data => setRows(Array.isArray(data) ? data : []))
       .catch(e => setError(e.message || 'Could not load tables'))
       .finally(() => setLoading(false));
+    // Floor occupancy is served pre-aggregated so the host does not have to
+    // read it off the card grid.
+    call('/tables/floor?branch=' + encodeURIComponent(branchId))
+      .then(setPlan)
+      .catch(() => setPlan(null));
   };
 
   useEffect(() => { load(); }, [branchId]);
@@ -213,19 +220,52 @@ export default function Tables({call, branches = [], user, token}) {
         </div>
       </div>
       {error && <p className="danger">{error}</p>}
+      {plan && (
+        <div className="kpis floor-kpis">
+          <article>
+            <small>Tables</small>
+            <strong>{plan.summary.tableCount}</strong>
+            <em>{plan.summary.areaCount} area{plan.summary.areaCount === 1 ? '' : 's'}</em>
+          </article>
+          <article>
+            <small>Occupied</small>
+            <strong>{plan.summary.statuses.occupied}</strong>
+            <em>{plan.summary.occupancyRate}% of in-service tables</em>
+          </article>
+          <article>
+            <small>Seats taken</small>
+            <strong>{plan.summary.seatedCapacity} / {plan.summary.totalSeats}</strong>
+            <em>{plan.summary.seatOccupancyRate}% of capacity</em>
+          </article>
+          <article>
+            <small>Free / cleaning</small>
+            <strong>{plan.summary.statuses.available} / {plan.summary.statuses.cleaning}</strong>
+            <em>{plan.summary.statuses.reserved} reserved · {plan.summary.statuses.disabled} out of service</em>
+          </article>
+        </div>
+      )}
       {canManage && (
         <form className="purchaseform" onSubmit={create}>
           <input required value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="Table name"/>
           <input value={form.area} onChange={e => setForm({...form, area: e.target.value})} placeholder="Area"/>
-          <input type="number" min="1" value={form.seats} onChange={e => setForm({...form, seats: e.target.value})} placeholder="Seats"/>
+          <input required type="number" min="1" max="40" value={form.seats} onChange={e => setForm({...form, seats: e.target.value})} placeholder="Seats"/>
           <button>Add table</button>
         </form>
       )}
       {loading && <p>Loading tables…</p>}
       {!loading && !rows.length && !error && <p className="empty">No tables at this branch.</p>}
-      {areas.map(area => (
+      {areas.map(area => {
+        const areaPlan = plan?.areas?.find(a => a.area === area);
+        return (
         <div key={area}>
-          <h3>{area}</h3>
+          <h3>
+            {area}
+            {areaPlan && (
+              <small className="area-meta">
+                {' '}· {areaPlan.tableCount} tables · {areaPlan.seats} seats · {areaPlan.statuses.occupied} occupied
+              </small>
+            )}
+          </h3>
           <div className="table-floor">
             {rows.filter(t => (t.area || 'Floor') === area).map(table => {
               const orders = checks(table);
@@ -292,6 +332,22 @@ export default function Tables({call, branches = [], user, token}) {
                       </button>
                     ))}
                   </div>
+                  {canManage && !orders.length && table.active !== false && (
+                    <div className="kds-actions">
+                      <button
+                        className="kds-cancel"
+                        disabled={!!busy || table.status === 'occupied'}
+                        title="Retire this table (kept for history)"
+                        onClick={async () => {
+                          setBusy(table._id + 'retire');
+                          try {
+                            await call('/tables/' + table._id, {method: 'DELETE'});
+                            await loadRef.current();
+                          } catch (e) { setError(e.message); } finally { setBusy(''); }
+                        }}
+                      >{busy === table._id + 'retire' ? 'Retiring…' : 'Retire'}</button>
+                    </div>
+                  )}
                   {canOperate && order && (
                     <div className="table-ops">
                       <select
@@ -325,7 +381,8 @@ export default function Tables({call, branches = [], user, token}) {
             })}
           </div>
         </div>
-      ))}
+        );
+      })}
     </section>
   );
 }

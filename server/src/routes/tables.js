@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders} from '../services/tables.js';
+import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, MAX_SEATS} from '../services/tables.js';
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
@@ -15,27 +15,32 @@ const fail = (res, e) => res.status(e.status || 400).json({message: e.message ||
 
 const createSchema = z.object({
   branch: z.string(),
-  name: z.string().min(1),
-  area: z.string().optional(),
-  seats: z.number().int().positive().optional(),
+  name: z.string().trim().min(1).max(40),
+  // A floor area groups tables on the plan; blank or novel-length values make
+  // the plan unusable, so it is trimmed and bounded.
+  area: z.string().trim().min(1).max(60).optional(),
+  // Capacity is the point of a table. It was optional and defaulted to 0,
+  // producing tables that could seat nobody.
+  seats: z.number().int().min(1).max(MAX_SEATS),
   status: z.enum(['available', 'reserved']).optional()
-});
+}).strict();
 
 const updateSchema = z.object({
-  name: z.string().min(1).optional(),
-  area: z.string().optional(),
-  seats: z.number().int().positive().optional(),
+  name: z.string().trim().min(1).max(40).optional(),
+  area: z.string().trim().min(1).max(60).optional(),
+  seats: z.number().int().min(1).max(MAX_SEATS).optional(),
   active: z.boolean().optional()
 });
 
 async function loadBranchTable(req) {
+  if (!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid table'), {status: 400});
   const table = await RestaurantTable.findById(req.params.id);
   if (!table) {
     const err = new Error('Table not found');
     err.status = 404;
     throw err;
   }
-  assertBranchAccess(req.user, table.branch);
+  await assertTableBranchAccess(req.user, table.branch);
   return table;
 }
 
@@ -44,9 +49,7 @@ r.get('/tables', auth(roles), async (req, res) => {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
     if (!mongoose.isValidObjectId(branchId)) throw Object.assign(new Error('Invalid branch'), {status: 400});
-    assertBranchAccess(req.user, branchId);
-    const branch = await Branch.findById(branchId);
-    if (!branch) throw Object.assign(new Error('Branch not found'), {status: 404});
+    await assertTableBranchAccess(req.user, branchId);
     const tables = await RestaurantTable.find({branch: branchId}).sort({area: 1, name: 1});
     const open = await Order.find({
       branch: branchId,
@@ -68,16 +71,50 @@ r.get('/tables', auth(roles), async (req, res) => {
   }
 });
 
+// Declared before /tables/:id so the literal path is not captured as an id.
+r.get('/tables/floor', auth(roles), async (req, res) => {
+  try {
+    const branchId = req.query.branch;
+    if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
+    if (!mongoose.isValidObjectId(branchId)) throw Object.assign(new Error('Invalid branch'), {status: 400});
+    await assertTableBranchAccess(req.user, branchId);
+
+    const includeRetired = String(req.query.includeRetired || '') === 'true';
+    const match = {branch: branchId};
+    if (!includeRetired) match.active = {$ne: false};
+    const tables = await RestaurantTable.find(match).sort({area: 1, name: 1});
+
+    const open = await Order.find({
+      branch: branchId,
+      table: {$in: tables.map(t => t._id)},
+      status: {$in: OPEN_ORDER_STATUSES}
+    }).select('orderNo total table').sort({createdAt: 1});
+    const byTable = new Map();
+    for (const order of open) {
+      const key = String(order.table);
+      if (!byTable.has(key)) byTable.set(key, []);
+      byTable.get(key).push(order);
+    }
+    res.json({branch: String(branchId), ...buildFloorPlan(tables, byTable)});
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
 r.post('/tables', auth(['owner', 'manager']), async (req, res) => {
   try {
     const x = createSchema.parse(req.body);
     if (!mongoose.isValidObjectId(x.branch)) throw Object.assign(new Error('Invalid branch'), {status: 400});
-    assertBranchAccess(req.user, x.branch);
-    const branch = await Branch.findById(x.branch);
-    if (!branch) throw Object.assign(new Error('Branch not found'), {status: 404});
-    const dup = await RestaurantTable.findOne({branch: x.branch, name: x.name});
+    await assertTableBranchAccess(req.user, x.branch);
+    // Case-insensitive: "T9" and "t9" are the same table to a host.
+    const dup = await RestaurantTable.findOne({
+      branch: x.branch,
+      name: {$regex: `^${x.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i'}
+    });
     if (dup) throw Object.assign(new Error('Table name already exists at this branch'), {status: 409});
-    const table = await RestaurantTable.create({...x, status: x.status || 'available', active: true});
+    const table = await RestaurantTable.create({
+      ...x, area: normalizeArea(x.area), status: x.status || 'available', active: true
+    });
     await Audit.create({entity: 'table', entityId: table._id, action: 'create', after: table, user: req.user.id});
     publishTableEvent(table.branch, {reason: 'create', tableIds: [String(table._id)]});
     res.status(201).json({...table.toJSON(), currentOrder: null});
@@ -150,7 +187,7 @@ r.patch('/tables/:id', auth(roles), async (req, res) => {
       }
       const before = {name: table.name, area: table.area, seats: table.seats, active: table.active};
       if (meta.name !== undefined) table.name = meta.name;
-      if (meta.area !== undefined) table.area = meta.area;
+      if (meta.area !== undefined) table.area = normalizeArea(meta.area);
       if (meta.seats !== undefined) table.seats = meta.seats;
       if (meta.active !== undefined) table.active = meta.active;
       await table.save();
@@ -159,6 +196,23 @@ r.patch('/tables/:id', auth(roles), async (req, res) => {
     res.json(table);
   } catch (e) {
     fail(res, e);
+  }
+});
+
+r.delete('/tables/:id', auth(['owner', 'manager']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const table = await loadBranchTable(req);
+    let archived;
+    await session.withTransaction(async () => {
+      archived = await archiveTable({table, user: req.user, session});
+    });
+    publishTableEvent(archived.branch, {reason: 'archive', tableIds: [String(archived._id)]});
+    res.json({archived: true, table: archived});
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
   }
 });
 

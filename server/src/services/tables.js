@@ -1,11 +1,44 @@
 import {Audit} from '../models/index.js';
-import {Order, Payment, RestaurantTable} from '../models/operations.js';
+import {Branch, Order, Payment, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from './kitchen.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
   const err = new Error(message);
   err.status = status;
   return err;
+}
+
+/**
+ * Branch access **and** tenant ownership.
+ *
+ * assertBranchAccess() returns early for any owner, which is correct for
+ * branch-vs-branch checks inside one restaurant but does not stop an owner of
+ * a different restaurant reading this one's floor. Table endpoints are
+ * tenant-scoped data, so the branch must be confirmed to belong to the
+ * caller's restaurant as well.
+ */
+export async function assertTableBranchAccess(user, branchId, {session} = {}) {
+  assertBranchAccess(user, branchId);
+  const branch = await Branch.findById(branchId).select('restaurant').session(session || null).lean();
+  if (!branch) throw httpError('Branch not found', 404);
+  const {restaurantId} = await userRestaurantContext(user, {session});
+  if (!restaurantId || String(branch.restaurant) !== String(restaurantId)) {
+    throw httpError('Branch access denied', 403);
+  }
+  return branch;
+}
+
+// Phase 6A — floor & capacity.
+export const DEFAULT_AREA = 'Main Floor';
+// A dining table seats a party; 40 covers even a large banquet table while
+// still rejecting typos like 99999.
+export const MAX_SEATS = 40;
+
+/** Trims a floor area to a usable label, falling back to the default. */
+export function normalizeArea(value) {
+  const area = String(value ?? '').trim().replace(/\s+/g, ' ');
+  return area || DEFAULT_AREA;
 }
 
 export const TABLE_STATUSES = ['available', 'occupied', 'reserved', 'cleaning', 'disabled'];
@@ -332,4 +365,86 @@ export async function mergeTableOrders({fromTableId, intoTableId, user, session}
     fromTable: await RestaurantTable.findById(from._id).session(session || null),
     intoTable: await RestaurantTable.findById(to._id).session(session || null)
   };
+}
+
+/**
+ * Groups a branch's tables into a floor plan with occupancy.
+ *
+ * Areas are the floor sections a host thinks in; each carries its own capacity
+ * and status counts so a full floor can be read at a glance without the caller
+ * re-aggregating the table list.
+ */
+export function buildFloorPlan(tables, openOrdersByTable = new Map()) {
+  const areas = new Map();
+  const statusTotals = {available: 0, occupied: 0, reserved: 0, cleaning: 0, disabled: 0};
+
+  for (const table of tables) {
+    const area = normalizeArea(table.area);
+    if (!areas.has(area)) {
+      areas.set(area, {
+        area, tables: [], seats: 0, tableCount: 0,
+        statuses: {available: 0, occupied: 0, reserved: 0, cleaning: 0, disabled: 0},
+        seatedCapacity: 0
+      });
+    }
+    const bucket = areas.get(area);
+    const orders = openOrdersByTable.get(String(table._id)) || [];
+    const seats = Number(table.seats || 0);
+    const status = table.active === false ? 'disabled' : table.status;
+
+    bucket.tables.push({
+      id: table._id,
+      name: table.name,
+      seats,
+      status,
+      active: table.active !== false,
+      openOrders: orders.length,
+      currentOrder: orders[0] ? {id: orders[0]._id, orderNo: orders[0].orderNo, total: orders[0].total} : null
+    });
+    bucket.tableCount += 1;
+    bucket.seats += seats;
+    bucket.statuses[status] = (bucket.statuses[status] || 0) + 1;
+    if (status === 'occupied') bucket.seatedCapacity += seats;
+    statusTotals[status] = (statusTotals[status] || 0) + 1;
+  }
+
+  const list = [...areas.values()].sort((a, b) => a.area.localeCompare(b.area));
+  for (const bucket of list) bucket.tables.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, {numeric: true}));
+
+  const totalSeats = list.reduce((sum, a) => sum + a.seats, 0);
+  const seatedCapacity = list.reduce((sum, a) => sum + a.seatedCapacity, 0);
+  const serviceable = statusTotals.available + statusTotals.occupied + statusTotals.reserved + statusTotals.cleaning;
+
+  return {
+    areas: list,
+    summary: {
+      areaCount: list.length,
+      tableCount: tables.length,
+      totalSeats,
+      seatedCapacity,
+      statuses: statusTotals,
+      // Share of in-service tables currently seated.
+      occupancyRate: serviceable ? Math.round((statusTotals.occupied / serviceable) * 10000) / 100 : 0,
+      seatOccupancyRate: totalSeats ? Math.round((seatedCapacity / totalSeats) * 10000) / 100 : 0
+    }
+  };
+}
+
+/**
+ * Retires a table. Tables are deactivated rather than deleted because orders,
+ * audit history and past receipts still reference them.
+ */
+export async function archiveTable({table, user, session}) {
+  const open = await findOpenTableOrder(table._id, session);
+  if (open) throw httpError('Cannot retire a table with an open order', 409);
+  if (table.status === 'occupied') throw httpError('Cannot retire an occupied table', 409);
+  const before = {active: table.active, status: table.status};
+  table.active = false;
+  table.status = 'disabled';
+  await table.save({session: session || undefined});
+  await Audit.create([{
+    entity: 'table', entityId: table._id, branch: table.branch,
+    action: 'archive', before, after: {active: false, status: 'disabled'}, user: user.id
+  }], {session: session || undefined});
+  return table;
 }
