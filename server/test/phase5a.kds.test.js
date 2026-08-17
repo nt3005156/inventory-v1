@@ -217,7 +217,10 @@ describe('Phase 5A — station filtering', () => {
   it('exposes the station list', async () => {
     const res = await request('/api/kitchen/stations', {token: staff()});
     assert.equal(res.status, 200);
-    assert.ok(res.body.stations.includes('tandoor'));
+    // Phase 5C made stations configurable: `stations` carries the full record
+    // and `codes` the flat list the KDS picker uses.
+    assert.ok(res.body.codes.includes('tandoor'));
+    assert.ok(res.body.stations.some(st => st.code === 'tandoor'));
   });
 });
 

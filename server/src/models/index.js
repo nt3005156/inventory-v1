@@ -120,7 +120,7 @@ export const MenuItem=model('MenuItem',new Schema({
   }],default:[]},
   // Phase 5A — KDS: which kitchen section prepares this item, and how long it
   // is expected to take. Drives station filtering and age-based priority.
-  station:{type:String,trim:true,lowercase:true,maxlength:40,default:'kitchen',index:true},
+  station:{type:String,trim:true,lowercase:true,maxlength:40,default:null,index:true},
   prepMinutes:{type:Number,min:0,max:600,default:0},
   // Phase 4B — POS modifiers. A group is a choice presented at the till
   // (Size, Extras, Remove...); each option may re-price the line and may map
@@ -233,6 +233,23 @@ const couponRedemptionSchema=new Schema({
 couponRedemptionSchema.index({coupon:1,order:1},{unique:true,name:'coupon_redemption_order'});
 couponRedemptionSchema.index({coupon:1,customer:1},{name:'coupon_redemption_customer'});
 export const CouponRedemption=model('CouponRedemption',couponRedemptionSchema);
+
+// Phase 5C — kitchen stations, definable per restaurant.
+const kitchenStationSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',required:true,index:true},
+  code:{type:String,required:true,trim:true,lowercase:true,maxlength:40},
+  name:{type:String,required:true,trim:true,maxlength:80},
+  // Menu categories routed here when an item declares no station of its own.
+  categories:[{type:String,trim:true,lowercase:true,maxlength:60}],
+  sortOrder:{type:Number,default:0},
+  // Exactly one station per restaurant catches otherwise unrouted items.
+  isDefault:{type:Boolean,default:false},
+  active:{type:Boolean,default:true,index:true},
+  createdBy:{type:Schema.Types.ObjectId,ref:'User'},
+  updatedBy:{type:Schema.Types.ObjectId,ref:'User'}
+},{timestamps:true});
+kitchenStationSchema.index({restaurant:1,code:1},{unique:true,name:'station_restaurant_code'});
+export const KitchenStation=model('KitchenStation',kitchenStationSchema);
 
 export const MonthlySnapshot=model('MonthlySnapshot',monthlySnapshotSchema);
 export const Audit=model('Audit',auditSchema);

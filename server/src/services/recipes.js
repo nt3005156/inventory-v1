@@ -3,7 +3,7 @@ import { Ingredient, MenuItem, Audit } from '../models/index.js';
 import { Branch, InventoryBalance } from '../models/operations.js';
 import { userRestaurantContext } from './supplierCatalog.js';
 import { convertQuantity, INGREDIENT_UNITS } from './ingredients.js';
-import { normalizeStation } from './kds.js';
+import { resolveStation } from './stations.js';
 
 const clean = v => String(v ?? '').trim();
 function httpError(msg, status=400){ const e=new Error(msg); e.status=status; return e; }
@@ -303,7 +303,7 @@ export async function createMenuItem({ input, user }){
     yieldUnit: clean(input.yieldUnit)||'serving',
     recipe,
     modifierGroups: normalizeModifierGroups(input.modifierGroups)||[],
-    station: normalizeStation(input.station) || 'kitchen',
+    station: (await resolveStation({restaurantId, code: input.station})) || undefined,
     prepMinutes: Number(input.prepMinutes || 0),
     recipeVersion: 1,
     recipeHistory: [],
@@ -361,7 +361,7 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
   }
   if(patch.vatInclusive!==undefined) row.vatInclusive=Boolean(patch.vatInclusive);
   if(patch.modifierGroups!==undefined) row.modifierGroups=normalizeModifierGroups(patch.modifierGroups);
-  if(patch.station!==undefined) row.station=normalizeStation(patch.station)||'kitchen';
+  if(patch.station!==undefined) row.station=(await resolveStation({restaurantId, code: patch.station}))||undefined;
   if(patch.prepMinutes!==undefined) row.prepMinutes=Number(patch.prepMinutes);
   if(patch.vatRate!==undefined) row.vatRate=Number(patch.vatRate);
   if(patch.active!==undefined) row.active=Boolean(patch.active);

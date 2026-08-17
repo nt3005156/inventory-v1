@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import {Branch, Order} from '../models/operations.js';
 import {assertBranchAccess, KITCHEN_QUEUE_STATUSES} from './kitchen.js';
+import {BUILT_IN_STATION_CODES, listStations, stationCode} from './stations.js';
 
 // Phase 5A — KDS core.
 //
@@ -18,10 +19,12 @@ export const STAGE_STATUSES = Object.freeze({
   completed: ['completed']
 });
 
-/** Kitchen sections a menu item can be routed to. */
-export const KITCHEN_STATIONS = Object.freeze([
-  'kitchen', 'grill', 'fry', 'tandoor', 'curry', 'cold', 'bakery', 'dessert', 'bar', 'expo'
-]);
+/**
+ * Built-in station codes. Phase 5C made stations definable per restaurant, so
+ * this is the default seed rather than the authority — the board validates a
+ * requested station against the restaurant's own list.
+ */
+export const KITCHEN_STATIONS = BUILT_IN_STATION_CODES;
 
 // Age thresholds, in minutes, against a ticket's target prep time.
 export const PRIORITY_LEVELS = Object.freeze(['normal', 'due', 'late', 'overdue']);
@@ -41,11 +44,11 @@ function httpError(message, status = 400) {
 
 const clean = value => String(value ?? '').trim().toLowerCase();
 
-export function normalizeStation(value) {
+export function normalizeStation(value, allowed = KITCHEN_STATIONS) {
   const station = clean(value);
   if (!station) return null;
-  if (!KITCHEN_STATIONS.includes(station)) {
-    throw httpError(`Station must be one of ${KITCHEN_STATIONS.join(', ')}`, 400);
+  if (!allowed.includes(station)) {
+    throw httpError(`Station must be one of ${allowed.join(', ')}`, 400);
   }
   return station;
 }
@@ -171,7 +174,9 @@ export async function buildKitchenBoard({branchId, user, station, stage, priorit
   const branch = await Branch.findById(branchId);
   if (!branch) throw httpError('Branch not found', 404);
 
-  const wantedStation = station ? normalizeStation(station) : null;
+  const configured = await listStations({restaurantId: branch.restaurant, includeInactive: true});
+  const activeCodes = configured.filter(s => s.active !== false).map(s => s.code);
+  const wantedStation = station ? normalizeStation(station, activeCodes) : null;
   if (stage && !KDS_STAGES.includes(stage)) {
     throw httpError(`Stage must be one of ${KDS_STAGES.join(', ')}`, 400);
   }
@@ -205,7 +210,9 @@ export async function buildKitchenBoard({branchId, user, station, stage, priorit
   return {
     branch: String(branchId),
     station: wantedStation,
-    stations: KITCHEN_STATIONS,
+    stations: activeCodes,
+    stationDetail: configured.filter(s => s.active !== false)
+      .map(s => ({code: s.code, name: s.name, isDefault: Boolean(s.isDefault)})),
     generatedAt: now,
     summary: {
       total: tickets.length,
@@ -213,7 +220,11 @@ export async function buildKitchenBoard({branchId, user, station, stage, priorit
       overdue: tickets.filter(t => t.priority === 'overdue').length,
       late: tickets.filter(t => t.priority === 'late').length,
       oldestMinutes: tickets.reduce((max, t) => Math.max(max, t.ageMinutes), 0),
-      byStage: Object.fromEntries(columns.map(c => [c.stage, c.tickets.length]))
+      byStage: Object.fromEntries(columns.map(c => [c.stage, c.tickets.length])),
+      byStation: activeCodes.reduce((acc, code) => {
+        acc[code] = tickets.filter(t => t.stations.includes(code)).length;
+        return acc;
+      }, {})
     },
     columns,
     tickets

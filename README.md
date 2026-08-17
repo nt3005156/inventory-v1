@@ -151,6 +151,34 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Kitchen stations (Phase 5C)
+
+Stations are defined **per restaurant**, so a kitchen can describe its own sections rather than
+being held to a global list. Each restaurant is seeded on first use with:
+
+`kitchen` · `grill` · `fry` · `tandoor` · `curry` · `cold` · `bakery` · `dessert` ·
+`beverage` · `bar` · `expo`
+
+`GET /api/kitchen/stations` lists them (staff may read; owner/manager may change). Management can
+add its own — a momo counter, a pizza oven — via `POST /api/kitchen/stations`, reorder them,
+remap categories, and move the default with `POST /api/kitchen/stations/:id/default`. Stations are
+deactivated rather than deleted, because historical order lines still name them, and the default
+station can never be deactivated or removed.
+
+**Routing.** Each order line is routed once, at creation, and stored on the ticket:
+
+1. an explicit `station` on the menu item — always wins
+2. otherwise a station whose `categories` list claims the item's menu category
+3. otherwise the restaurant's default station
+
+The category tier means an existing menu routes sensibly the moment stations are switched on,
+instead of every ticket landing on one board. Because the station is stored on the line, editing a
+menu item later never re-routes a ticket already in the pass.
+
+`GET /api/kitchen/board?station=<code>` shows only that section's tickets, and only that
+section's lines within them. The board also reports `summary.byStation` so an expo screen can see
+the whole kitchen at once.
+
 ## KDS realtime (Phase 5B)
 
 Socket.IO delivers kitchen tickets to branch-scoped rooms named `branch:<id>`.

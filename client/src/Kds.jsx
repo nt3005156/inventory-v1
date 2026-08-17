@@ -117,8 +117,12 @@ export default function Kds({call, branches = [], user, token}) {
   };
 
   useEffect(() => {
+    // Phase 5C: stations are configurable records; `codes` is the flat list,
+    // and `stations` carries the display names for the picker.
     call('/kitchen/stations')
-      .then(r => setStations(r?.stations || []))
+      .then(r => setStations(Array.isArray(r?.stations)
+        ? r.stations.map(st => (typeof st === 'string' ? {code: st, name: st} : st))
+        : []))
       .catch(() => setStations([]));
   }, []);
 
@@ -238,7 +242,7 @@ export default function Kds({call, branches = [], user, token}) {
             title="Station filter"
           >
             <option value="">All stations</option>
-            {stations.map(st => <option key={st} value={st}>{st}</option>)}
+            {stations.map(st => <option key={st.code} value={st.code}>{st.name || st.code}</option>)}
           </select>
           <select
             className="kds-branch"
