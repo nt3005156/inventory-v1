@@ -233,3 +233,129 @@ export async function splitOrder({orderId, items, user, session}) {
   }], {session: session || undefined});
   return {order: parent, splitOrder: child};
 }
+
+
+/**
+ * Divides an amount into `ways` shares that sum EXACTLY back to it.
+ *
+ * Naive division loses or invents paisa: 1740.20 / 3 = 580.0666..., and three
+ * rounded shares of 580.07 collect 1740.21. Each share is floored to paisa and
+ * the remainder is distributed one paisa at a time across the earliest shares,
+ * so the split always reconciles to the cent.
+ */
+export function equalShares(total, ways) {
+  const amount = money(total);
+  const n = Number(ways);
+  if (!Number.isInteger(n) || n < 2) throw httpError('Split must be between 2 and 50 ways', 400);
+  if (n > 50) throw httpError('Split must be between 2 and 50 ways', 400);
+  if (!(amount > 0)) throw httpError('Nothing left to split on this check', 409);
+
+  const paisa = Math.round(amount * 100);
+  const base = Math.floor(paisa / n);
+  const remainder = paisa - base * n;
+  return Array.from({length: n}, (_, i) => money((base + (i < remainder ? 1 : 0)) / 100));
+}
+
+/**
+ * Quotes an equal split of what is still owed on a check.
+ *
+ * This is a calculation, not a mutation: the till shows the guests what each
+ * owes, then takes payments against it with the existing payment endpoint. The
+ * shares are computed from the OUTSTANDING balance, so a split after a partial
+ * payment divides only what remains.
+ */
+export async function quoteEqualSplit({orderId, ways, user, session}) {
+  const order = await loadOpenOrder(orderId, user, session);
+  if (['cancelled', 'refunded'].includes(order.status)) {
+    throw httpError('Cannot split a cancelled or refunded check', 409);
+  }
+  const due = money(order.dueAmount);
+  if (!(due > 0)) throw httpError('This check is already settled', 409);
+
+  const shares = equalShares(due, ways);
+  return {
+    order: order._id,
+    orderNo: order.orderNo,
+    total: money(order.total),
+    paid: money(order.paidAmount),
+    due,
+    ways: shares.length,
+    shares,
+    // Proof the division reconciles; asserted by tests and useful on a receipt.
+    sharesTotal: money(shares.reduce((sum, v) => sum + v, 0)),
+    perShare: shares[0],
+    currency: 'NPR'
+  };
+}
+
+/**
+ * The combined billing position for a table.
+ *
+ * A table can carry several checks once a bill has been split, and no single
+ * order shows what the table as a whole still owes. This aggregates the open
+ * and recently settled checks so a host can close the table confidently.
+ */
+export async function buildTableBill({tableId, user, session}) {
+  const mongooseLib = (await import('mongoose')).default;
+  const {RestaurantTable} = await import('../models/operations.js');
+  if (!mongooseLib.isValidObjectId(tableId)) throw httpError('Invalid table', 400);
+  const table = await RestaurantTable.findById(tableId).session(session || null);
+  if (!table) throw httpError('Table not found', 404);
+  await assertTenantBranchAccess(user, table.branch, {session});
+
+  const orders = await Order.find({
+    table: table._id,
+    status: {$in: [...OPEN_ORDER_STATUSES, 'completed']}
+  }).sort({createdAt: 1}).session(session || null).lean();
+
+  const orderIds = orders.map(o => o._id);
+  const payments = orderIds.length
+    ? await Payment.find({order: {$in: orderIds}}).sort({createdAt: 1}).session(session || null).lean()
+    : [];
+
+  const byOrder = new Map();
+  for (const payment of payments) {
+    const key = String(payment.order);
+    if (!byOrder.has(key)) byOrder.set(key, []);
+    byOrder.get(key).push(payment);
+  }
+
+  const byMethod = {};
+  for (const payment of payments) {
+    const key = payment.method || 'cash';
+    byMethod[key] = money((byMethod[key] || 0) + Number(payment.amount));
+  }
+
+  const checks = orders.map(order => {
+    const rows = byOrder.get(String(order._id)) || [];
+    return {
+      id: order._id,
+      orderNo: order.orderNo,
+      status: order.status,
+      total: money(order.total),
+      paid: money(order.paidAmount),
+      due: money(order.dueAmount),
+      settled: money(order.dueAmount) <= 0,
+      itemCount: (order.items || []).reduce((sum, i) => sum + Number(i.qty || 0), 0),
+      payments: rows.map(p => ({method: p.method, amount: money(p.amount), at: p.createdAt}))
+    };
+  });
+
+  const open = checks.filter(c => !['completed'].includes(c.status));
+  return {
+    table: {
+      id: table._id, name: table.name, area: table.area,
+      seats: table.seats, status: table.status
+    },
+    checks,
+    summary: {
+      checks: checks.length,
+      openChecks: open.length,
+      total: money(checks.reduce((sum, c) => sum + c.total, 0)),
+      paid: money(checks.reduce((sum, c) => sum + c.paid, 0)),
+      due: money(checks.reduce((sum, c) => sum + c.due, 0)),
+      settled: checks.every(c => c.settled),
+      byMethod
+    }
+  };
+}

@@ -125,6 +125,43 @@ export default function Tables({call, branches = [], user, token}) {
     return table.currentOrder ? [table.currentOrder] : [];
   };
 
+  const [quote, setQuote] = useState(null);
+
+  // Quotes an n-way split of what is still owed, then the guests pay their
+  // shares through the normal payment path.
+  const splitEqual = async (order, ways) => {
+    setBusy(order._id + 'equal');
+    setError('');
+    try {
+      const result = await call('/orders/' + order._id + '/split-equal', {
+        method: 'POST', body: JSON.stringify({ways: Number(ways)})
+      });
+      setQuote(result);
+    } catch (e) {
+      setError(e.message || 'Could not split the bill');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const payMethod = async (order, amount, method) => {
+    const value = Number(amount);
+    if (!(value > 0)) return;
+    setBusy(order._id + 'pay');
+    setError('');
+    try {
+      await call('/orders/' + order._id + '/payments', {
+        method: 'POST', body: JSON.stringify({amount: value, method})
+      });
+      setQuote(null);
+      load();
+    } catch (e) {
+      setError(e.message || 'Payment failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const pay = async (order, amount) => {
     const value = Number(amount);
     if (!(value > 0)) return;
@@ -323,6 +360,34 @@ export default function Tables({call, branches = [], user, token}) {
           )}
         </div>
       )}
+      {quote && (
+        <div className="split-quote">
+          <div className="title">
+            <div>
+              <h3>{quote.orderNo} · split {quote.ways} ways</h3>
+              <p>Outstanding {rs(quote.due)} · each share below sums back to exactly that.</p>
+            </div>
+            <button className="receive" onClick={() => setQuote(null)}>Close</button>
+          </div>
+          <ul className="share-list">
+            {quote.shares.map((share, i) => (
+              <li key={i}>
+                <b>Guest {i + 1}</b>
+                <span>{rs(share)}</span>
+                {['cash', 'card', 'esewa', 'khalti'].map(method => (
+                  <button
+                    key={method}
+                    className="receive"
+                    disabled={!!busy}
+                    onClick={() => payMethod({_id: quote.order}, share, method)}
+                  >{method}</button>
+                ))}
+              </li>
+            ))}
+          </ul>
+          <p className="share-total">Shares total {rs(quote.sharesTotal)} · reconciles to the paisa</p>
+        </div>
+      )}
       {areas.map(area => {
         const areaPlan = plan?.areas?.find(a => a.area === area);
         return (
@@ -385,6 +450,17 @@ export default function Tables({call, branches = [], user, token}) {
                           <button className="kds-go" disabled={!!busy} onClick={() => split(check)}>
                             {busy === check._id + 'split' ? 'Updating…' : 'Split check'}
                           </button>
+                          <div className="equal-split">
+                            <span>Split equally</span>
+                            {[2, 3, 4, 5].map(ways => (
+                              <button
+                                key={ways}
+                                className="receive"
+                                disabled={!!busy || check.dueAmount <= 0}
+                                onClick={() => splitEqual(check, ways)}
+                              >{ways}×</button>
+                            ))}
+                          </div>
                         </div>
                       ) : null}
                     </div>

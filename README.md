@@ -151,6 +151,32 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Table billing (Phase 6D)
+
+| Capability | Endpoint |
+|---|---|
+| Split bill onto a separate check | `POST /api/orders/:id/split` |
+| Item share (pay only chosen items) | `POST /api/orders/:id/payments` with `items` |
+| **Equal split** | `POST /api/orders/:id/split-equal` with `ways` |
+| Partial payment | `POST /api/orders/:id/payments` with `amount` |
+| Multiple payment methods | Repeat payments with different `method` values |
+| Settlement | Full payment closes the check and releases the table |
+| **Table bill** | `GET /api/tables/:id/bill` |
+
+**Equal split reconciles to the paisa.** Naive division loses or invents money — 1740.20 split
+three ways is 580.0666…, and three rounded shares of 580.07 would collect 1740.21. Each share is
+floored to paisa and the remainder distributed one paisa at a time, so the shares always sum back
+to the balance exactly (`[580.07, 580.07, 580.06]`). The quote reports `sharesTotal` as proof.
+
+Splitting is a **calculation, not a mutation**: it quotes what each guest owes and takes no money,
+so there remains one payment code path. Shares are computed from the **outstanding balance**, so a
+split after a partial payment divides only what is left. Each guest may then settle their share
+with a different tender.
+
+**`GET /api/tables/:id/bill`** aggregates every check on a table — which may be several after a
+split — reporting the combined total, paid, balance, per-check position and a tender breakdown, so
+a host can close the table confidently.
+
 ## Reservations (Phase 6C)
 
 `/api/reservations` books a table for a **window of time** rather than blocking it outright, so a

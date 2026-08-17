@@ -4,7 +4,7 @@ import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
-import {applyPayment, splitOrder} from '../services/billing.js';
+import {applyPayment, splitOrder, quoteEqualSplit, buildTableBill} from '../services/billing.js';
 import {refundOrder, summarisePayments} from '../services/refunds.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
@@ -141,6 +141,27 @@ r.get('/orders/:id/receipt', auth(roles), async (req, res) => {
     fail(res, e);
   } finally {
     session.endSession();
+  }
+});
+
+// Quotes an n-way split of the outstanding balance. This is a calculation, not
+// a mutation: the till shows each guest their share, then takes payments
+// through the existing payments endpoint so there is one payment code path.
+r.post('/orders/:id/split-equal', auth(roles), async (req, res) => {
+  try {
+    const body = z.object({ways: z.number().int().min(2).max(50)}).strict().parse(req.body);
+    res.json(await quoteEqualSplit({orderId: req.params.id, ways: body.ways, user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+// Combined billing position for a table, which may carry several checks.
+r.get('/tables/:id/bill', auth(roles), async (req, res) => {
+  try {
+    res.json(await buildTableBill({tableId: req.params.id, user: req.user}));
+  } catch (e) {
+    fail(res, e);
   }
 });
 
