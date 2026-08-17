@@ -93,6 +93,9 @@ export default function Kds({call, branches = [], user, token}) {
 
   const canAdvance = ['owner', 'manager', 'staff'].includes(user?.role);
   const canCancel = ['owner', 'manager'].includes(user?.role);
+  const canSeePerformance = ['owner', 'manager'].includes(user?.role);
+  const [perf, setPerf] = useState(null);
+  const [showPerf, setShowPerf] = useState(false);
 
   useEffect(() => {
     if (locked && assigned && branchId !== assigned) setBranchId(assigned);
@@ -131,6 +134,14 @@ export default function Kds({call, branches = [], user, token}) {
     const tick = setInterval(() => setNowMs(Date.now()), 30000);
     return () => clearInterval(tick);
   }, []);
+
+  useEffect(() => {
+    if (!canSeePerformance || !showPerf || !branchId) return;
+    const q = `?branch=${encodeURIComponent(branchId)}${station ? `&station=${station}` : ''}`;
+    call('/kitchen/performance' + q)
+      .then(setPerf)
+      .catch(e => setError(e.message || 'Could not load kitchen performance'));
+  }, [canSeePerformance, showPerf, branchId, station, nowMs]);
 
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -235,6 +246,13 @@ export default function Kds({call, branches = [], user, token}) {
         </div>
         <div className="kds-toolbar">
           <span className={'kds-live ' + (live === 'live' ? 'on' : live === 'reconnecting' || live === 'connecting' ? 'wait' : 'off')}>{liveLabel}</span>
+          {canSeePerformance && (
+            <button
+              className={'kds-rush' + (showPerf ? ' on' : '')}
+              onClick={() => setShowPerf(v => !v)}
+              title="Kitchen performance"
+            >{showPerf ? 'Hide stats' : 'Performance'}</button>
+          )}
           <select
             className="kds-branch"
             value={station}
@@ -255,6 +273,49 @@ export default function Kds({call, branches = [], user, token}) {
         </div>
       </div>
       {error && <p className="danger">{error}</p>}
+      {canSeePerformance && showPerf && perf && (
+        <div className="kds-perf">
+          <div className="kpis">
+            <article>
+              <small>Avg prep time</small>
+              <strong>{perf.summary.averagePrepMinutes ?? '—'}{perf.summary.averagePrepMinutes != null && 'm'}</strong>
+              <em>median {perf.summary.medianPrepMinutes ?? '—'}m · p90 {perf.summary.p90PrepMinutes ?? '—'}m</em>
+            </article>
+            <article>
+              <small>Completed</small>
+              <strong>{perf.summary.completedOrders}</strong>
+              <em>{perf.summary.openOrders} still open</em>
+            </article>
+            <article>
+              <small>Delayed</small>
+              <strong className={perf.summary.delayedOrders ? 'warn' : ''}>{perf.summary.delayedOrders}</strong>
+              <em>{perf.summary.onTimeRate ?? '—'}% on time</em>
+            </article>
+            <article>
+              <small>Worst overrun</small>
+              <strong>{perf.summary.worstDelayMinutes || 0}m</strong>
+              <em>avg delay {perf.summary.averageDelayMinutes ?? 0}m</em>
+            </article>
+          </div>
+          {!!perf.stations.filter(s => s.orders).length && (
+            <table>
+              <thead><tr><th>Station</th><th>Orders</th><th>Items</th><th>Avg prep</th><th>Delayed</th><th>On time</th></tr></thead>
+              <tbody>
+                {perf.stations.filter(s => s.orders).map(s => (
+                  <tr key={s.station}>
+                    <td><b>{s.station}</b></td>
+                    <td>{s.orders}</td>
+                    <td>{s.items}</td>
+                    <td>{s.averagePrepMinutes ?? '—'}m</td>
+                    <td className={s.delayedOrders ? 'warn' : ''}>{s.delayedOrders}</td>
+                    <td>{s.onTimeRate ?? '—'}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
       {loading && <p>Loading kitchen queue…</p>}
       {!loading && !visible.length && !error && (
         <p className="empty">{station ? `No tickets for the ${station} station.` : 'No tickets in the kitchen queue.'}</p>

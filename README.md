@@ -151,6 +151,29 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Kitchen performance (Phase 5D)
+
+`GET /api/kitchen/performance?branch=...` (owner/manager) reports how the kitchen actually
+performed, derived from the stage timestamps the KDS writes rather than re-inferred from status.
+
+| Metric | Meaning |
+|---|---|
+| **Preparation time** | Placed → ready, the interval a guest experiences. Split into wait (→ accepted), cook (→ ready) and service (→ completed) |
+| **Average prep time** | Mean, plus median and p90 — a long tail is visible instead of hidden behind an average |
+| **Delayed orders** | Tickets whose prep time exceeded their target, with the overrun in minutes and an on-time rate |
+| **Completed orders** | Settled tickets, alongside open and cancelled counts |
+| **Station performance** | Orders, items, average prep, delays and on-time rate per station |
+
+Query with `from`/`to`, `station`, `limit` (slowest/delayed list size) and `includeCancelled`.
+
+A ticket's target is the slowest item on it, else the channel default (delivery 10m,
+counter/takeaway 12m, dine-in 15m). **Open tickets are judged against the clock**, so a stalled
+ticket counts as delayed now rather than only once someone closes it. Cancelled tickets are
+excluded from timing averages by default — a ticket voided after two minutes would otherwise
+flatter the numbers — but are still counted so the volume is visible. A multi-station ticket is
+attributed to every station that worked on it, so station totals intentionally do not sum to the
+order count.
+
 ## Kitchen stations (Phase 5C)
 
 Stations are defined **per restaurant**, so a kitchen can describe its own sections rather than

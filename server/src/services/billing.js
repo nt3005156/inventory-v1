@@ -3,6 +3,7 @@ import {Order, Payment} from '../models/operations.js';
 import {assertBranchAccess} from './kitchen.js';
 import {OPEN_ORDER_STATUSES, releaseTable} from './tables.js';
 import {computeOrderTotals, priceLine} from './pos.js';
+import {stampStage} from './kds.js';
 
 const CLOSED = ['completed', 'cancelled', 'refunded'];
 
@@ -111,6 +112,9 @@ export async function applyPayment({orderId, amount, method, transactionId, item
   if (justClosed) {
     order.dueAmount = 0;
     order.status = 'completed';
+    // Settlement is a completion path too; without this the ticket has no
+    // completedAt and drops out of every kitchen performance metric.
+    stampStage(order, 'completed');
   }
   await order.save({session: session || undefined});
   if (justClosed && order.table) {
@@ -206,12 +210,14 @@ export async function splitOrder({orderId, items, user, session}) {
     if (child.dueAmount <= 0) {
       child.dueAmount = 0;
       child.status = 'completed';
+      stampStage(child, 'completed');
     }
   }
   await parent.save({session: session || undefined});
   await child.save({session: session || undefined});
   if (parent.dueAmount <= 0 && OPEN_ORDER_STATUSES.includes(parent.status)) {
     parent.status = 'completed';
+    stampStage(parent, 'completed');
     await parent.save({session: session || undefined});
   }
   if ((parent.status === 'completed' || child.status === 'completed') && parent.table) {
