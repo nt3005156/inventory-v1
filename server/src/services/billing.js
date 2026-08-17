@@ -1,6 +1,6 @@
 import {Audit} from '../models/index.js';
 import {Order, Payment} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {assertTenantBranchAccess} from './kitchen.js';
 import {OPEN_ORDER_STATUSES, releaseTable} from './tables.js';
 import {computeOrderTotals, priceLine} from './pos.js';
 import {stampStage} from './kds.js';
@@ -80,7 +80,7 @@ export function shareForItems(order, picks) {
 async function loadOpenOrder(orderId, user, session) {
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
-  assertBranchAccess(user, order.branch);
+  await assertTenantBranchAccess(user, order.branch, {session});
   return order;
 }
 

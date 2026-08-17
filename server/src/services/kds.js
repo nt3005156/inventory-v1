@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import {Branch, Order} from '../models/operations.js';
-import {assertBranchAccess, KITCHEN_QUEUE_STATUSES} from './kitchen.js';
+import {assertTenantBranchAccess, KITCHEN_QUEUE_STATUSES} from './kitchen.js';
 import {BUILT_IN_STATION_CODES, listStations, stationCode} from './stations.js';
 
 // Phase 5A — KDS core.
@@ -170,7 +170,7 @@ function toTicket(order, {station, now}) {
 export async function buildKitchenBoard({branchId, user, station, stage, priority, includeCompleted = false, now = new Date()}) {
   if (!branchId) throw httpError('Branch is required', 400);
   if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-  assertBranchAccess(user, branchId);
+  await assertTenantBranchAccess(user, branchId);
   const branch = await Branch.findById(branchId);
   if (!branch) throw httpError('Branch not found', 404);
 
@@ -236,7 +236,7 @@ export async function setOrderPriority({orderId, priority, user, session}) {
   if (!['normal', 'rush'].includes(priority)) throw httpError('Priority must be normal or rush', 400);
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
-  assertBranchAccess(user, order.branch);
+  await assertTenantBranchAccess(user, order.branch, {session});
   if (!KITCHEN_QUEUE_STATUSES.includes(order.status)) {
     throw httpError('Only an open kitchen ticket can be prioritised', 409);
   }

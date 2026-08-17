@@ -1,6 +1,6 @@
 import {Audit} from '../models/index.js';
 import {Branch, Order, Payment, RestaurantTable} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {assertBranchAccess, assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 
 function httpError(message, status) {
@@ -280,8 +280,8 @@ async function loadPair(fromTableId, toTableId, user, session) {
   const to = await RestaurantTable.findById(toTableId).session(session || null);
   if (!from || !to) throw httpError('Table not found', 404);
   if (String(from.branch) !== String(to.branch)) throw httpError('Tables must be at the same branch', 409);
-  assertBranchAccess(user, from.branch);
-  assertBranchAccess(user, to.branch);
+  await assertTenantBranchAccess(user, from.branch, {session});
+  await assertTenantBranchAccess(user, to.branch, {session});
   return {from, to};
 }
 

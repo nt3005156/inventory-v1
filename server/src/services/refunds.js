@@ -1,6 +1,6 @@
 import {Audit} from '../models/index.js';
 import {Order, Payment} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
 
 // Phase 4D — Payments: refunds.
@@ -92,7 +92,7 @@ export function allocateRefund(payments, amount) {
 export async function refundOrder({orderId, amount, reason, user, session}) {
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
-  assertBranchAccess(user, order.branch);
+  await assertTenantBranchAccess(user, order.branch, {session});
 
   if (order.status === 'cancelled') throw httpError('A cancelled order cannot be refunded', 409);
   if (!REFUNDABLE_STATUSES.includes(order.status)) {

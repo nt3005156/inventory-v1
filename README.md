@@ -151,6 +151,28 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Multi-tenant access control
+
+Every branch-scoped endpoint enforces **user → restaurant → branch → resource**. An owner has
+broad rights inside their own restaurant but can never cross the restaurant boundary; managers
+and staff stay pinned to their assigned branch.
+
+Two guards implement this, and both check the restaurant:
+
+- `assertTenantBranchAccess(user, branchId)` — branch check plus restaurant ownership, used by
+  kitchen, KDS performance, receipts, refunds, billing, alerts, tables and deliveries.
+- `purchaseBranchContext({user, branchId})` — the equivalent on the purchasing, inventory,
+  transfers, waste and month-close side, and in the Socket.IO handshake.
+
+`assertBranchAccess()` remains exported for the pure branch comparison and is the first step
+inside the tenant-aware guard, but it is **not** sufficient on its own: it is synchronous and
+returns early for any owner, so it cannot see the restaurant boundary.
+
+List endpoints called without a `branch` parameter resolve the caller's own branches rather than
+querying across all restaurants. A syntactically valid JWT for one restaurant is still refused
+against another — signature validity is not authorization, and a forged `restaurantId` claim is
+overridden by the server-side lookup.
+
 ## Tables & floor (Phase 6A)
 
 A branch floor is a set of **areas**, each holding tables with a **capacity** and a **status**.

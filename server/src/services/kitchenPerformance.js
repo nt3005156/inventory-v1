@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import {Branch, Order} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
 import {listStations} from './stations.js';
 import {targetMinutes} from './kds.js';
@@ -156,7 +156,7 @@ export async function buildKitchenPerformance({
 }) {
   if (!branchId) throw httpError('Branch is required', 400);
   if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
-  assertBranchAccess(user, branchId);
+  await assertTenantBranchAccess(user, branchId);
   const branch = await Branch.findById(branchId);
   if (!branch) throw httpError('Branch not found', 404);
 

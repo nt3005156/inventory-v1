@@ -1,5 +1,5 @@
 import {Branch, Order, Payment, Restaurant, SalesInvoiceCounter} from '../models/operations.js';
-import {assertBranchAccess} from './kitchen.js';
+import {assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
 import {refundedTotal, settledPayments} from './refunds.js';
 
@@ -192,7 +192,7 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
 export async function getReceipt({orderId, user, issue = false, session}) {
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
-  assertBranchAccess(user, order.branch);
+  await assertTenantBranchAccess(user, order.branch, {session});
 
   const branch = await Branch.findById(order.branch).session(session || null);
   if (!branch) throw httpError('Branch not found', 404);

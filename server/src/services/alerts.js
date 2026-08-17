@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { Ingredient } from '../models/index.js';
 import { Branch, InventoryBalance, InventoryBatch, InventoryTransaction, Notification } from '../models/operations.js';
-import { assertBranchAccess } from './kitchen.js';
+import { assertTenantBranchAccess } from './kitchen.js';
 import { resolveDashboardBranch } from './dashboard.js';
 import { kathmanduDateString, canonicalExpiryDate, expiryState } from './inventoryBatches.js';
 
@@ -11,17 +11,17 @@ function httpError(message, status) {
   return err;
 }
 
-function resolveBranch(user, branchId) {
+async function resolveBranch(user, branchId) {
   const branch = resolveDashboardBranch(user, branchId);
   if (branch) {
     if (!mongoose.isValidObjectId(branch)) throw httpError('Invalid branch', 400);
-    assertBranchAccess(user, branch);
+    await assertTenantBranchAccess(user, branch);
   }
   return branch;
 }
 
 async function resolveAlertScope(user, branchId) {
-  const branch = resolveBranch(user, branchId);
+  const branch = await resolveBranch(user, branchId);
   // Need restaurant for expiry queries
   let restaurantId = user?.restaurantId;
   if (!restaurantId) {
@@ -273,14 +273,14 @@ export async function markAlertRead({ alertId, user }) {
   if (!mongoose.isValidObjectId(alertId)) throw httpError('Invalid alert', 400);
   const alert = await Notification.findById(alertId);
   if (!alert) throw httpError('Alert not found', 404);
-  if (alert.branch) assertBranchAccess(user, alert.branch);
+  if (alert.branch) await assertTenantBranchAccess(user, alert.branch);
   alert.read = true;
   await alert.save();
   return alert;
 }
 
 export async function markAlertsRead({ branchId, user }) {
-  const branch = resolveBranch(user, branchId);
+  const branch = await resolveBranch(user, branchId);
   const match = { read: false, ...(branch ? { branch: new mongoose.Types.ObjectId(branch) } : {}) };
   const result = await Notification.updateMany(match, { $set: { read: true } });
   return { updated: result.modifiedCount || 0, branch: branch || null };

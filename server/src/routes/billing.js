@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
-import {assertBranchAccess} from '../services/kitchen.js';
+import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder} from '../services/billing.js';
 import {refundOrder, summarisePayments} from '../services/refunds.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
@@ -33,7 +33,7 @@ r.get('/orders/:id', auth(roles), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id).populate('table', 'name area seats status').populate('customer', 'name phone');
     if (!order) return res.status(404).json({message: 'Order not found'});
-    assertBranchAccess(req.user, order.branch);
+    await assertTenantBranchAccess(req.user, order.branch);
     const payments = await Payment.find({order: order._id}).sort({createdAt: 1});
     res.json({...order.toJSON(), payments});
   } catch (e) {
@@ -45,7 +45,7 @@ r.get('/orders/:id/payments', auth(roles), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({message: 'Order not found'});
-    assertBranchAccess(req.user, order.branch);
+    await assertTenantBranchAccess(req.user, order.branch);
     res.json(await Payment.find({order: order._id}).sort({createdAt: 1}));
   } catch (e) {
     fail(res, e);
@@ -109,7 +109,7 @@ r.get('/orders/:id/payment-summary', auth(roles), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({message: 'Order not found'});
-    assertBranchAccess(req.user, order.branch);
+    await assertTenantBranchAccess(req.user, order.branch);
     const payments = await Payment.find({order: order._id}).sort({createdAt: 1});
     res.json(summarisePayments(order, payments));
   } catch (e) {
