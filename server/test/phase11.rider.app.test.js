@@ -204,12 +204,12 @@ describe('11 — rider dashboard', () => {
   it('counts only today\'s completed work, and only this rider\'s', async () => {
     const mine = await dispatchTo(rider);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      assert.equal((await setStatus(mine.delivery._id, status, riderToken())).status, 200);
+      assert.equal((await setStatus(mine.delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {})).status, 200);
     }
     // Another rider's completed job must not appear in these figures.
     const theirs = await dispatchTo(riderB);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      await setStatus(theirs.delivery._id, status, riderBToken());
+      await setStatus(theirs.delivery._id, status, riderBToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
     }
 
     const res = await request('/api/deliveries/mine/dashboard', {token: riderToken()});
@@ -221,7 +221,7 @@ describe('11 — rider dashboard', () => {
   it('excludes yesterday\'s deliveries from today\'s count', async () => {
     const {delivery} = await dispatchTo(rider);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      await setStatus(delivery._id, status, riderToken());
+      await setStatus(delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
     }
     // Backdate the completion; "today" must mean today.
     await Delivery.updateOne(
@@ -304,7 +304,7 @@ describe('11 — delivery detail', () => {
     const active = await dispatchTo(rider);
     const done = await dispatchTo(rider);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      await setStatus(done.delivery._id, status, riderToken());
+      await setStatus(done.delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
     }
 
     const live = await request('/api/deliveries/mine', {token: riderToken()});
@@ -325,7 +325,7 @@ describe('11 — rider lifecycle actions', () => {
     const {order, delivery} = await dispatchTo(rider);
 
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      const res = await setStatus(delivery._id, status, riderToken());
+      const res = await setStatus(delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
       assert.equal(res.status, 200, `${status}: ${JSON.stringify(res.body)}`);
       // Verify the database, not the response body.
       assert.equal((await Delivery.findById(delivery._id)).status, status);
@@ -346,7 +346,7 @@ describe('11 — rider lifecycle actions', () => {
   it('writes an audit entry for every rider transition', async () => {
     const {delivery} = await dispatchTo(rider);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      await setStatus(delivery._id, status, riderToken());
+      await setStatus(delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
     }
     for (const action of ['delivery_picked_up', 'delivery_out_for_delivery', 'delivery_delivered']) {
       const entry = await Audit.findOne({action, entityId: delivery._id}).lean();
@@ -368,7 +368,7 @@ describe('11 — rider lifecycle actions', () => {
 
   it('refuses a skipped state', async () => {
     const {delivery} = await dispatchTo(rider);
-    const skipped = await setStatus(delivery._id, 'delivered', riderToken());
+    const skipped = await setStatus(delivery._id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
     assert.equal(skipped.status, 409);
     assert.equal((await Delivery.findById(delivery._id)).status, 'assigned');
   });
@@ -376,7 +376,7 @@ describe('11 — rider lifecycle actions', () => {
   it('refuses to modify a completed delivery', async () => {
     const {delivery} = await dispatchTo(rider);
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      await setStatus(delivery._id, status, riderToken());
+      await setStatus(delivery._id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
     }
     const stamped = (await Delivery.findById(delivery._id)).deliveredAt;
 

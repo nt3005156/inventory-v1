@@ -49,8 +49,12 @@ export default function Deliveries({call, branches = [], user, token}) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busyId, setBusyId] = useState(null);
+  // Rider account creation. Owner-only; the server enforces that too.
+  const [newRider, setNewRider] = useState(null);
+  const [saving, setSaving] = useState(false);
 
   const isSupervisor = user?.role === 'owner' || user?.role === 'manager';
+  const isOwner = user?.role === 'owner';
 
   const load = useCallback(async () => {
     if (!branchId) return;
@@ -151,6 +155,32 @@ export default function Deliveries({call, branches = [], user, token}) {
     );
   };
 
+  const createRider = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      await call('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newRider.name.trim(),
+          email: newRider.email.trim(),
+          password: newRider.password,
+          role: 'rider',
+          branch: branchId,
+          ...(newRider.phone.trim() ? {phone: newRider.phone.trim()} : {}),
+          vehicle: newRider.vehicle
+        })
+      });
+      setNewRider(null);
+      setNotice('Rider account created');
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const setRiderState = (riderId, patch, message) => act(
     () => call(`/riders/${riderId}`, {method: 'PATCH', body: JSON.stringify(patch)}),
     message
@@ -236,6 +266,14 @@ export default function Deliveries({call, branches = [], user, token}) {
                   <p className="dlv-failure">Failed: {delivery.failureReason}</p>
                 )}
 
+                {delivery.proofType && (
+                  <p className="dlv-proof">
+                    Proof: {delivery.proofType.replace(/_/g, ' ')}
+                    {delivery.receivedBy ? ` · ${delivery.receivedBy}` : ''}
+                    {delivery.proofNote ? ` · “${delivery.proofNote}”` : ''}
+                  </p>
+                )}
+
                 <div className="dlv-cardactions">
                   {!['delivered', 'cancelled', 'failed'].includes(delivery.status) && (
                     <select
@@ -283,7 +321,44 @@ export default function Deliveries({call, branches = [], user, token}) {
         </section>
 
         <aside className="dlv-riders">
-          <h2>Riders</h2>
+          <div className="dlv-riderhead">
+            <h2>Riders</h2>
+            {isOwner && (
+              <button onClick={() => setNewRider({
+                name: '', email: '', password: '', phone: '', vehicle: 'motorcycle'
+              })}>+ Add</button>
+            )}
+          </div>
+
+          {newRider && (
+            <div className="dlv-ridernew">
+              <input placeholder="Full name" value={newRider.name}
+                onChange={e => setNewRider(r => ({...r, name: e.target.value}))}/>
+              <input placeholder="Email" type="email" value={newRider.email}
+                onChange={e => setNewRider(r => ({...r, email: e.target.value}))}/>
+              <input placeholder="Password (10+ chars, letters and numbers)" type="password"
+                value={newRider.password}
+                onChange={e => setNewRider(r => ({...r, password: e.target.value}))}/>
+              <input placeholder="Phone" value={newRider.phone}
+                onChange={e => setNewRider(r => ({...r, phone: e.target.value}))}/>
+              <select value={newRider.vehicle}
+                onChange={e => setNewRider(r => ({...r, vehicle: e.target.value}))}>
+                {['motorcycle', 'scooter', 'bicycle', 'car', 'on-foot']
+                  .map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <div className="dlv-rider-actions">
+                <button onClick={() => setNewRider(null)}>Cancel</button>
+                <button
+                  className="dlv-primary"
+                  disabled={saving || newRider.name.trim().length < 2
+                    || !newRider.email.includes('@') || newRider.password.length < 10}
+                  onClick={createRider}
+                >
+                  {saving ? 'Creating…' : 'Create rider'}
+                </button>
+              </div>
+            </div>
+          )}
           {!riders.length && <p className="dlv-empty">No riders at this branch.</p>}
           {riders.map(r => {
             const active = r.rider?.active !== false;

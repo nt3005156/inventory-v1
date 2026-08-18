@@ -42,6 +42,10 @@ export default function RiderApp({call, user, token, onLogout}) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  // Proof-of-delivery capture. Completion is irreversible, so it goes through
+  // an explicit form rather than a single tap.
+  const [proofFor, setProofFor] = useState(null);
+  const [proof, setProof] = useState({proofType: 'handed_to_customer', receivedBy: '', proofNote: ''});
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState('offline');
   const [expired, setExpired] = useState(false);
@@ -110,14 +114,47 @@ export default function RiderApp({call, user, token, onLogout}) {
     }
   };
 
-  const advance = (delivery, step) => act(
-    () => call(`/deliveries/${delivery._id}/status`, {
-      method: 'PATCH', body: JSON.stringify({status: step.status})
-    }),
-    `Marked ${STATUS_LABEL[step.status].toLowerCase()}`
-  );
+  const advance = (delivery, step) => {
+    // Completing a delivery is irreversible and now requires evidence, so it
+    // opens the proof form instead of firing immediately.
+    if (step.status === 'delivered') {
+      setProof({proofType: 'handed_to_customer', receivedBy: '', proofNote: ''});
+      setProofFor(delivery);
+      return undefined;
+    }
+    return act(
+      () => call(`/deliveries/${delivery._id}/status`, {
+        method: 'PATCH', body: JSON.stringify({status: step.status})
+      }),
+      `Marked ${STATUS_LABEL[step.status].toLowerCase()}`
+    );
+  };
+
+  /** The server re-validates all of this; the form only avoids a wasted trip. */
+  const proofIncomplete = proof.proofType !== 'handed_to_customer'
+    && !proof.receivedBy.trim() && !proof.proofNote.trim();
+
+  const submitProof = async () => {
+    if (proofIncomplete || busy) return;
+    const delivery = proofFor;
+    setProofFor(null);
+    await act(
+      () => call(`/deliveries/${delivery._id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status: 'delivered',
+          proofType: proof.proofType,
+          ...(proof.receivedBy.trim() ? {receivedBy: proof.receivedBy.trim()} : {}),
+          ...(proof.proofNote.trim() ? {proofNote: proof.proofNote.trim()} : {})
+        })
+      }),
+      'Delivery completed'
+    );
+  };
 
   const reportFailure = delivery => {
+    // Irreversible: a failed delivery cannot be walked back.
+    if (!window.confirm('Mark this delivery as failed? This cannot be undone.')) return undefined;
     const reason = window.prompt('What went wrong? (required)');
     if (!reason || !reason.trim()) return undefined;
     return act(
@@ -303,6 +340,18 @@ export default function RiderApp({call, user, token, onLogout}) {
                 {delivery.failureReason && (
                   <p className="rider-failure">Failed: {delivery.failureReason}</p>
                 )}
+
+                {delivery.proofType && (
+                  <>
+                    <h4>Proof of delivery</h4>
+                    <dl className="rider-dl">
+                      <dt>Handover</dt>
+                      <dd>{delivery.proofType.replace(/_/g, ' ')}</dd>
+                      {delivery.receivedBy && (<><dt>Received by</dt><dd>{delivery.receivedBy}</dd></>)}
+                      {delivery.proofNote && (<><dt>Note</dt><dd>{delivery.proofNote}</dd></>)}
+                    </dl>
+                  </>
+                )}
               </div>
             )}
 
@@ -329,6 +378,70 @@ export default function RiderApp({call, user, token, onLogout}) {
           </article>
         );
       })}
+
+      {proofFor && (
+        <div className="rider-modal" role="dialog" aria-modal="true">
+          <div className="rider-modalbox">
+            <h3>Confirm delivery</h3>
+            <p className="rider-muted">
+              {proofFor.order?.orderNo} · {proofFor.address}
+            </p>
+            {proofFor.order?.collectOnDelivery && (
+              <p className="rider-collect">
+                Collect {rs(proofFor.order.amountDue)} before completing
+              </p>
+            )}
+
+            <label>How was it handed over?
+              <select
+                value={proof.proofType}
+                onChange={e => setProof(p => ({...p, proofType: e.target.value}))}
+              >
+                <option value="handed_to_customer">Handed to the customer</option>
+                <option value="left_with_neighbour">Left with a neighbour</option>
+                <option value="reception">Left at reception</option>
+                <option value="left_at_door">Left at the door</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            {proof.proofType !== 'handed_to_customer' && (
+              <label>Who received it?
+                <input
+                  value={proof.receivedBy}
+                  placeholder="Name, or where it was left"
+                  onChange={e => setProof(p => ({...p, receivedBy: e.target.value}))}
+                />
+              </label>
+            )}
+
+            <label>Note (optional)
+              <textarea
+                rows={2}
+                value={proof.proofNote}
+                onChange={e => setProof(p => ({...p, proofNote: e.target.value}))}
+              />
+            </label>
+
+            {proofIncomplete && (
+              <p className="rider-hint">
+                Record who received it, or add a note, before completing.
+              </p>
+            )}
+
+            <div className="rider-modalactions">
+              <button className="rider-ghost" onClick={() => setProofFor(null)}>Cancel</button>
+              <button
+                className="rider-primary"
+                disabled={proofIncomplete || busy}
+                onClick={submitProof}
+              >
+                {busy ? 'Saving…' : 'Confirm delivered'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

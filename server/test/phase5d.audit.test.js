@@ -119,7 +119,9 @@ describe('AUDIT §1 — completedAt on every completion path', () => {
     let done;
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
       done = await request(`/api/deliveries/${delivery.body._id}/status`, {
-        method: 'PATCH', token: owner(), body: {status}
+        method: 'PATCH', token: owner(),
+        // Phase 12 requires proof of handover to complete a delivery.
+        body: {status, ...(status === 'delivered' ? {proofType: 'handed_to_customer'} : {})}
       });
     }
     assert.equal(done.status, 200, done.body?.message);
@@ -163,7 +165,8 @@ describe('AUDIT §1 — completedAt on every completion path', () => {
     });
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
       await request(`/api/deliveries/${delivery.body._id}/status`, {
-        method: 'PATCH', token: owner(), body: {status}
+        method: 'PATCH', token: owner(),
+        body: {status, ...(status === 'delivered' ? {proofType: 'handed_to_customer'} : {})}
       });
     }
     const first = (await Order.findById(order._id)).completedAt;

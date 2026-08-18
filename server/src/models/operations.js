@@ -725,7 +725,24 @@ const deliverySchema=new Schema({
     reason:{type:String,trim:true,maxlength:300},
     action:{type:String,enum:['assigned','reassigned','unassigned'],default:'assigned'}
   }],
-  proofNote:{type:String,trim:true,maxlength:300}
+  /**
+   * Proof of delivery (Phase 12).
+   *
+   * `proofNote` is free text ("handed to customer", "left with reception").
+   * `proofType` records HOW the handover was evidenced. There is no photo or
+   * signature field: this repository has no object storage and inventing an
+   * external service would be unverifiable, so the bounded, honest version is
+   * a typed note plus an optional recipient name -- see README for the
+   * documented storage limitation.
+   */
+  proofNote:{type:String,trim:true,maxlength:300},
+  proofType:{type:String,enum:['handed_to_customer','left_with_neighbour','left_at_door','reception','other'],default:null},
+  // Who actually took the food, when it was not the customer themselves.
+  receivedBy:{type:String,trim:true,maxlength:120,default:null},
+  // Set when the rider records the completion, distinct from deliveredAt so a
+  // later correction cannot silently rewrite when proof was captured.
+  proofAt:{type:Date,default:null},
+  proofBy:{...oid,ref:'User',default:null}
 },{timestamps:true});
 // One LIVE delivery per order. A second dispatch is a duplicate and the
 // database refuses it rather than trusting every caller to check. Cancelled

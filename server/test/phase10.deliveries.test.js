@@ -282,7 +282,7 @@ describe('10 — dispatch', () => {
     const id = created.body._id;
 
     for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
-      const moved = await setStatus(id, status, riderToken());
+      const moved = await setStatus(id, status, riderToken(), status === 'delivered' ? {proofType: 'handed_to_customer'} : {});
       assert.equal(moved.status, 200, `${status}: ${JSON.stringify(moved.body)}`);
       assert.equal(moved.body.status, status);
     }
@@ -330,7 +330,7 @@ describe('10 — dispatch', () => {
     const id = created.body._id;
     await setStatus(id, 'picked_up', riderToken());
     await setStatus(id, 'out_for_delivery', riderToken());
-    await setStatus(id, 'delivered', riderToken());
+    await setStatus(id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
 
     const reverted = await setStatus(id, 'out_for_delivery', manager());
     assert.equal(reverted.status, 409);
@@ -418,7 +418,7 @@ describe('10 — assignment', () => {
     const id = created.body._id;
     await setStatus(id, 'picked_up', riderToken());
     await setStatus(id, 'out_for_delivery', riderToken());
-    await setStatus(id, 'delivered', riderToken());
+    await setStatus(id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
 
     const res = await request(`/api/deliveries/${id}/assign`, {
       method: 'POST', token: manager(), body: {rider: String(riderB._id)}
@@ -460,7 +460,7 @@ describe('10 — assignment', () => {
     const created = await dispatch(first, {rider: String(rider._id)});
     await setStatus(created.body._id, 'picked_up', riderToken());
     await setStatus(created.body._id, 'out_for_delivery', riderToken());
-    await setStatus(created.body._id, 'delivered', riderToken());
+    await setStatus(created.body._id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
 
     const second = await readyDeliveryOrder();
     assert.equal((await dispatch(second, {rider: String(rider._id)})).status, 201);
@@ -706,7 +706,7 @@ describe('10 — rider management', () => {
     const created = await dispatch(order, {rider: String(rider._id)});
     await setStatus(created.body._id, 'picked_up', riderToken());
     await setStatus(created.body._id, 'out_for_delivery', riderToken());
-    await setStatus(created.body._id, 'delivered', riderToken());
+    await setStatus(created.body._id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
 
     const res = await request(`/api/riders/${rider._id}/history`, {token: manager()});
     assert.equal(res.status, 200);
@@ -777,7 +777,7 @@ describe('10 — dispatch dashboard', () => {
     );
     await setStatus(created.body._id, 'picked_up', riderToken());
     await setStatus(created.body._id, 'out_for_delivery', riderToken());
-    await setStatus(created.body._id, 'delivered', riderToken());
+    await setStatus(created.body._id, 'delivered', riderToken(), {proofType: 'handed_to_customer'});
 
     const res = await request(`/api/deliveries/dashboard?branch=${BRANCH()}`, {token: manager()});
     assert.equal(res.body.counts.delayed, 0);

@@ -277,3 +277,22 @@
 .rider-failure{margin:0;color:#a12622;font-size:14px}
 .rider-actions{display:flex;flex-direction:column;gap:8px;margin-top:2px}
 @media (min-width:520px){.rider-actions{flex-direction:row}.rider-actions .rider-big{flex:2}.rider-actions .rider-ghost{flex:1}}
+
+/* ── Phase 12: proof of delivery + rider provisioning ────────────────────── */
+.rider-modal{position:fixed;inset:0;background:rgba(15,20,28,.55);display:flex;align-items:flex-end;justify-content:center;z-index:50;padding:0}
+@media (min-width:520px){.rider-modal{align-items:center;padding:16px}}
+.rider-modalbox{background:#fff;border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:480px;display:flex;flex-direction:column;gap:12px;max-height:92vh;overflow-y:auto}
+@media (min-width:520px){.rider-modalbox{border-radius:16px}}
+.rider-modalbox h3{margin:0}
+.rider-modalbox label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563}
+.rider-modalbox input,.rider-modalbox select,.rider-modalbox textarea{padding:11px;border:1px solid #d8dce3;border-radius:9px;font-size:15px;font-family:inherit}
+.rider-hint{margin:0;font-size:13px;color:#8a6116;background:#fdf4e3;border-radius:8px;padding:8px 10px}
+.rider-modalactions{display:flex;gap:10px;margin-top:4px}
+.rider-modalactions button{flex:1}
+.dlv-proof{margin:0;font-size:13px;color:#1d6f36;background:#eaf7ee;border-radius:7px;padding:7px 10px}
+.dlv-riderhead{display:flex;justify-content:space-between;align-items:center}
+.dlv-riderhead h2{margin:0}
+.dlv-riderhead button{padding:5px 11px;border:1px solid #d8dce3;background:#fff;border-radius:6px;cursor:pointer;font-size:13px}
+.dlv-ridernew{border:1px solid #e6e8ec;border-radius:9px;padding:10px;display:flex;flex-direction:column;gap:7px}
+.dlv-ridernew input,.dlv-ridernew select{padding:8px 10px;border:1px solid #d8dce3;border-radius:7px;font-size:14px}
+.dlv-ridernew .dlv-primary{background:#b8322f;color:#fff;border-color:#b8322f}

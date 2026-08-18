@@ -21,6 +21,7 @@ import {
   listDeliveries,
   listRiderDeliveries,
   listRiders,
+  PROOF_TYPES,
   riderDashboard,
   riderHistory,
   setOwnAvailability,
@@ -196,14 +197,20 @@ r.patch('/deliveries/:id/status', auth([...STAFF, 'rider']), async (req, res) =>
     const body = z.object({
       status: z.enum(DELIVERY_STATUSES),
       reason: z.string().trim().max(300).optional(),
-      proofNote: z.string().trim().max(300).optional()
+      // Proof of delivery. Required on 'delivered'; the service enforces it,
+      // because the frontend is not an authorisation boundary.
+      proofNote: z.string().trim().max(300).optional(),
+      proofType: z.enum(PROOF_TYPES).optional(),
+      receivedBy: z.string().trim().max(120).optional()
     }).strict().parse(req.body || {});
     res.json(await updateDeliveryStatus({
       user: req.user,
       deliveryId: req.params.id,
       status: body.status,
       reason: body.reason,
-      proofNote: body.proofNote
+      proofNote: body.proofNote,
+      proofType: body.proofType,
+      receivedBy: body.receivedBy
     }));
   } catch (e) {
     fail(res, e);

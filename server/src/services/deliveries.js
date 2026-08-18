@@ -407,7 +407,14 @@ async function riderDeliveryOrFail(user, deliveryId, session) {
  * machine is identical for both — a rider cannot skip straight to delivered
  * from assigned any more than a manager can.
  */
-export async function updateDeliveryStatus({user, deliveryId, status, reason, proofNote}) {
+/** How a completed handover may be evidenced. */
+export const PROOF_TYPES = Object.freeze([
+  'handed_to_customer', 'left_with_neighbour', 'left_at_door', 'reception', 'other'
+]);
+
+export async function updateDeliveryStatus({
+  user, deliveryId, status, reason, proofNote, proofType, receivedBy
+}) {
   const isRider = user.role === 'rider';
   const session = await mongoose.startSession();
   try {
@@ -434,6 +441,19 @@ export async function updateDeliveryStatus({user, deliveryId, status, reason, pr
       if (status === 'failed' && !clean(reason)) {
         throw httpError('A failure reason is required', 400);
       }
+      // Phase 12: completing a delivery requires evidence of the handover.
+      // Without this, "delivered" is just a button a rider can press from
+      // anywhere, and a disputed order has nothing behind it.
+      if (status === 'delivered') {
+        const type = clean(proofType);
+        if (!type) throw httpError('Record how the order was handed over', 400);
+        if (!PROOF_TYPES.includes(type)) throw httpError('Unknown proof of delivery type', 400);
+        // If nobody took it in person, say who or where -- "left at door" with
+        // no further detail is exactly the case that gets disputed.
+        if (type !== 'handed_to_customer' && !clean(receivedBy) && !clean(proofNote)) {
+          throw httpError('Record who received the order, or add a note', 400);
+        }
+      }
 
       const before = delivery.status;
       delivery.status = status;
@@ -447,6 +467,14 @@ export async function updateDeliveryStatus({user, deliveryId, status, reason, pr
       }
       if (status === 'cancelled') delivery.cancelledAt = now;
       if (proofNote) delivery.proofNote = clean(proofNote);
+      if (status === 'delivered') {
+        delivery.proofType = clean(proofType);
+        delivery.receivedBy = clean(receivedBy) || null;
+        // Stamped separately from deliveredAt so a later correction to the
+        // delivery cannot silently rewrite when proof was actually captured.
+        delivery.proofAt = now;
+        delivery.proofBy = user.id;
+      }
       await delivery.save({session});
 
       // Keep the order in step. Dispatch and completion are order-level facts,
@@ -469,7 +497,19 @@ export async function updateDeliveryStatus({user, deliveryId, status, reason, pr
         entity: 'delivery', entityId: delivery._id, branch: delivery.branch,
         action: `delivery_${status}`,
         before: {status: before},
-        after: {status, reason: clean(reason) || null},
+        after: {
+          status,
+          reason: clean(reason) || null,
+          // Proof is written into the immutable audit trail as well as onto
+          // the delivery, so it survives any later edit to the document.
+          ...(status === 'delivered'
+            ? {
+              proofType: clean(proofType),
+              receivedBy: clean(receivedBy) || null,
+              proofNote: clean(proofNote) || null
+            }
+            : {})
+        },
         user: user.id
       }], {session});
     });
@@ -525,6 +565,10 @@ function riderDeliveryView(delivery, {customer} = {}) {
     deliveredAt: delivery.deliveredAt || null,
     failedAt: delivery.failedAt || null,
     failureReason: delivery.failureReason || null,
+    proofType: delivery.proofType || null,
+    proofNote: delivery.proofNote || null,
+    receivedBy: delivery.receivedBy || null,
+    proofAt: delivery.proofAt || null,
     createdAt: delivery.createdAt,
     order: order
       ? {

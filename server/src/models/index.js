@@ -13,7 +13,11 @@ auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{nam
  * see requireStaff() in middleware/auth.js.
  */
 export const RIDER_VEHICLES=Object.freeze(['motorcycle','scooter','bicycle','car','on-foot']);
-export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff','rider'],default:'staff'},restaurant:String,restaurantId:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},branch:{type:Schema.Types.ObjectId,ref:'Branch'},
+export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff','rider'],default:'staff'},
+  // Phase 12: employment state for ANY account. Enforced at login, so a
+  // deactivated employee cannot authenticate even with a valid password.
+  active:{type:Boolean,default:true},
+  restaurant:String,restaurantId:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},branch:{type:Schema.Types.ObjectId,ref:'Branch'},
   // Rider profile. Only meaningful when role === 'rider'.
   rider:{
     // Employment state: an inactive rider cannot be assigned anything.

@@ -15,6 +15,7 @@ import jwt from 'jsonwebtoken';
 import {User} from '../models/index.js';
 import {auth} from '../middleware/auth.js';
 import {AUTH_RATE_LIMIT, createRateLimiter} from '../services/rateLimiting.js';
+import {createStaffAccount} from '../services/staffAccounts.js';
 
 const r = Router();
 
@@ -44,6 +45,13 @@ r.post('/auth/login', authLimit, async (req, res) => {
   if (!user || !await bcrypt.compare(String(req.body.password || ''), user.password)) {
     return res.status(401).json({message: 'Invalid email or password'});
   }
+  // Phase 12: a deactivated account must not be able to authenticate, even
+  // with the correct password. Deliberately a distinct message from a bad
+  // credential -- the person is a real employee who needs to know why, and
+  // they have already proved they hold the password.
+  if (user.active === false || (user.role === 'rider' && user.rider?.active === false)) {
+    return res.status(403).json({message: 'This account is deactivated. Contact your manager.'});
+  }
   res.json({
     token: signToken(user),
     user: {
@@ -56,9 +64,25 @@ r.post('/auth/login', authLimit, async (req, res) => {
   });
 });
 
+/**
+ * Account provisioning.
+ *
+ * Delegates to createStaffAccount(), which takes the tenant from the caller's
+ * token rather than the payload, enforces the password policy and returns a
+ * safe projection. Before Phase 12 this was `User.create({...req.body})`,
+ * which let an owner plant a user in another restaurant, echoed the bcrypt
+ * hash back in the response, accepted a one-character password, and crashed
+ * when the password was omitted.
+ */
 r.post('/auth/register', auth(['owner']), async (req, res) => {
-  const password = await bcrypt.hash(req.body.password, 12);
-  res.status(201).json(await User.create({...req.body, password}));
+  try {
+    res.status(201).json(await createStaffAccount({user: req.user, input: req.body || {}}));
+  } catch (error) {
+    const status = error?.status || 500;
+    res.status(status).json({
+      message: status >= 500 ? 'Server error' : String(error.message).slice(0, 300)
+    });
+  }
 });
 
 export default r;

@@ -635,6 +635,57 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## Rider production readiness (Phase 12)
+
+### Account provisioning — four vulnerabilities fixed
+
+`POST /auth/register` was `User.create({...req.body})` with no validation. A
+live probe confirmed all four of these before any code changed:
+
+| Defect | Fix |
+|---|---|
+| An owner could plant a user in **another restaurant** by passing `restaurantId` | Tenant is read from the caller's token; unknown fields are rejected |
+| The **bcrypt hash was returned** in the response body | `publicUserView()` builds the response by hand and never includes it |
+| A **one-character password** was accepted | 10+ chars, letters and numbers, common passwords refused |
+| A **missing password crashed** the request (unhandled rejection) | Validated, returns `400` |
+
+Accounts are created through `POST /api/accounts` (owner-only). **`owner` is
+not a creatable role** — an owner account is a deployment act, not an API call.
+Duplicate email and duplicate rider phone are both refused.
+
+`User.active` now exists for every account and is **enforced at login**: a
+deactivated employee cannot authenticate even with the correct password. A
+rider holding live deliveries **cannot** be stood down — the jobs would be
+stranded with nobody able to advance them; reassign first.
+
+### Proof of delivery
+
+Completing a delivery previously required nothing — "delivered" was a button a
+rider could press from anywhere. It now requires evidence:
+
+- `proofType` — handed to customer / neighbour / reception / left at door / other
+- `receivedBy` — required when nobody took it in person (the disputed case)
+- `proofNote` — free text
+- `proofAt` / `proofBy` — stamped separately from `deliveredAt`, so a later
+  correction cannot silently rewrite when proof was captured
+
+Proof is written **both** onto the delivery and into the immutable audit trail,
+so it survives any later edit to the document. Staff see it on the dispatch
+board; the rider sees it on the finished job.
+
+**Documented storage limitation:** there is no photo or signature capture.
+This repository has no object storage (no S3, no GridFS, no upload pipeline),
+and introducing an external storage service here would be unverifiable in this
+environment. The bounded, honest version is a typed handover record. Adding
+image capture requires an object-storage decision first, and is out of scope
+for this phase.
+
+### Rider UI
+
+Completion opens an explicit proof form rather than firing on one tap;
+"report a problem" asks for confirmation because a failed delivery cannot be
+walked back. Both irreversible actions are now guarded.
+
 ## Rider app (Phase 11)
 
 ### What a rider sees
