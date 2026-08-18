@@ -6,19 +6,66 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Order} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
-import {publishKitchenOrder} from '../services/realtime.js';
+import {publishKitchenOrder, publishInventoryEvent} from '../services/realtime.js';
+import {moveStock} from '../services/inventoryLedger.js';
 import {
   ONLINE_PAYMENT_METHODS,
   ONLINE_ORDER_TYPES,
   getPublicMenu,
   listPublicBranches,
+  findByRequestKey,
   placePublicOrder,
   priceCart,
   trackPublicOrder
 } from '../services/storefront.js';
 
 const r = Router();
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+
+/**
+ * Hardening for the public surface.
+ *
+ * CORS itself is governed globally by CLIENT_URL, which production refuses to
+ * start without (see services/startup.js), so the wildcard fallback only ever
+ * applies in development. These headers add defence in depth for the endpoints
+ * an anonymous visitor can reach: menu and order responses are per-guest and
+ * must never be cached by a shared proxy, and none of them should ever be
+ * framed, sniffed, or leaked via a referrer.
+ */
+r.use('/public', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
+/**
+ * Public error responder.
+ *
+ * Anonymous callers get a safe, useful message and nothing else. Zod dumps its
+ * internal error array (codes, paths, "inclusive"/"exact" flags) into
+ * error.message, and Mongo/Mongoose errors carry query and schema detail —
+ * neither belongs on a public endpoint.
+ */
+function publicFail(res, e) {
+  const status = e?.status || (e?.name === 'ZodError' ? 400 : 400);
+  let message = e?.message || 'Request failed';
+
+  if (e?.name === 'ZodError' || /^\[\s*\{/.test(message)) {
+    // Surface the first human-readable validation problem, not the array.
+    const issue = Array.isArray(e?.issues) ? e.issues[0] : null;
+    const field = issue?.path?.length ? issue.path.join('.') : null;
+    message = field ? `Invalid ${field}` : 'Some details are missing or invalid';
+  } else if (e?.name === 'MongoServerError' || e?.name === 'ValidationError' || e?.name === 'CastError') {
+    message = 'We could not process that request';
+  } else if (status >= 500) {
+    message = 'Something went wrong. Please try again.';
+  }
+  // Never let a stack trace or internal path reach a guest.
+  return res.status(status).json({message: String(message).slice(0, 200)});
+}
+
+const fail = (res, e) => publicFail(res, e);
 
 // This is the only unauthenticated write path in the system, so it carries its
 // own abuse controls. Reads are looser than writes; placing an order is the
@@ -47,6 +94,27 @@ const quoteLimit = limiter(PUBLIC_RATE_LIMITS.quote);
 const orderLimit = limiter(PUBLIC_RATE_LIMITS.order);
 const trackLimit = limiter(PUBLIC_RATE_LIMITS.track);
 
+
+const clean = value => String(value ?? '').trim();
+
+/**
+ * The only order shape a guest ever sees. Centralised so a replayed request
+ * returns exactly what the original did, and so no internal field can leak in
+ * by accident.
+ */
+function publicOrderView(order, {paymentMethod, replayed = false} = {}) {
+  const method = paymentMethod || order.paymentMethod || 'cod';
+  return {
+    orderNo: order.orderNo,
+    status: order.status,
+    total: order.total,
+    paymentMethod: method,
+    paymentStatus: method === 'cod' ? 'due_on_delivery' : 'awaiting_payment',
+    placedAt: order.createdAt,
+    ...(replayed ? {replayed: true} : {})
+  };
+}
+
 const modifierSchema = z.object({
   group: z.string().min(1).max(40),
   option: z.string().min(1).max(40)
@@ -70,6 +138,7 @@ const checkoutSchema = z.object({
   }).strict(),
   address: z.string().trim().max(500).optional(),
   paymentMethod: z.enum(ONLINE_PAYMENT_METHODS),
+  coupon: z.string().trim().max(40).optional(),
   notes: z.string().trim().max(500).optional()
 }).strict();
 
@@ -98,11 +167,13 @@ r.post('/public/quote', quoteLimit, async (req, res) => {
       branch: z.string().min(1),
       type: z.enum(ONLINE_ORDER_TYPES),
       items: z.array(cartLineSchema).min(1).max(30),
-      address: z.string().trim().max(500).optional()
+      address: z.string().trim().max(500).optional(),
+      coupon: z.string().trim().max(40).optional()
     }).strict().parse(req.body);
 
-    const {totals, lines, branch} = await priceCart({
-      branchId: body.branch, type: body.type, items: body.items, deliveryAddress: body.address
+    const {totals, lines, branch, couponAmount} = await priceCart({
+      branchId: body.branch, type: body.type, items: body.items,
+      deliveryAddress: body.address, couponCode: body.coupon
     });
     res.json({
       branch: {id: branch._id, name: branch.name},
@@ -112,6 +183,8 @@ r.post('/public/quote', quoteLimit, async (req, res) => {
         modifiers: (l.modifiers || []).map(m => m.name)
       })),
       subtotal: totals.subtotal,
+      discount: totals.discount || 0,
+      couponDiscount: couponAmount || 0,
       vatRate: totals.vatRate,
       vat: totals.vat,
       deliveryFee: totals.deliveryFee,
@@ -126,21 +199,31 @@ r.post('/public/orders', orderLimit, async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = checkoutSchema.parse(req.body);
+    // A double-click or a retry after a network timeout must not buy twice.
+    const requestKey = clean(req.get('Idempotency-Key')).slice(0, 120) || undefined;
+
+    if (requestKey) {
+      const existing = await findByRequestKey(requestKey);
+      if (existing) return res.status(200).json(publicOrderView(existing, {replayed: true}));
+    }
+
     let result;
-    await session.withTransaction(async () => {
-      result = await placePublicOrder({input, session});
-    });
+    try {
+      await session.withTransaction(async () => {
+        result = await placePublicOrder({input, requestKey, session});
+      });
+    } catch (error) {
+      // Two concurrent submissions raced; the unique index rejected the loser.
+      // Return the order that won, so the guest still sees one order.
+      if (error?.code === 11000 && requestKey) {
+        const winner = await findByRequestKey(requestKey);
+        if (winner) return res.status(200).json(publicOrderView(winner, {replayed: true}));
+      }
+      throw error;
+    }
     // The kitchen sees it immediately, but as an unconfirmed ticket.
     await publishKitchenOrder(result.order, 'kitchen:new-order');
-    res.status(201).json({
-      orderNo: result.order.orderNo,
-      status: result.order.status,
-      total: result.order.total,
-      paymentMethod: input.paymentMethod,
-      // Honest about what has and has not happened with money.
-      paymentStatus: input.paymentMethod === 'cod' ? 'due_on_delivery' : 'awaiting_payment',
-      placedAt: result.order.createdAt
-    });
+    res.status(201).json(publicOrderView(result.order, {paymentMethod: input.paymentMethod}));
   } catch (e) {
     fail(res, e);
   } finally {
@@ -197,6 +280,37 @@ r.post('/online-orders/:id/accept', auth(['owner', 'manager', 'staff']), async (
       if (order.status !== 'pending') {
         throw Object.assign(new Error(`This order is already ${order.status}`), {status: 409});
       }
+      // Acceptance is the commitment point: this is where the branch takes
+      // responsibility, so this is where stock actually moves. Inside the
+      // transaction, so a concurrent accept cannot oversell.
+      if (!order.inventoryDeducted) {
+        const {InventoryBalance} = await import('../models/operations.js');
+        const required = new Map();
+        for (const line of order.items || []) {
+          for (const requirement of line.inventoryRequirements || []) {
+            const key = String(requirement.ingredient);
+            const current = required.get(key) || {ingredient: requirement.ingredient, unit: requirement.unit, qty: 0};
+            current.qty += Number(requirement.qty || 0) * Number(line.qty || 0);
+            required.set(key, current);
+          }
+        }
+        for (const need of required.values()) {
+          const balance = await InventoryBalance.findOne({branch: order.branch, ingredient: need.ingredient}).session(session);
+          if (!balance || Number(balance.quantity || 0) + 1e-9 < need.qty) {
+            throw Object.assign(new Error('Insufficient stock to accept this order'), {status: 409});
+          }
+        }
+        for (const need of required.values()) {
+          if (Math.abs(need.qty) <= 1e-9) continue;
+          await moveStock({
+            branch: order.branch, ingredient: need.ingredient, qty: -need.qty, unit: need.unit,
+            type: 'RECIPE_DEDUCTION', reason: `${order.orderNo} accepted online`,
+            referenceType: 'order', referenceId: order._id, user: req.user.id,
+            idempotencyKey: `online:${order._id}:${need.ingredient}`
+          }, session);
+        }
+        order.inventoryDeducted = true;
+      }
       order.status = 'confirmed';
       order.acceptedOnlineAt = new Date();
       await order.save({session});
@@ -206,6 +320,7 @@ r.post('/online-orders/:id/accept', auth(['owner', 'manager', 'staff']), async (
       }], {session});
     });
     await publishKitchenOrder(order, 'kitchen:status');
+    publishInventoryEvent(order.branch, {reason: 'online_order_accepted', orderId: String(order._id)});
     res.json(order);
   } catch (e) {
     fail(res, e);

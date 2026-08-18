@@ -5,6 +5,7 @@ import {money} from './billing.js';
 import {priceOrder} from './pos.js';
 import {applyModifierPricing, resolveModifiers, toOrderModifiers, normalizeInstructions} from './modifiers.js';
 import {listStations, routeItemToStation} from './stations.js';
+import {recordRedemption, resolveOrderDiscount, validateCoupon} from './discounts.js';
 
 // Phase 8A — public online ordering.
 //
@@ -144,7 +145,7 @@ export function normalizeGuest(input = {}) {
  * The guest sends menu item ids, quantities and modifier choices. Every price
  * is looked up here, so a tampered cart cannot buy a Rs.400 dish for Rs.1.
  */
-export async function priceCart({branchId, type, items, deliveryAddress, session}) {
+export async function priceCart({branchId, type, items, deliveryAddress, couponCode, customerId, session}) {
   const branch = await resolvePublicBranch(branchId, {session});
   const orderType = clean(type).toLowerCase() || 'delivery';
   if (!ONLINE_ORDER_TYPES.includes(orderType)) {
@@ -203,7 +204,7 @@ export async function priceCart({branchId, type, items, deliveryAddress, session
   }
 
   const deliveryFee = orderType === 'delivery' ? money(branch.deliveryFee || 0) : 0;
-  const totals = priceOrder({
+  const base = priceOrder({
     type: orderType,
     customer: orderType === 'delivery' ? 'public' : undefined,
     deliveryAddress: orderType === 'delivery' ? (clean(deliveryAddress) || 'pending') : undefined,
@@ -212,7 +213,81 @@ export async function priceCart({branchId, type, items, deliveryAddress, session
     vatRate: 13
   });
 
-  return {branch, orderType, lines, priced, totals};
+  // Coupons reuse the Phase 4C engine, so every restriction it enforces —
+  // validity window, branch and menu scope, usage and per-customer limits,
+  // minimum spend and maximum discount — applies to a public order too. A
+  // guest supplies only the code; the discount is computed here.
+  let coupon = null;
+  let couponAmount = 0;
+  if (clean(couponCode)) {
+    const result = await validateCoupon({
+      code: couponCode,
+      restaurantId: branch.restaurant,
+      branchId: branch._id,
+      orderType,
+      customerId,
+      lines: base.lines.map((line, i) => ({...line, menuItem: lines[i].menuItem})),
+      subtotal: base.netAfterItems,
+      session
+    });
+    coupon = result.coupon;
+    couponAmount = result.amount;
+  }
+
+  const {orderDiscountTotal} = resolveOrderDiscount({
+    subtotalAfterItems: base.netAfterItems, manual: null, couponAmount
+  });
+
+  const totals = orderDiscountTotal > 0
+    ? priceOrder({
+      type: orderType,
+      customer: orderType === 'delivery' ? 'public' : undefined,
+      deliveryAddress: orderType === 'delivery' ? (clean(deliveryAddress) || 'pending') : undefined,
+      items: priced,
+      discount: orderDiscountTotal,
+      deliveryFee,
+      vatRate: 13
+    })
+    : base;
+
+  return {branch, orderType, lines, priced, totals, coupon, couponAmount};
+}
+
+
+/**
+ * Confirms the branch can actually cook the cart.
+ *
+ * A public order does not deduct stock (the branch has not accepted it yet),
+ * but taking an order the kitchen cannot fulfil wastes the guest's time and
+ * the branch's. This is an availability check, not a reservation: the binding
+ * deduction happens on acceptance, inside a transaction.
+ */
+export async function assertCartStock({branchId, lines, session}) {
+  const {InventoryBalance} = await import('../models/operations.js');
+  const required = new Map();
+  for (const line of lines) {
+    for (const requirement of line.inventoryRequirements || []) {
+      const key = String(requirement.ingredient);
+      required.set(key, (required.get(key) || 0) + Number(requirement.qty || 0) * Number(line.qty || 0));
+    }
+  }
+  for (const [ingredientId, needed] of required) {
+    const balance = await InventoryBalance.findOne({branch: branchId, ingredient: ingredientId})
+      .session(session || null).lean();
+    const onHand = Number(balance?.quantity || 0);
+    if (onHand + 1e-9 < needed) {
+      const {Ingredient: IngredientModel} = await import('../models/index.js');
+      const ingredient = await IngredientModel.findById(ingredientId).select('name').session(session || null).lean();
+      // Deliberately vague: exact stock levels are commercially sensitive.
+      throw httpError(`Sorry, ${ingredient?.name || 'an item'} is out of stock right now`, 409);
+    }
+  }
+}
+
+/** Returns an existing public order for a repeated request key. */
+export async function findByRequestKey(requestKey, {session} = {}) {
+  if (!requestKey) return null;
+  return Order.findOne({publicRequestKey: requestKey}).select('+publicRequestKey').session(session || null);
 }
 
 /**
@@ -223,13 +298,14 @@ export async function priceCart({branchId, type, items, deliveryAddress, session
  * deducted here: a web order is unconfirmed until the branch accepts it, and
  * deducting stock for an order that may be rejected would corrupt the ledger.
  */
-export async function placePublicOrder({input, session}) {
+export async function placePublicOrder({input, requestKey, session}) {
   const guest = normalizeGuest(input.customer);
-  const {branch, orderType, lines, totals} = await priceCart({
+  const {branch, orderType, lines, totals, coupon, couponAmount} = await priceCart({
     branchId: input.branch,
     type: input.type,
     items: input.items,
     deliveryAddress: input.address,
+    couponCode: input.coupon,
     session
   });
 
@@ -255,6 +331,8 @@ export async function placePublicOrder({input, session}) {
     await customer.save({session: session || undefined});
   }
 
+  await assertCartStock({branchId: branch._id, lines, session});
+
   lines.forEach((line, index) => {
     line.lineNet = totals.lines[index].lineNet;
     line.lineVat = totals.lines[index].lineVat;
@@ -263,6 +341,7 @@ export async function placePublicOrder({input, session}) {
 
   const [order] = await Order.create([{
     orderNo: `WEB-${Date.now().toString().slice(-7)}`,
+    publicRequestKey: requestKey || undefined,
     branch: branch._id,
     customer: customer._id,
     type: orderType,
@@ -272,8 +351,10 @@ export async function placePublicOrder({input, session}) {
     deliveryAddress: orderType === 'delivery' ? address : undefined,
     subtotal: totals.subtotal,
     itemDiscount: 0,
-    discount: 0,
-    discountTotal: 0,
+    discount: totals.discount || 0,
+    discountTotal: totals.discount || 0,
+    couponDiscount: money(couponAmount || 0),
+    couponCode: coupon ? coupon.code : undefined,
     vatRate: totals.vatRate,
     vat: totals.vat,
     serviceChargeRate: 0,
@@ -286,6 +367,15 @@ export async function placePublicOrder({input, session}) {
     source: 'online',
     paymentMethod: method
   }], {session: session || undefined});
+
+  // Redemption is recorded inside the same transaction, so usage limits hold
+  // even if two guests submit the last use of a coupon simultaneously.
+  if (coupon) {
+    await recordRedemption({
+      coupon, order, restaurantId: branch.restaurant, branchId: branch._id,
+      customerId: customer._id, amount: couponAmount, user: {id: null}, session
+    });
+  }
 
   // A digital intent is recorded as pending, never as taken money. Nothing
   // here claims a gateway confirmed anything.

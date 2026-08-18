@@ -31,6 +31,10 @@ export default function Storefront() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [track, setTrack] = useState({orderNo: '', phone: '', result: null});
+  const [coupon, setCoupon] = useState('');
+  // Stable for the life of this cart, so a double-click or a retry after a
+  // timeout is deduplicated by the server rather than buying twice.
+  const [checkoutKey, setCheckoutKey] = useState(() => `sf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   useEffect(() => {
     publicCall('/public/branches')
@@ -78,7 +82,10 @@ export default function Storefront() {
     try {
       setQuote(await publicCall('/public/quote', {
         method: 'POST',
-        body: JSON.stringify({branch: branchId, type, items: cartPayload, address: address || undefined})
+        body: JSON.stringify({
+          branch: branchId, type, items: cartPayload,
+          address: address || undefined, coupon: coupon.trim() || undefined
+        })
       }));
     } catch (e) {
       setError(e.message);
@@ -93,6 +100,7 @@ export default function Storefront() {
     try {
       const result = await publicCall('/public/orders', {
         method: 'POST',
+        headers: {'Idempotency-Key': checkoutKey},
         body: JSON.stringify({
           branch: branchId,
           type,
@@ -103,11 +111,16 @@ export default function Storefront() {
             ...(guest.email.trim() ? {email: guest.email.trim()} : {})
           },
           ...(type === 'delivery' ? {address: address.trim()} : {}),
+          ...(coupon.trim() ? {coupon: coupon.trim()} : {}),
           paymentMethod
         })
       });
       setPlaced(result);
       setCart([]);
+      setCoupon('');
+      // A fresh key for the next order, so the next checkout is not deduped
+      // against this one.
+      setCheckoutKey(`sf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       setStep('done');
     } catch (e) {
       setError(e.message);
@@ -193,9 +206,17 @@ export default function Storefront() {
               <input type="radio" checked={type === 'takeaway'} onChange={() => setType('takeaway')}/> Pick-up
             </label>
           </div>
+          <div className="sf-coupon">
+            <input placeholder="Coupon code (optional)" value={coupon}
+              onChange={e => setCoupon(e.target.value.toUpperCase())}/>
+            <button onClick={refreshQuote}>Apply</button>
+          </div>
           {quote && (
             <div className="sf-totals">
               <div><span>Subtotal</span><b>{rs(quote.subtotal)}</b></div>
+              {quote.couponDiscount > 0 && (
+                <div><span>Discount</span><b>−{rs(quote.couponDiscount)}</b></div>
+              )}
               <div><span>VAT {quote.vatRate}%</span><b>{rs(quote.vat)}</b></div>
               {quote.deliveryFee > 0 && <div><span>Delivery</span><b>{rs(quote.deliveryFee)}</b></div>}
               <div className="sf-grand"><span>Total</span><b>{rs(quote.total)}</b></div>

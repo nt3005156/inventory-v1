@@ -181,9 +181,27 @@ supplier and station data never leave the building**. Order tracking requires th
 not enumerable. Public endpoints carry their own rate limits (ordering is capped hardest at 8 per
 15 minutes), and a guest cannot reach the authenticated order API.
 
+**Security controls on the public surface.** Every one is enforced by the backend and covered by
+attack tests:
+
+| Control | Behaviour |
+|---|---|
+| Idempotency | `Idempotency-Key` on checkout. A repeat returns the original order with `replayed: true`; a unique partial index makes a duplicate impossible even under a race |
+| Stock safety | Availability is checked when the order is taken and again, transactionally, on acceptance. Stock can never go negative — six orders against three plates accept exactly three |
+| Price integrity | Strict schemas reject an injected `unitPrice`, `total`, `discount`, `vat` or `deliveryFee`; every figure is recomputed from stored records |
+| Coupons | Reuse the Phase 4C engine, so validity window, branch and menu scope, usage and per-customer limits, minimum spend and maximum cap all apply to anonymous guests |
+| Order privacy | Tracking needs the reference **and** the phone; a mismatch returns the same 404 as an unknown order |
+| Customer privacy | The Customer collection is not readable publicly, and ordering under a known phone echoes nothing back |
+| Error safety | Public errors are sanitised — no zod dumps, Mongo errors, stack traces or paths |
+| HTTP headers | Public responses are `no-store`, `nosniff`, `DENY` framing, `no-referrer` |
+| Rate limits | Browse 120/min, quote 30/min, track 20/min, **order 8 per 15 min** |
+
 **A web order does not move stock.** It is created `pending` with `source: 'online'`; the branch
 accepts or rejects it, and only acceptance commits the ticket — deducting inventory for an order
 that may be refused would corrupt the ledger.
+
+Stock is deducted **on acceptance**, inside the transaction, reusing the lot-aware ledger — so a
+branch cannot accept more orders than it can cook.
 
 **Payment is honest about what happened.** Cash on delivery settles on handover. Choosing eSewa or
 Khalti records the *intent* as a `pending` Payment row and reports `awaiting_payment`; no gateway
