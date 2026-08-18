@@ -14,12 +14,15 @@ import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {
+  addCustomerAddress,
   adjustLoyaltyPoints,
   createCustomer,
   customerSummary,
   getCustomer,
   getCustomerHistory,
   mergeCustomers,
+  removeCustomerAddress,
+  updateCustomerAddress,
   recalculateCustomerStats,
   searchCustomers,
   setCustomerActive,
@@ -48,8 +51,20 @@ function fail(res, error) {
 const addressSchema = z.object({
   label: z.string().trim().max(60).optional(),
   address: z.string().trim().min(1).max(300),
+  instructions: z.string().trim().max(300).optional(),
   default: z.boolean().optional()
 });
+
+// Phase 10: addresses are managed individually so concurrent edits to
+// different addresses cannot overwrite one another.
+const addressCreateSchema = z.object({
+  label: z.string().trim().max(60).optional(),
+  address: z.string().trim().min(5).max(300),
+  instructions: z.string().trim().max(300).optional(),
+  default: z.boolean().optional()
+}).strict();
+
+const addressUpdateSchema = addressCreateSchema.partial().strict();
 
 const preferencesSchema = z.object({
   dietary: z.enum(['none', 'vegetarian', 'vegan', 'halal', 'jain']).optional(),
@@ -165,6 +180,38 @@ r.patch('/customers/:id/active', auth(['owner']), async (req, res) => {
     }).strict().parse(req.body || {});
     res.json(await setCustomerActive({
       user: req.user, customerId: req.params.id, active: body.active, reason: body.reason
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.post('/customers/:id/addresses', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    const body = addressCreateSchema.parse(req.body || {});
+    res.status(201).json(await addCustomerAddress({
+      user: req.user, customerId: req.params.id, input: body
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.patch('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    const body = addressUpdateSchema.parse(req.body || {});
+    res.json(await updateCustomerAddress({
+      user: req.user, customerId: req.params.id, addressId: req.params.addressId, input: body
+    }));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+r.delete('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff']), async (req, res) => {
+  try {
+    res.json(await removeCustomerAddress({
+      user: req.user, customerId: req.params.id, addressId: req.params.addressId
     }));
   } catch (e) {
     fail(res, e);

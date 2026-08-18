@@ -2,7 +2,32 @@ import mongoose from 'mongoose';
 const {Schema,model}=mongoose; const money={type:Number,default:0};
 const auditSchema=new Schema({entity:String,entityId:Schema.Types.ObjectId,restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant'},branch:{type:Schema.Types.ObjectId,ref:'Branch'},action:String,before:Schema.Types.Mixed,after:Schema.Types.Mixed,reason:String,user:{type:Schema.Types.ObjectId,ref:'User'},at:{type:Date,default:Date.now}});
 auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{name:'audit_entity_timeline'});
-export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff'],default:'staff'},restaurant:String,restaurantId:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},branch:{type:Schema.Types.ObjectId,ref:'Branch'}},{timestamps:true}));
+/**
+ * Phase 10 adds the 'rider' role.
+ *
+ * A rider is the least-privileged principal in the system: they may see and
+ * advance ONLY the deliveries assigned to them. Because several legacy
+ * endpoints are guarded by a bare auth() (any authenticated user), adding this
+ * role without care would have handed riders the branch list, transfers and
+ * the expense ledger. Those call sites were tightened in the same change --
+ * see requireStaff() in middleware/auth.js.
+ */
+export const RIDER_VEHICLES=Object.freeze(['motorcycle','scooter','bicycle','car','on-foot']);
+export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff','rider'],default:'staff'},restaurant:String,restaurantId:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},branch:{type:Schema.Types.ObjectId,ref:'Branch'},
+  // Rider profile. Only meaningful when role === 'rider'.
+  rider:{
+    // Employment state: an inactive rider cannot be assigned anything.
+    active:{type:Boolean,default:true},
+    // Shift state: on/off duty. Distinct from `active` because a rider who is
+    // simply off shift must not be confused with one who has left.
+    available:{type:Boolean,default:false},
+    phone:{type:String,trim:true,maxlength:30},
+    vehicle:{type:String,enum:RIDER_VEHICLES,default:'motorcycle'},
+    licencePlate:{type:String,trim:true,maxlength:20},
+    // How many live deliveries this rider may hold at once.
+    maxConcurrent:{type:Number,default:3,min:1,max:20},
+    notes:{type:String,trim:true,maxlength:500}
+  }},{timestamps:true}));
 const supplierSchema=new Schema({
   restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true},
   name:{type:String,required:true,trim:true,maxlength:120},

@@ -635,6 +635,101 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## Addresses & delivery (Phase 10)
+
+### The rider role
+
+Phase 10 introduces `rider`, the lowest-privilege principal in the system.
+
+**Adding it to the role enum silently widened every endpoint guarded by a bare
+`auth()`** — the branch list, transfers and the expense ledger among them,
+because `auth()` with no role list means "any authenticated principal". Those
+call sites now use `requireStaff()` (`owner`/`manager`/`staff`), and a test
+asserts a rider token is refused by each. There are no bare `auth()` guards
+left in the codebase.
+
+A rider may only ever:
+
+- list the deliveries **assigned to them** (`GET /deliveries/mine`)
+- read one of those (`GET /deliveries/mine/:id`)
+- advance it to `picked_up`, `out_for_delivery`, `delivered` or `failed`
+- set their own shift state (`PATCH /deliveries/mine/availability`)
+
+They cannot browse the unassigned pool, see a branch queue, touch another
+rider's job, cancel anything (that has money in it), or change their own
+profile limits. The rule is enforced in one helper, `riderDeliveryOrFail()`,
+which every rider path goes through; anything not assigned to them answers
+`404`, never `403`, so delivery ids cannot be probed.
+
+On Socket.IO, riders join a **private `rider:<id>` room** and are refused a
+branch room in both the handshake and `joinBranch()`. Branch rooms carry
+kitchen tickets and inventory movements, which a rider has no business seeing.
+
+### Lifecycle
+
+```
+Order ready
+   ↓  POST /deliveries
+pending ──► assigned ──► picked_up ──► out_for_delivery ──► delivered
+              │             │                │
+              └─────────────┴────────────────┴──► failed  (reason required)
+   any live state ──► cancelled (staff only)
+```
+
+Terminal states are dead ends: a delivered job cannot be walked back, so no one
+can un-complete finished work. Reassigning an in-flight delivery **rewinds it
+to `assigned`** and clears the pickup/dispatch stamps, so a new rider is not
+credited with the previous rider's progress.
+
+Order status follows along: `out_for_delivery` moves the order, and `delivered`
+completes it and stamps `completedAt` (without which the ticket vanishes from
+kitchen performance metrics).
+
+### Duplicate dispatch
+
+One live delivery per order, enforced by a **unique partial index** on `order`
+covering every non-cancelled status — so a failed attempt can legitimately be
+re-dispatched, but two dispatchers clicking at once cannot both win. Note that
+MongoDB partial indexes do **not** support `$ne`, so the filter lists the
+statuses explicitly; the model and the migration must keep identical
+definitions.
+
+### Riders and capacity
+
+Riders carry `active` (employment) and `available` (shift) separately — a rider
+who is off shift must not be confused with one who has left. Deactivating a
+rider also takes them off shift. Assignment refuses an inactive rider, a rider
+from another branch or restaurant, and one already at `maxConcurrent` live
+deliveries (default 3): silently stacking jobs on one rider is how food goes
+cold.
+
+### Dashboard
+
+`GET /deliveries/dashboard` buckets into pending, assigned, active, completed,
+failed and **delayed**. Lateness is *derived* from `dueAt` against the clock,
+never stored — a persisted "late" flag would be wrong a minute later.
+
+### Addresses
+
+Addresses are managed individually (`POST`/`PATCH`/`DELETE
+/customers/:id/addresses[/:addressId]`) rather than by replacing the array, so
+two staff editing different addresses cannot clobber each other. Exactly one
+address is the default, enforced server-side: the first address added becomes
+the default automatically, and deleting the default promotes another. Each
+carries a label and rider `instructions` (gate codes, landmarks), which are
+**copied onto the delivery at dispatch** so a later edit cannot rewrite what
+the rider was told. Capped at 10 per customer; duplicates are refused.
+
+### Migration
+
+`ensureDeliveryIndexes()` backfills `branch`/`restaurant` onto historical
+deliveries (previously joined through the order every time), maps the legacy
+`available`/`picking_up` statuses to `pending`/`picked_up`, infers missing
+lifecycle stamps, and retires duplicate dispatches as `cancelled` rather than
+deleting them — a cancelled row is honest where a missing row is not. It drops
+the unique index first so it cannot deadlock against the duplicates it exists
+to clean, then rebuilds it. Idempotent.
+
 ## Customers & CRM (Phase 9)
 
 ### Scope: customers are restaurant-wide

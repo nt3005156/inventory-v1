@@ -6,10 +6,16 @@ import {purchaseBranchContext} from './purchaseOrders.js';
 import {Order} from '../models/operations.js';
 import {resolveCorsOptions} from './deployment.js';
 
-const SOCKET_ROLES = ['owner', 'manager', 'staff'];
+const SOCKET_ROLES = ['owner', 'manager', 'staff', 'rider'];
 const MANAGEMENT_ROLES = new Set(['owner', 'manager']);
 export const branchRoom = id => 'branch:' + String(id);
 export const purchasingManagementRoom = id => `${branchRoom(id)}:purchasing-management`;
+/**
+ * Riders get a private room keyed by their user id, never a branch room.
+ * Branch rooms carry kitchen tickets and inventory movements, which a delivery
+ * rider has no business receiving.
+ */
+export const riderRoom = id => 'rider:' + String(id);
 
 let io = null;
 
@@ -35,6 +41,9 @@ function leaveBranchRooms(socket, branchId) {
 }
 
 export async function joinBranch(socket, branchId) {
+  // Defence in depth: even if a rider socket asks to join a branch room, it is
+  // refused here as well as during the handshake.
+  if (socket.user?.role === 'rider') throw socketError('Riders cannot join a branch room', 403);
   if (!branchId) throw socketError('Branch is required');
   if (!mongoose.isValidObjectId(branchId)) throw socketError('Invalid branch');
 
@@ -91,6 +100,14 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
       // A requested initial branch is fully tenant-checked during the handshake.
       // Clients still join explicitly and reload after the join acknowledgement so
       // mutations that happen during connection setup cannot be missed.
+      // A rider is not a branch participant: they join only their own private
+      // room, and any branch they ask for is ignored rather than honoured.
+      if (payload.role === 'rider') {
+        await socket.join(riderRoom(payload.id));
+        socket.data = {...(socket.data || {}), rider: true};
+        return next();
+      }
+
       const requested = socket.handshake.auth?.branch;
       if (requested) await purchaseBranchContext({user: payload, branchId: requested, allowInactive: true});
       next();
@@ -202,6 +219,19 @@ export function publishPurchasingEvent(branchId, extra = {}, {audience = 'branch
     console.error('purchasing realtime publish failed', error.message);
     return false;
   }
+}
+
+/**
+ * Delivery updates go to the branch (dispatchers) and, when the delivery is
+ * assigned, to that one rider's private room. A rider is never given a branch
+ * room, so this is the only channel by which they can be reached.
+ */
+export function publishDeliveryEvent(branchId, extra = {}, {riderId} = {}) {
+  if (!io || !branchId) return false;
+  const payload = {...extra, branch: String(branchId)};
+  io.to(branchRoom(branchId)).emit('delivery:update', payload);
+  if (riderId) io.to(riderRoom(riderId)).emit('delivery:update', payload);
+  return true;
 }
 
 export function publishInventoryEvent(branchId, extra = {}) {

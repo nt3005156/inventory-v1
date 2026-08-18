@@ -501,6 +501,95 @@ export async function mergeCustomers({user, sourceId, targetId}) {
   }
 }
 
+/**
+ * Address book operations (Phase 10).
+ *
+ * Addresses are edited individually rather than by replacing the whole array,
+ * so two staff members editing different addresses cannot clobber each other.
+ * Exactly one address may be the default, and that invariant is enforced here
+ * rather than trusted to the caller.
+ */
+function applyDefaultInvariant(customer, defaultIndex) {
+  customer.addresses.forEach((address, index) => {
+    address.default = index === defaultIndex;
+  });
+}
+
+export async function addCustomerAddress({user, customerId, input}) {
+  const customer = await getCustomer({user, customerId});
+  if ((customer.addresses || []).length >= 10) {
+    throw httpError('A customer may keep at most 10 addresses', 409);
+  }
+  const address = clean(input.address);
+  if (address.length < 5) throw httpError('A usable street address is required', 400);
+  // The same place saved twice is a data-entry slip, not two addresses.
+  if ((customer.addresses || []).some(a => clean(a.address).toLowerCase() === address.toLowerCase())) {
+    throw httpError('That address is already saved for this customer', 409);
+  }
+
+  customer.addresses.push({
+    label: clean(input.label) || 'Home',
+    address,
+    instructions: clean(input.instructions) || undefined,
+    default: false
+  });
+  // The first address a customer ever has must be their default, otherwise
+  // delivery has nothing to fall back on.
+  const index = customer.addresses.length - 1;
+  if (customer.addresses.length === 1 || input.default) applyDefaultInvariant(customer, index);
+
+  await customer.save();
+  await Audit.create({
+    entity: 'customer', entityId: customer._id, branch: customer.branch,
+    action: 'customer_address_added', after: {label: input.label, address}, user: user.id
+  });
+  return customer;
+}
+
+export async function updateCustomerAddress({user, customerId, addressId, input}) {
+  const customer = await getCustomer({user, customerId});
+  const target = customer.addresses.id(addressId);
+  if (!target) throw httpError('Address not found', 404);
+
+  if (input.address !== undefined) {
+    const address = clean(input.address);
+    if (address.length < 5) throw httpError('A usable street address is required', 400);
+    target.address = address;
+  }
+  if (input.label !== undefined) target.label = clean(input.label) || 'Home';
+  if (input.instructions !== undefined) {
+    target.instructions = clean(input.instructions) || undefined;
+  }
+  if (input.default === true) {
+    applyDefaultInvariant(customer, customer.addresses.indexOf(target));
+  }
+
+  await customer.save();
+  await Audit.create({
+    entity: 'customer', entityId: customer._id, branch: customer.branch,
+    action: 'customer_address_updated', after: {address: target.address}, user: user.id
+  });
+  return customer;
+}
+
+export async function removeCustomerAddress({user, customerId, addressId}) {
+  const customer = await getCustomer({user, customerId});
+  const target = customer.addresses.id(addressId);
+  if (!target) throw httpError('Address not found', 404);
+
+  const wasDefault = target.default;
+  target.deleteOne();
+  // Never leave a customer with addresses but no default.
+  if (wasDefault && customer.addresses.length) applyDefaultInvariant(customer, 0);
+
+  await customer.save();
+  await Audit.create({
+    entity: 'customer', entityId: customer._id, branch: customer.branch,
+    action: 'customer_address_removed', before: {address: target.address}, user: user.id
+  });
+  return customer;
+}
+
 /** Manual loyalty adjustment, always audited. */
 export async function adjustLoyaltyPoints({user, customerId, delta, reason}) {
   const customer = await getCustomer({user, customerId});

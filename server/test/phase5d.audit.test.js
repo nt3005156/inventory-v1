@@ -2,7 +2,7 @@ import {describe, it, before, after, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import {Audit, MenuItem} from '../src/models/index.js';
+import {Audit, MenuItem, User} from '../src/models/index.js';
 import {Customer, Delivery, Order} from '../src/models/operations.js';
 import {backfillCompletedAt, findCompletionEvidence} from '../src/services/completedAtBackfill.js';
 import {startTestApp, stopTestApp, clearDb, request, seedWorld, tokenFor} from './helpers.js';
@@ -99,13 +99,29 @@ describe('AUDIT §1 — completedAt on every completion path', () => {
     const order = await place([{menuItem: String(grill._id), qty: 1}], world.branchA, {
       type: 'delivery', customer: String(guest._id), deliveryAddress: 'Patan'
     });
+    // Phase 10 will not dispatch an order that has not been cooked, and the
+    // delivery state machine has no shortcut to 'delivered'.
+    for (const status of ['accepted', 'preparing', 'ready']) {
+      await request(`/api/orders/${order._id}/status`, {
+        method: 'PATCH', token: owner(), body: {status}
+      });
+    }
+    const rider = await User.create({
+      name: 'Audit Rider', email: `rider-${Date.now()}@test.com`, password: 'x', role: 'rider',
+      restaurant: 'Mittho Test', restaurantId: world.restaurant._id, branch: world.branchA._id,
+      rider: {active: true, available: true}
+    });
     const delivery = await request('/api/deliveries', {
-      method: 'POST', token: owner(), body: {order: order._id, address: 'Patan'}
+      method: 'POST', token: owner(),
+      body: {order: order._id, address: 'Patan', rider: String(rider._id)}
     });
     assert.equal(delivery.status, 201, delivery.body?.message);
-    const done = await request(`/api/deliveries/${delivery.body._id}/status`, {
-      method: 'PATCH', token: owner(), body: {status: 'delivered'}
-    });
+    let done;
+    for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
+      done = await request(`/api/deliveries/${delivery.body._id}/status`, {
+        method: 'PATCH', token: owner(), body: {status}
+      });
+    }
     assert.equal(done.status, 200, done.body?.message);
     const stored = await Order.findById(order._id);
     assert.equal(stored.status, 'completed');
@@ -131,14 +147,29 @@ describe('AUDIT §1 — completedAt on every completion path', () => {
     const order = await place([{menuItem: String(grill._id), qty: 1}], world.branchA, {
       type: 'delivery', customer: String(guest._id), deliveryAddress: 'Patan'
     });
+    for (const status of ['accepted', 'preparing', 'ready']) {
+      await request(`/api/orders/${order._id}/status`, {
+        method: 'PATCH', token: owner(), body: {status}
+      });
+    }
+    const rider2 = await User.create({
+      name: 'Audit Rider 2', email: `rider2-${Date.now()}@test.com`, password: 'x', role: 'rider',
+      restaurant: 'Mittho Test', restaurantId: world.restaurant._id, branch: world.branchA._id,
+      rider: {active: true, available: true}
+    });
     const delivery = await request('/api/deliveries', {
-      method: 'POST', token: owner(), body: {order: order._id, address: 'Patan'}
+      method: 'POST', token: owner(),
+      body: {order: order._id, address: 'Patan', rider: String(rider2._id)}
     });
-    await request(`/api/deliveries/${delivery.body._id}/status`, {
-      method: 'PATCH', token: owner(), body: {status: 'delivered'}
-    });
+    for (const status of ['picked_up', 'out_for_delivery', 'delivered']) {
+      await request(`/api/deliveries/${delivery.body._id}/status`, {
+        method: 'PATCH', token: owner(), body: {status}
+      });
+    }
     const first = (await Order.findById(order._id)).completedAt;
     await new Promise(r => setTimeout(r, 20));
+    // A repeat 'delivered' is now refused by the state machine, and the
+    // original completion instant must survive regardless.
     await request(`/api/deliveries/${delivery.body._id}/status`, {
       method: 'PATCH', token: owner(), body: {status: 'delivered'}
     });

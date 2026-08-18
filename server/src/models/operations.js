@@ -256,6 +256,8 @@ const customerSchema=new Schema({
   addresses:[{
     label:{type:String,trim:true,maxlength:60},
     address:{type:String,trim:true,maxlength:300},
+    // Standing directions for the rider: gate codes, landmarks, which bell.
+    instructions:{type:String,trim:true,maxlength:300},
     default:{type:Boolean,default:false}
   }],
   // Free-text operational notes: "always calls ahead", "difficult stairs".
@@ -677,5 +679,77 @@ stockTransferSchema.index({restaurant:1,requestKey:1},{unique:true,name:'stock_t
 stockTransferSchema.index({restaurant:1,fromBranch:1,status:1,createdAt:-1},{name:'stock_transfer_from_status'});
 stockTransferSchema.index({restaurant:1,toBranch:1,status:1,createdAt:-1},{name:'stock_transfer_to_status'});
 export const StockTransfer=model('StockTransfer',stockTransferSchema);
-export const Delivery=model('Delivery',new Schema({order:{...oid,ref:'Order'},rider:{...oid,ref:'User'},address:String,phone:String,status:{type:String,enum:['available','assigned','picking_up','out_for_delivery','delivered','cancelled'],default:'assigned'},estimatedMinutes:n},{timestamps:true}));
+/**
+ * Delivery — Phase 10.
+ *
+ * The pre-Phase-10 model had no branch or restaurant of its own: tenancy was
+ * inferred by joining through the order every single time, which made
+ * rider-scoped queries impossible to write safely. Both are now denormalised
+ * onto the delivery itself, so every query filters on the tenant directly.
+ *
+ * Lifecycle (DELIVERY_TRANSITIONS below):
+ *   pending -> assigned -> picked_up -> out_for_delivery -> delivered
+ * with `failed` and `cancelled` reachable from any live state. The legacy
+ * 'available'/'picking_up' values are migrated to 'pending'/'picked_up'.
+ */
+const deliverySchema=new Schema({
+  order:{...oid,ref:'Order',required:true,index:true},
+  // Denormalised tenancy. The order remains the source of truth, but a rider
+  // query must not have to join through it to stay inside a restaurant.
+  branch:{...oid,ref:'Branch',required:true,index:true},
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true},
+  rider:{...oid,ref:'User',default:null,index:true},
+  address:{type:String,trim:true,maxlength:500},
+  phone:{type:String,trim:true,maxlength:30},
+  // Captured from the customer address at dispatch, so a later edit to the
+  // saved address cannot rewrite what the rider was actually told.
+  instructions:{type:String,trim:true,maxlength:300},
+  status:{type:String,enum:['pending','assigned','picked_up','out_for_delivery','delivered','failed','cancelled'],default:'pending',index:true},
+  estimatedMinutes:{type:Number,default:0,min:0,max:600},
+  // Lifecycle stamps, for dashboard ageing and rider performance.
+  assignedAt:{type:Date,default:null},
+  pickedUpAt:{type:Date,default:null},
+  dispatchedAt:{type:Date,default:null},
+  deliveredAt:{type:Date,default:null},
+  failedAt:{type:Date,default:null},
+  cancelledAt:{type:Date,default:null},
+  // When the delivery is expected; drives the "delayed" dashboard bucket.
+  dueAt:{type:Date,default:null},
+  failureReason:{type:String,trim:true,maxlength:300},
+  assignedBy:{...oid,ref:'User',default:null},
+  // Every assignment and reassignment, so a dispute can be reconstructed.
+  assignmentHistory:[{
+    rider:{...oid,ref:'User'},
+    assignedBy:{...oid,ref:'User'},
+    at:{type:Date,default:Date.now},
+    reason:{type:String,trim:true,maxlength:300},
+    action:{type:String,enum:['assigned','reassigned','unassigned'],default:'assigned'}
+  }],
+  proofNote:{type:String,trim:true,maxlength:300}
+},{timestamps:true});
+// One LIVE delivery per order. A second dispatch is a duplicate and the
+// database refuses it rather than trusting every caller to check. Cancelled
+// rows are excluded so a failed attempt can legitimately be re-dispatched,
+// and so the Phase 10 migration can retire historical duplicates instead of
+// deleting them. This must stay identical to deliveryMigration.js.
+deliverySchema.index({order:1},{unique:true,name:'delivery_order_unique',partialFilterExpression:{status:{$in:['pending','assigned','picked_up','out_for_delivery','delivered','failed']}}});
+deliverySchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'delivery_scope_status'});
+deliverySchema.index({rider:1,status:1,createdAt:-1},{name:'delivery_rider_queue'});
+export const Delivery=model('Delivery',deliverySchema);
+
+/**
+ * The delivery state machine.
+ *
+ * Terminal states are dead ends: a delivered order cannot be walked back to
+ * out_for_delivery, which would let a rider un-complete a finished job.
+ */
+export const DELIVERY_TRANSITIONS=Object.freeze({
+  pending:['assigned','cancelled'],
+  assigned:['picked_up','pending','failed','cancelled'],
+  picked_up:['out_for_delivery','failed','cancelled'],
+  out_for_delivery:['delivered','failed'],
+  delivered:[],
+  failed:[],
+  cancelled:[]
+});
 export const Notification=model('Notification',new Schema({branch:{...oid,ref:'Branch'},user:{...oid,ref:'User'},type:String,title:String,body:String,read:{type:Boolean,default:false},referenceId:oid},{timestamps:true}));
