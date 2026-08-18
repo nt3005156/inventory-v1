@@ -9,6 +9,14 @@ import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {publishKitchenOrder, publishInventoryEvent} from '../services/realtime.js';
 import {moveStock} from '../services/inventoryLedger.js';
 import {
+  cancelPaymentIntent,
+  createPaymentIntent,
+  publicIntentView,
+  verifyAndSettle
+} from '../services/onlinePayments.js';
+import {availablePaymentMethods, describePayments} from '../services/paymentConfig.js';
+import {PaymentIntent} from '../models/operations.js';
+import {
   ONLINE_PAYMENT_METHODS,
   ONLINE_ORDER_TYPES,
   getPublicMenu,
@@ -58,6 +66,13 @@ function publicFail(res, e) {
     message = field ? `Invalid ${field}` : 'Some details are missing or invalid';
   } else if (e?.name === 'MongoServerError' || e?.name === 'ValidationError' || e?.name === 'CastError') {
     message = 'We could not process that request';
+  } else if (e?.publicMessage || e?.name === 'GatewayError') {
+    // Deliberate, guest-facing messages ("eSewa is not available right now",
+    // "did not respond in time"). These may carry 502/503/504 but are authored
+    // here, contain nothing internal, and the guest needs to know which of
+    // "we failed" vs "you failed" happened. Everything else at 5xx is still
+    // masked, so an unexpected internal error cannot leak this way.
+    message = String(e.message || 'The payment provider is unavailable');
   } else if (status >= 500) {
     message = 'Something went wrong. Please try again.';
   }
@@ -88,13 +103,20 @@ export const PUBLIC_RATE_LIMITS = Object.freeze({
   browse: {windowMs: 60_000, max: 120},
   quote: {windowMs: 60_000, max: 30},
   order: {windowMs: 15 * 60_000, max: 8},
-  track: {windowMs: 60_000, max: 20}
+  track: {windowMs: 60_000, max: 20},
+  pay: {windowMs: 15 * 60_000, max: 10},
+  verify: {windowMs: 60_000, max: 30}
 });
 
 const browseLimit = limiter('public:browse', PUBLIC_RATE_LIMITS.browse);
 const quoteLimit = limiter('public:quote', PUBLIC_RATE_LIMITS.quote);
 const orderLimit = limiter('public:order', PUBLIC_RATE_LIMITS.order);
 const trackLimit = limiter('public:track', PUBLIC_RATE_LIMITS.track);
+// Starting a payment is a write that reaches an external provider, so it is
+// limited like ordering. Verification is looser: a guest may legitimately
+// refresh the return page, and every duplicate is deduplicated anyway.
+const payLimit = limiter('public:pay', PUBLIC_RATE_LIMITS.pay);
+const verifyLimit = limiter('public:verify', PUBLIC_RATE_LIMITS.verify);
 
 
 const clean = value => String(value ?? '').trim();
@@ -245,6 +267,109 @@ r.get('/public/orders/track', trackLimit, async (req, res) => {
 // ── Staff side of online ordering (authenticated) ────────────────────────────
 
 /** The queue of web orders awaiting a decision. */
+// ── Phase 8B — online payments ───────────────────────────────────────────────
+
+/** Which payment methods a guest may actually choose right now. */
+r.get('/public/payment-methods', browseLimit, (_req, res) => {
+  const described = describePayments();
+  res.json({methods: described.methods, mode: described.mode});
+});
+
+const startPaymentSchema = z.object({
+  orderNo: z.string().min(3).max(40),
+  phone: z.string().min(7).max(20),
+  provider: z.enum(['esewa', 'khalti'])
+}).strict();
+
+/**
+ * Start a gateway payment.
+ *
+ * Ownership is proved by knowing the order number AND the phone recorded on
+ * it — the same non-enumerable pairing used for tracking. The response carries
+ * only what the browser needs to redirect; the amount is the server's.
+ */
+r.post('/public/payments', payLimit, async (req, res) => {
+  try {
+    const body = startPaymentSchema.parse(req.body || {});
+    const {intent, order, redirect, amount, reference, expiresAt} = await createPaymentIntent({
+      orderNo: body.orderNo, phone: body.phone, provider: body.provider
+    });
+    res.status(201).json({
+      reference,
+      provider: intent.provider,
+      amount,
+      orderNo: order.orderNo,
+      expiresAt,
+      redirect
+    });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+/**
+ * The gateway return URL.
+ *
+ * Accepts GET (both providers redirect) and POST. Nothing in the request is
+ * trusted: the reference only locates the intent, and the outcome is
+ * established by calling the provider.
+ */
+async function handlePaymentReturn(req, res) {
+  try {
+    const reference = clean(req.query.ref || req.body?.ref || req.query.purchase_order_id);
+    const cancelled = clean(req.query.cancelled) === '1';
+    const payload = {
+      ...(req.query || {}),
+      ...(req.body && typeof req.body === 'object' ? req.body : {})
+    };
+    delete payload.ref;
+
+    if (!reference) throw Object.assign(new Error('Payment reference is required'), {status: 400});
+
+    if (cancelled) {
+      const {intent} = await cancelPaymentIntent({reference});
+      const order = await Order.findById(intent.order).select('orderNo status');
+      return res.json(publicIntentView(intent, order));
+    }
+
+    const result = await verifyAndSettle({reference, payload, source: 'callback'});
+    return res.json({
+      ...publicIntentView(result.intent, result.order),
+      ...(result.duplicate ? {duplicate: true} : {})
+    });
+  } catch (e) {
+    fail(res, e);
+  }
+}
+
+r.get('/public/payments/return', verifyLimit, handlePaymentReturn);
+r.post('/public/payments/return', verifyLimit, handlePaymentReturn);
+
+/**
+ * Poll a payment. Also re-verifies with the provider when still unresolved, so
+ * a guest whose redirect never arrived is not stranded.
+ */
+r.get('/public/payments/:reference', verifyLimit, async (req, res) => {
+  try {
+    const reference = clean(req.params.reference);
+    const intent = await PaymentIntent.findOne({reference});
+    if (!intent) throw Object.assign(new Error('Unknown payment reference'), {status: 404});
+
+    if (!intent.settledAt && ['initiated', 'pending'].includes(intent.status)) {
+      try {
+        const result = await verifyAndSettle({reference, payload: {poll: true}, source: 'status_check'});
+        return res.json(publicIntentView(result.intent, result.order));
+      } catch {
+        // A provider outage must not break the status page; report what we know.
+      }
+    }
+    const order = await Order.findById(intent.order).select('orderNo status');
+    res.json(publicIntentView(intent, order));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
 r.get('/online-orders', auth(['owner', 'manager', 'staff']), async (req, res) => {
   try {
     const branchId = req.query.branch;
@@ -256,6 +381,13 @@ r.get('/online-orders', auth(['owner', 'manager', 'staff']), async (req, res) =>
       .sort({createdAt: -1}).limit(100)
       .populate('customer', 'name phone')
       .lean();
+    // Staff need to see at a glance whether a prepaid order actually paid,
+    // because an unpaid one cannot be accepted.
+    for (const o of orders) {
+      const prepaid = ['esewa', 'khalti'].includes(String(o.paymentMethod || '').toLowerCase());
+      o.prepaid = prepaid;
+      o.paymentConfirmed = prepaid ? Boolean(o.paymentSettledAt) : null;
+    }
     res.json({
       branch: String(branchId),
       pending: orders.filter(o => o.status === 'pending').length,
@@ -281,6 +413,18 @@ r.post('/online-orders/:id/accept', auth(['owner', 'manager', 'staff']), async (
       await assertTenantBranchAccess(req.user, order.branch, {session});
       if (order.status !== 'pending') {
         throw Object.assign(new Error(`This order is already ${order.status}`), {status: 409});
+      }
+      // Phase 8B: a prepaid method means prepaid. Accepting commits stock and
+      // kitchen time, so an esewa/khalti order that the gateway has not
+      // actually settled must not be accepted — otherwise the branch cooks
+      // food for money that was never received. COD is unaffected: it is
+      // collected on delivery by design.
+      if (['esewa', 'khalti'].includes(String(order.paymentMethod || '').toLowerCase())
+        && !order.paymentSettledAt) {
+        throw Object.assign(
+          new Error('This order is not paid yet and cannot be accepted'),
+          {status: 409}
+        );
       }
       // Acceptance is the commitment point: this is where the branch takes
       // responsibility, so this is where stock actually moves. Inside the

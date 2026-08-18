@@ -6,6 +6,7 @@ import {priceOrder} from './pos.js';
 import {applyModifierPricing, resolveModifiers, toOrderModifiers, normalizeInstructions} from './modifiers.js';
 import {listStations, routeItemToStation} from './stations.js';
 import {recordRedemption, resolveOrderDiscount, validateCoupon} from './discounts.js';
+import {availablePaymentMethods} from './paymentConfig.js';
 
 // Phase 8A — public online ordering.
 //
@@ -22,6 +23,14 @@ export const MAX_PUBLIC_QTY = 20;
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), {status});
+}
+
+/**
+ * An error whose message is written for the guest and is safe to show even at
+ * a 5xx status. Opt-in, so an unexpected internal 500 is still masked.
+ */
+function publicError(message, status = 400) {
+  return Object.assign(new Error(message), {status, publicMessage: true});
 }
 
 const clean = value => String(value ?? '').trim();
@@ -316,6 +325,12 @@ export async function placePublicOrder({input, requestKey, session}) {
   const method = clean(input.paymentMethod).toLowerCase() || 'cod';
   if (!ONLINE_PAYMENT_METHODS.includes(method)) {
     throw httpError(`Payment must be one of ${ONLINE_PAYMENT_METHODS.join(', ')}`, 400);
+  }
+  // A gateway the deployment has no credentials for must not be selectable:
+  // otherwise the guest reaches a dead redirect and the order sits unpayable.
+  const offered = availablePaymentMethods();
+  if (!offered.includes(method)) {
+    throw publicError(`${method === 'esewa' ? 'eSewa' : 'Khalti'} is not available right now`, 503);
   }
 
   // Reuse an existing customer by phone so a returning guest builds history,

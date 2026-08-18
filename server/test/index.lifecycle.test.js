@@ -266,7 +266,16 @@ describe('production API process lifecycle', () => {
         cors: 'allowlist',
         trustProxy: 'loopback',
         rateLimit: 'per-instance-memory',
-        clientIp: '127.0.0.1'
+        clientIp: '127.0.0.1',
+        // Phase 8B: payment posture is reported too, so an operator can see
+        // which gateways a running container actually has credentials for.
+        // No secret appears here - only whether one is present.
+        payments: {
+          mode: 'production',
+          esewa: {configured: false, productCode: null},
+          khalti: {configured: false},
+          methods: ['cod']
+        }
       });
 
       // TRUST_PROXY is unset here, so the default 'loopback' applies: a proxy

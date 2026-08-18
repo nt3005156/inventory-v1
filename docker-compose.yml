@@ -45,6 +45,14 @@ services:
       # and reads the client address nginx appended to X-Forwarded-For.
       # Add a hop only if you actually add a proxy in front of nginx.
       TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Payment gateways. Secrets come from .env (git-ignored) and are never
+      # baked into an image. PAYMENT_MODE guards against taking real money
+      # with sandbox credentials, or vice versa.
+      PAYMENT_MODE: ${PAYMENT_MODE:-sandbox}
+      PAYMENT_RETURN_BASE_URL: ${PAYMENT_RETURN_BASE_URL:-}
+      ESEWA_MERCHANT_CODE: ${ESEWA_MERCHANT_CODE:-}
+      ESEWA_SECRET_KEY: ${ESEWA_SECRET_KEY:-}
+      KHALTI_SECRET_KEY: ${KHALTI_SECRET_KEY:-}
     depends_on:
       mongo-init:
         condition: service_completed_successfully

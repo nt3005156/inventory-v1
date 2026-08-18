@@ -599,8 +599,12 @@ Open `http://localhost:5173`. Vite proxies `/api` and `/socket.io` to the API on
 | `APP_ENV` | Deployment class: `development`, `test`, `staging`, `production`. Overrides `NODE_ENV` for security decisions. Unrecognised values are rejected at startup. |
 | `TRUST_PROXY` | How many reverse proxies sit in front of the API. `1` for the bundled Nginx. Defaults to `loopback`. `true`/`*` are rejected. |
 | `PORT` | API listen port, 1–65535. Compose fixes the internal API port at 4000. |
-| `ESEWA_MERCHANT_CODE` | Optional integration setting; no credential is hard-coded. |
-| `KHALTI_SECRET_KEY` | Optional integration setting; no credential is hard-coded. |
+| `PAYMENT_MODE` | `sandbox` or `production`. Defaults to sandbox outside production. |
+| `PAYMENT_RETURN_BASE_URL` | Absolute URL gateways redirect back to. Defaults to the first `CLIENT_URL` origin. |
+| `PAYMENT_HTTP_TIMEOUT_MS` | Gateway HTTP deadline, default 15000. |
+| `ESEWA_MERCHANT_CODE` | eSewa product code. Falls back to the vendor sandbox code (`EPAYTEST`) in sandbox only. |
+| `ESEWA_SECRET_KEY` | eSewa HMAC secret. Falls back to eSewa's published sandbox secret in sandbox only; refused in production. |
+| `KHALTI_SECRET_KEY` | Khalti secret key. Khalti is not offered to guests until this is set. |
 
 For the default Docker endpoint, keep `http://localhost:8080` in `CLIENT_URL`. For public deployment, replace local values with the exact TLS origin, such as `https://ops.example.com`.
 
@@ -630,6 +634,75 @@ that proxy trust and CORS are configured as intended, without reading env vars
 off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
+
+## Online payments (Phase 8B)
+
+eSewa ePay v2 and Khalti ePayment v2 are fully integrated: initiation,
+redirect, signed callback, server-side verification, settlement and audit.
+
+### Flow
+
+```
+Public order (pending, unpaid)
+      ↓  POST /api/public/payments   {orderNo, phone, provider}
+PaymentIntent (initiated → pending)     expectedAmount captured here
+      ↓  eSewa: signed form POST      Khalti: server-to-server initiate → payment_url
+Provider-hosted payment page
+      ↓  redirect to /api/public/payments/return?ref=…
+Server-side verification                ← the browser is NOT believed
+      ↓  eSewa: HMAC verify + status enquiry   Khalti: lookup API
+Amount checked against expectedAmount
+      ↓  transaction
+Payment (paid) · Order.paidAmount · PaymentIntent.settledAt · Audit
+      ↓  staff accept
+Kitchen ticket + inventory deduction
+```
+
+### The security rule
+
+**A payment is real only when the provider confirms it, server-to-server, for
+an amount recorded before the guest left.** Concretely:
+
+| Attack | Defence |
+|---|---|
+| Browser claims `status=Completed` | Redirect status is ignored; eSewa is re-confirmed by status enquiry, Khalti by the lookup API |
+| Forged callback signature | HMAC-SHA256 verified with a constant-time compare |
+| Signed blob edited after signing | Signature covers the edited fields, so verification fails |
+| Signature covering a harmless subset | `signed_field_names` must include `transaction_uuid`, `total_amount` and `status` |
+| Underpayment / amount tampering | Provider amount compared to `expectedAmount`; a mismatch is refused **and** audited for a human |
+| Callback replayed | `PaymentEvent.dedupeKey` unique index — the database refuses the second write |
+| Two callbacks racing | Settlement atomically claims the intent with a conditional `findOneAndUpdate` on `settledAt: null` |
+| Paying someone else's order | Ownership requires order number **and** the phone on the order |
+| Callback naming another transaction | `transaction_uuid` / `purchase_order_id` must equal our own reference |
+| Accepting unpaid prepaid food | Staff `accept` refuses an `esewa`/`khalti` order without `paymentSettledAt` |
+
+The reference handed to a gateway is a random UUID, not the order id, so a live
+reference cannot be guessed.
+
+### Statuses
+
+Provider vocabularies are normalised to `paid | pending | failed | cancelled |
+expired | refunded`. **Anything unrecognised normalises to `failed`** — an
+unknown status is never treated as money.
+
+### Secrets
+
+Credentials live only in the environment; `.env` is git-ignored and nothing is
+baked into an image. `/health` reports whether a gateway is *configured*, never
+its key, and `redactPaymentPayload()` strips signature/key/token fields before
+any provider payload is persisted to `PaymentEvent` or logged.
+
+In **sandbox**, eSewa falls back to the vendor's published test credentials, so
+eSewa works locally with no setup. Production **refuses to start** with those
+credentials, or with `PAYMENT_MODE=sandbox`. Khalti publishes no shared test
+key, so Khalti is hidden from the storefront until `KHALTI_SECRET_KEY` is set —
+a gateway with no credentials is never offered, because a dead redirect is
+worse than an honest refusal.
+
+### Cash on delivery
+
+Unchanged and deliberately exempt: COD orders settle on delivery, so they may
+still be accepted unpaid.
 
 ## Deployment hardening (Phase 8A.6)
 

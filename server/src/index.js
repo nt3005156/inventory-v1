@@ -1,7 +1,7 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import cors from 'cors';import bcrypt from 'bcryptjs';import jwt from 'jsonwebtoken';
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth} from './middleware/auth.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {AUTH_RATE_LIMIT,createRateLimiter,rateLimitScope} from './services/rateLimiting.js';
+import recipesRouter from './routes/recipes.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {AUTH_RATE_LIMIT,createRateLimiter,rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -29,7 +29,7 @@ app.all('/api/sales',auth(),(_req,res)=>res.status(410).json({message:'Legacy sa
 app.all('/api/waste',auth(),(_req,res)=>res.status(410).json({message:'Legacy waste records are retired. Use the waste inventory operation so stock is posted atomically to the inventory ledger.'}));
 app.get('/api/audit',auth(['owner']),async(req,res)=>res.json(await Audit.find().sort({at:-1}).limit(300).populate('user')));
 let startupReady=false;
-app.get('/health',(req,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting',environment:deployment.environment,cors:deployment.cors,trustProxy:String(deployment.trustProxy),rateLimit:rateLimitScope(),clientIp:req.ip})});
+app.get('/health',(req,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting',environment:deployment.environment,cors:deployment.cors,trustProxy:String(deployment.trustProxy),rateLimit:rateLimitScope(),clientIp:req.ip,payments:describePayments()})});
 app.use((e,req,res,next)=>{console.error(e);res.status(e.status||500).json({message:e.message||'Server error'})});
 
 const httpServer=http.createServer(app);attachRealtime(httpServer,{corsOrigin});

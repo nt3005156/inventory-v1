@@ -496,6 +496,12 @@ describe('8A.5 §11 — payment state is never faked', () => {
   });
 
   it('records a wallet intent as pending with no transaction id', async () => {
+    // Phase 8B refuses a gateway the deployment has no credentials for, so
+    // both must be configured for this Phase 8A behaviour to be reachable.
+    // (The refusal itself is covered in phase8b.online.payments.test.js.)
+    const savedKhalti = process.env.KHALTI_SECRET_KEY;
+    process.env.KHALTI_SECRET_KEY = 'test_secret_key_for_suite';
+    try {
     for (const method of ['esewa', 'khalti']) {
       const res = await place(cart({
         paymentMethod: method, customer: {name: 'Wallet Guest', phone: `98999999${method.length}`}
@@ -507,6 +513,10 @@ describe('8A.5 §11 — payment state is never faked', () => {
       assert.equal(payment.method, method);
       assert.ok(!payment.transactionId, 'no fabricated transaction id');
       assert.equal(order.paidAmount, 0, 'no money is claimed');
+    }
+    } finally {
+      if (savedKhalti === undefined) delete process.env.KHALTI_SECRET_KEY;
+      else process.env.KHALTI_SECRET_KEY = savedKhalti;
     }
   });
 

@@ -269,7 +269,7 @@ const reservationCounterSchema=new Schema({
 reservationCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'reservation_counter_scope'});
 export const ReservationCounter=model('ReservationCounter',reservationCounterSchema);
 
-export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
+export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},paymentSettledAt:Date,paymentReference:{type:String,trim:true,maxlength:80,index:true},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
 Order.schema.index({inventorySourceOrders:1},{name:'order_inventory_source_orders'});
 // Phase 5D — serves the kitchen board and performance report, which always
 // filter by branch + status and window/sort by createdAt. Without the trailing
@@ -459,6 +459,89 @@ supplierPaymentSchema.index({restaurant:1,supplier:1,status:1,paidAt:-1},{name:'
 supplierPaymentSchema.index({restaurant:1,supplier:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_scope_date'});
 supplierPaymentSchema.index({restaurant:1,supplier:1,branch:1,paidAt:1,createdAt:1,_id:1},{name:'supplier_payment_statement_branch_date'});
 export const SupplierPayment=model('SupplierPayment',supplierPaymentSchema);
+
+/**
+ * PaymentIntent — Phase 8B.
+ *
+ * The server-side record of a gateway payment attempt. It exists so that
+ * nothing about a payment depends on what the browser sends back.
+ *
+ * `reference` is our own opaque identifier, generated before the guest leaves
+ * for the gateway: it is the eSewa transaction_uuid and the Khalti
+ * purchase_order_id. It is what lets a callback be tied to an order without
+ * the callback naming the order at all.
+ *
+ * `expectedAmount` is captured at initiation from the order total, so an
+ * amount echoed back by a gateway can be checked against what we actually
+ * asked for rather than against a value that may since have changed.
+ */
+const paymentIntentSchema=new Schema({
+  order:{...oid,ref:'Order',required:true,index:true},
+  branch:{...oid,ref:'Branch',required:true,index:true},
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true},
+  provider:{type:String,enum:['esewa','khalti'],required:true,index:true},
+  // Our reference, handed to the gateway. Globally unique: it is the join key
+  // a callback arrives with.
+  reference:{type:String,required:true,trim:true,maxlength:80},
+  // Provider-side identifier (Khalti pidx). Unknown until initiation returns.
+  providerReference:{type:String,trim:true,maxlength:120,default:null},
+  // The provider's own transaction id once settled, for reconciliation.
+  transactionId:{type:String,trim:true,maxlength:120,default:null},
+  expectedAmount:{type:Number,required:true,min:0},
+  paidAmount:{type:Number,default:0,min:0},
+  currency:{type:String,default:'NPR'},
+  status:{type:String,enum:['initiated','pending','paid','failed','cancelled','expired','refunded'],default:'initiated',index:true},
+  mode:{type:String,enum:['sandbox','production'],required:true},
+  // Set once, when the intent first reaches a terminal paid state. Guards the
+  // "already paid" and duplicate-callback cases.
+  settledAt:{type:Date,default:null},
+  expiresAt:{type:Date,default:null},
+  attempts:{type:Number,default:0,min:0},
+  lastCheckedAt:{type:Date,default:null},
+  failureReason:{type:String,trim:true,maxlength:300,default:null},
+  // Redacted provider response, retained for support/reconciliation. Never
+  // contains a secret or a signature (see redactPaymentPayload).
+  lastResponse:{type:Schema.Types.Mixed,default:null},
+  payment:{...oid,ref:'Payment',default:null}
+},{timestamps:true});
+// The join key must be unique or two orders could claim one callback.
+paymentIntentSchema.index({reference:1},{unique:true,name:'payment_intent_reference'});
+// A provider reference is unique per provider once known; the partial filter
+// keeps nulls out of the constraint before initiation returns.
+paymentIntentSchema.index({provider:1,providerReference:1},{unique:true,name:'payment_intent_provider_reference',partialFilterExpression:{providerReference:{$type:'string'}}});
+// At most one SETTLED intent per order. The unique key is {order} alone; the
+// partial filter restricts the constraint to documents that have actually
+// settled. Indexing {order, settledAt} together would be useless here, because
+// two racing callbacks stamp different timestamps and would both be admitted.
+paymentIntentSchema.index({order:1},{unique:true,name:'payment_intent_order_settled',partialFilterExpression:{settledAt:{$type:'date'}}});
+paymentIntentSchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'payment_intent_scope_status'});
+export const PaymentIntent=model('PaymentIntent',paymentIntentSchema);
+
+/**
+ * PaymentEvent — the audit trail for everything a gateway tells us.
+ *
+ * Every callback, lookup and status check is appended here, including the ones
+ * we reject. `dedupeKey` is what makes duplicate callback protection provable:
+ * a unique index means the second identical callback cannot create a second
+ * event, so it cannot be processed twice.
+ */
+const paymentEventSchema=new Schema({
+  intent:{...oid,ref:'PaymentIntent',required:true,index:true},
+  order:{...oid,ref:'Order',required:true,index:true},
+  provider:{type:String,enum:['esewa','khalti'],required:true},
+  kind:{type:String,enum:['initiated','callback','lookup','status_check','settled','failed','cancelled','expired','rejected'],required:true},
+  outcome:{type:String,enum:['paid','pending','failed','cancelled','expired','refunded','rejected'],required:true},
+  dedupeKey:{type:String,required:true,trim:true,maxlength:200},
+  amount:{type:Number,default:0},
+  message:{type:String,trim:true,maxlength:300},
+  // Redacted. Signatures and keys are stripped before this is written.
+  detail:{type:Schema.Types.Mixed,default:null},
+  at:{type:Date,default:Date.now,index:true}
+},{timestamps:true});
+paymentEventSchema.index({dedupeKey:1},{unique:true,name:'payment_event_dedupe'});
+paymentEventSchema.index({order:1,at:-1},{name:'payment_event_order_timeline'});
+export const PaymentEvent=model('PaymentEvent',paymentEventSchema);
+
 const supplierPaymentCounterSchema=new Schema({
   restaurant:{...oid,ref:'Restaurant',required:true,immutable:true},
   branch:{...oid,ref:'Branch',required:true,immutable:true},

@@ -14,7 +14,7 @@ async function publicCall(path, options = {}) {
   return body;
 }
 
-const STEPS = ['menu', 'cart', 'details', 'payment', 'done'];
+const STEPS = ['menu', 'cart', 'details', 'payment', 'paying', 'done'];
 
 export default function Storefront() {
   const [branches, setBranches] = useState([]);
@@ -32,9 +32,39 @@ export default function Storefront() {
   const [busy, setBusy] = useState(false);
   const [track, setTrack] = useState({orderNo: '', phone: '', result: null});
   const [coupon, setCoupon] = useState('');
+  // Only methods the deployment actually has credentials for are offered; a
+  // gateway with no keys would send the guest to a dead redirect.
+  const [methods, setMethods] = useState(['cod']);
+  // Set once a gateway payment is in flight or has resolved.
+  const [payment, setPayment] = useState(null);
   // Stable for the life of this cart, so a double-click or a retry after a
   // timeout is deduplicated by the server rather than buying twice.
   const [checkoutKey, setCheckoutKey] = useState(() => `sf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    publicCall('/public/payment-methods')
+      .then(data => setMethods(data.methods || ['cod']))
+      .catch(() => setMethods(['cod']));
+  }, []);
+
+  // The gateway redirects the browser back to /order/payment/return?ref=...
+  // Resolve it against the server, which re-confirms with the provider. The
+  // query string is never treated as proof of payment.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get('ref');
+    if (!ref) return;
+    const cancelled = params.get('cancelled') === '1';
+    setStep('paying');
+    setPayment({reference: ref, status: cancelled ? 'cancelling' : 'verifying'});
+    const query = new URLSearchParams(window.location.search).toString();
+    publicCall(`/public/payments/return?${query}`)
+      .then(result => setPayment(result))
+      .catch(e => {
+        setPayment({reference: ref, status: 'unknown'});
+        setError(e.message);
+      });
+  }, []);
 
   useEffect(() => {
     publicCall('/public/branches')
@@ -121,11 +151,48 @@ export default function Storefront() {
       // A fresh key for the next order, so the next checkout is not deduped
       // against this one.
       setCheckoutKey(`sf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      setStep('done');
+      if (paymentMethod === 'cod') {
+        setStep('done');
+      } else {
+        // Hand off to the gateway. The server signs/initiates; this only
+        // performs the redirect it is told to perform.
+        await startGatewayPayment(result.orderNo);
+      }
     } catch (e) {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Ask the server to start a gateway payment, then redirect.
+   *
+   * eSewa needs a browser form POST with server-generated signed fields, so a
+   * form is built and submitted. Khalti returns a URL to navigate to. In
+   * neither case does this code compute an amount or a signature.
+   */
+  const startGatewayPayment = async orderNo => {
+    const started = await publicCall('/public/payments', {
+      method: 'POST',
+      body: JSON.stringify({orderNo, phone: guest.phone.trim(), provider: paymentMethod})
+    });
+    const {redirect} = started;
+    if (redirect.method === 'POST') {
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = redirect.action;
+      for (const [name, value] of Object.entries(redirect.fields || {})) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = name;
+        input.value = String(value);
+        form.appendChild(input);
+      }
+      document.body.appendChild(form);
+      form.submit();
+    } else {
+      window.location.assign(redirect.action);
     }
   };
 
@@ -254,18 +321,22 @@ export default function Storefront() {
             <input type="radio" checked={paymentMethod === 'cod'} onChange={() => setPaymentMethod('cod')}/>
             Cash on {type === 'delivery' ? 'delivery' : 'pick-up'}
           </label>
-          <label className="sf-radio">
-            <input type="radio" checked={paymentMethod === 'esewa'} onChange={() => setPaymentMethod('esewa')}/>
-            eSewa
-          </label>
-          <label className="sf-radio">
-            <input type="radio" checked={paymentMethod === 'khalti'} onChange={() => setPaymentMethod('khalti')}/>
-            Khalti
-          </label>
+          {methods.includes('esewa') && (
+            <label className="sf-radio">
+              <input type="radio" checked={paymentMethod === 'esewa'} onChange={() => setPaymentMethod('esewa')}/>
+              eSewa
+            </label>
+          )}
+          {methods.includes('khalti') && (
+            <label className="sf-radio">
+              <input type="radio" checked={paymentMethod === 'khalti'} onChange={() => setPaymentMethod('khalti')}/>
+              Khalti
+            </label>
+          )}
           {paymentMethod !== 'cod' && (
             <p className="sf-note">
-              Your order will be placed and held for payment. Our team will contact you with payment
-              instructions — no money is taken now.
+              You will be taken to {paymentMethod === 'esewa' ? 'eSewa' : 'Khalti'} to pay securely.
+              Your order reaches the kitchen once the payment is confirmed.
             </p>
           )}
           {quote && <div className="sf-totals"><div className="sf-grand"><span>Total</span><b>{rs(quote.total)}</b></div></div>}
@@ -278,6 +349,40 @@ export default function Storefront() {
         </section>
       )}
 
+      {step === 'paying' && payment && (
+        <section className="sf-panel sf-done">
+          <h2>
+            {payment.paid ? 'Payment received'
+              : payment.status === 'verifying' ? 'Confirming your payment…'
+              : payment.status === 'cancelled' ? 'Payment cancelled'
+              : payment.status === 'expired' ? 'Payment expired'
+              : payment.status === 'failed' ? 'Payment failed'
+              : 'Payment status'}
+          </h2>
+          {payment.paid ? (
+            <>
+              <p>Your order <b>{payment.orderNo}</b> is paid and has gone to the kitchen.</p>
+              <div className="sf-totals">
+                <div className="sf-grand"><span>Paid</span><b>{rs(payment.amount)}</b></div>
+              </div>
+            </>
+          ) : (
+            <p className="sf-note">
+              {payment.status === 'verifying'
+                ? 'Checking with the payment provider — this only takes a moment.'
+                : 'No money has been taken. You can try paying again from the tracking section below.'}
+            </p>
+          )}
+          <p>Reference: <b>{payment.reference}</b></p>
+          <button className="sf-primary" onClick={() => {
+            window.history.replaceState({}, '', '/order');
+            setStep('menu');
+            setPayment(null);
+            setError('');
+          }}>Back to menu</button>
+        </section>
+      )}
+
       {step === 'done' && placed && (
         <section className="sf-panel sf-done">
           <h2>Thank you</h2>
@@ -285,7 +390,7 @@ export default function Storefront() {
           <p className="sf-note">
             {placed.paymentStatus === 'due_on_delivery'
               ? 'Please have the exact amount ready.'
-              : 'We will contact you with payment instructions.'}
+              : 'Your payment is being confirmed.'}
           </p>
           <div className="sf-totals"><div className="sf-grand"><span>Total</span><b>{rs(placed.total)}</b></div></div>
           <p>Keep your order number to track it below.</p>

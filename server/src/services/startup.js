@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import {resolveCorsPolicy, resolveTrustProxy} from './deployment.js';
+import {paymentMode, requireProductionPaymentConfig} from './paymentConfig.js';
 import {ensureMonthCloseIndexes} from './monthCloseMigration.js';
 import {ensureSupplierCatalogIndexes} from './supplierCatalogMigration.js';
 import {ensurePurchaseOrderIndexes} from './purchaseOrderMigration.js';
@@ -72,6 +73,10 @@ export function validateRuntimeEnvironment(env = process.env) {
   // A bad TRUST_PROXY (true/*) silently breaks client-IP detection and rate
   // limiting, so it is a startup failure rather than a runtime surprise.
   resolveTrustProxy(env);
+  // Payment mode must be explicit and must never be the vendor's public
+  // sandbox secret in production - anyone can forge a callback with it.
+  paymentMode(env);
+  requireProductionPaymentConfig(env);
 }
 
 export async function verifyTransactionCapableDatabase(connection = mongoose.connection) {
