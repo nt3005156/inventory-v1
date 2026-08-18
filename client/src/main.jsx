@@ -15,6 +15,7 @@ import POS from './Pos.jsx';
 import Expenses from './Expenses.jsx';
 import MonthClose from './MonthClose.jsx';
 import Reservations from './Reservations.jsx';
+import Storefront from './Storefront.jsx';
 import './style.css';
 
 const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
@@ -62,6 +63,11 @@ function App() {
     localStorage.clear();
     setToken(null);
   };
+
+  // Phase 8A: the storefront is public and must render before the login gate.
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/order')) {
+    return <Storefront/>;
+  }
 
   if (!token) {
     return <Login onLogin={x => {

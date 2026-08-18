@@ -151,6 +151,44 @@ oldest first, so nothing is starved behind a newer urgent ticket.
 Each stage entry is timestamped (`acceptedAt`, `preparingAt`, `readyAt`, `completedAt`), written
 once on first entry, so time-in-stage is measurable rather than estimated.
 
+## Online ordering (Phase 8A)
+
+A public storefront at `/order` lets a guest order without an account:
+
+```
+Menu → Cart → Customer → Address → Payment → Order
+```
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/public/branches` | none | Branches accepting online orders |
+| `GET /api/public/menu?branch=` | none | Public menu with modifier choices |
+| `POST /api/public/quote` | none | Server-priced cart total |
+| `POST /api/public/orders` | none | Places the order |
+| `GET /api/public/orders/track` | none | Status by order number **and** phone |
+| `GET /api/online-orders?branch=` | staff | The branch's web-order queue |
+| `POST /api/online-orders/:id/accept` | staff | Confirms the ticket |
+| `POST /api/online-orders/:id/reject` | manager | Cancels with a reason |
+
+**The browser supplies intent, never authority.** A guest sends menu item ids, quantities and
+modifier choices; every price, tax and total is derived server-side from stored records, so a
+tampered cart cannot buy a Rs. 400 dish for Rs. 1. Request schemas are strict, so an injected
+`unitPrice` or `total` is rejected outright.
+
+The public menu exposes only what a guest needs to choose a dish — **cost, margin, recipe,
+supplier and station data never leave the building**. Order tracking requires the order number
+*and* the matching phone, and a mismatch returns the same 404 as an unknown order, so orders are
+not enumerable. Public endpoints carry their own rate limits (ordering is capped hardest at 8 per
+15 minutes), and a guest cannot reach the authenticated order API.
+
+**A web order does not move stock.** It is created `pending` with `source: 'online'`; the branch
+accepts or rejects it, and only acceptance commits the ticket — deducting inventory for an order
+that may be refused would corrupt the ledger.
+
+**Payment is honest about what happened.** Cash on delivery settles on handover. Choosing eSewa or
+Khalti records the *intent* as a `pending` Payment row and reports `awaiting_payment`; no gateway
+is called and no money is claimed. Live gateway integration is a separate task.
+
 ## Table billing (Phase 6D)
 
 | Capability | Endpoint |

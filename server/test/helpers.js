@@ -13,6 +13,7 @@ import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../s
 import {Ingredient, MenuItem} from '../src/models/index.js';
 import {moveStock} from '../src/services/inventoryLedger.js';
 
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'kds-core-test-secret';
 
 let replset;
