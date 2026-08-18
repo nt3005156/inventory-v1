@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import {Audit} from '../models/index.js';
-import {Customer, Reservation, ReservationCounter, RestaurantTable} from '../models/operations.js';
+import {Branch, Customer, Reservation, ReservationCounter, RestaurantTable} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {findOpenTableOrder, occupyTable} from './tables.js';
 
@@ -151,8 +151,13 @@ export async function createReservation({input, user, session}) {
     if (!mongoose.isValidObjectId(input.customer)) throw httpError('Invalid customer', 400);
     const customer = await Customer.findById(input.customer).session(session || null);
     if (!customer) throw httpError('Customer not found', 404);
-    if (customer.branch && String(customer.branch) !== String(branchId)) {
-      throw httpError('Customer belongs to another branch', 409);
+    // Phase 9: customers are restaurant-wide, so a guest first seen at one
+    // branch may legitimately book at another. The tenant boundary is the
+    // restaurant, which is checked here instead of the home branch.
+    const bookingBranch = await Branch.findById(branchId).select('restaurant').session(session || null);
+    if (customer.restaurant && bookingBranch
+      && String(customer.restaurant) !== String(bookingBranch.restaurant)) {
+      throw httpError('Customer belongs to another restaurant', 409);
     }
     customerId = customer._id;
     name = name || clean(customer.name);

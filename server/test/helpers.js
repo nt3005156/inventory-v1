@@ -7,6 +7,7 @@ import operations from '../src/routes/operations.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
+import customersRouter from '../src/routes/customers.js';
 import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
@@ -41,6 +42,7 @@ export async function startTestApp() {
   if (!server) {
     const app = express();
     app.use(express.json());
+    app.use('/api', customersRouter);
     app.use('/api', operations);
     app.use('/api', supplierCatalog);
     app.use('/api', ingredientsRouter);

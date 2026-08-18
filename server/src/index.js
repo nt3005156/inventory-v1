@@ -1,7 +1,7 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import cors from 'cors';import bcrypt from 'bcryptjs';import jwt from 'jsonwebtoken';
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth} from './middleware/auth.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {AUTH_RATE_LIMIT,createRateLimiter,rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {AUTH_RATE_LIMIT,createRateLimiter,rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -12,7 +12,7 @@ const app=express();
 // make a client's own X-Forwarded-For authoritative and let it forge its
 // rate-limit identity.
 app.set('trust proxy',resolveTrustProxy());
-app.use(cors({origin:corsOrigin,credentials:corsOptions.credentials}));app.use(express.json());app.use('/api',operations);app.use('/api',supplierCatalog);
+app.use(cors({origin:corsOrigin,credentials:corsOptions.credentials}));app.use(express.json());app.use('/api',customersRouter);app.use('/api',operations);app.use('/api',supplierCatalog);
 // Credential stuffing control on the only unauthenticated staff endpoint.
 const authLimit=createRateLimiter({name:'auth:login',...AUTH_RATE_LIMIT,enabled:()=>process.env.NODE_ENV!=='test'});
 const sign=u=>jwt.sign({id:u._id,name:u.name,role:u.role,restaurantId:u.restaurantId||null,branch:u.branch||null},process.env.JWT_SECRET,{expiresIn:'12h'});

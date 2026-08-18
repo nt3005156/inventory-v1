@@ -14,6 +14,7 @@ import {ensureStockCountIndexes} from './stockCountMigration.js';
 import {ensureStockTransferIndexes} from './stockTransferMigration.js';
 import {ensureIngredientIndexes} from './ingredients.js';
 import {ensureRecipeIndexes} from './recipes.js';
+import {ensureCustomerIndexes} from './customerMigration.js';
 
 const OPERATIONAL_MIGRATIONS = [
   ensureMonthCloseIndexes,
@@ -28,7 +29,10 @@ const OPERATIONAL_MIGRATIONS = [
   ensureSupplierInvoiceIndexes,
   ensureSupplierPaymentIndexes,
   ensureIngredientIndexes,
-  ensureRecipeIndexes
+  ensureRecipeIndexes,
+  // Phase 9: backfills restaurant + phoneKey and merges pre-Phase-9
+  // per-branch duplicates before the unique index is built.
+  ensureCustomerIndexes
 ];
 
 const INSECURE_PRODUCTION_SECRETS = new Set([

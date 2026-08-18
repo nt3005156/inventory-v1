@@ -6,6 +6,7 @@ import {Order, Payment} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder, quoteEqualSplit, buildTableBill} from '../services/billing.js';
 import {refundOrder, summarisePayments} from '../services/refunds.js';
+import {refreshCustomerStatsSafe} from '../services/customers.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
@@ -70,6 +71,9 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
     if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'payment', tableIds: [String(result.order.table)]});
+    // Phase 9: CRM rollups refresh after the money is committed, never inside
+    // the transaction — a reporting figure must not be able to fail a sale.
+    await refreshCustomerStatsSafe(result.order?.customer);
     res.status(201).json(result);
   } catch (e) {
     fail(res, e);
@@ -97,6 +101,9 @@ r.post('/orders/:id/refunds', auth(['owner', 'manager']), async (req, res) => {
     if (result.order?.table) {
       publishTableEvent(result.order.branch, {reason: 'refund', tableIds: [String(result.order.table)]});
     }
+    // A refund changes lifetime spend, so the profile must not keep showing
+    // revenue the restaurant gave back.
+    await refreshCustomerStatsSafe(result.order?.customer);
     res.status(201).json(result);
   } catch (e) {
     fail(res, e);

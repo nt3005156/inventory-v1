@@ -223,7 +223,116 @@ stockCountSchema.index({restaurant:1,branch:1,status:1,createdAt:-1},{name:'stoc
 export const StockCount=model('StockCount',stockCountSchema);
 
 export const RestaurantTable=model('RestaurantTable',new Schema({branch:{...oid,ref:'Branch',index:true},name:String,area:String,seats:n,status:{type:String,enum:['available','occupied','reserved','cleaning','disabled'],default:'available'},active:{type:Boolean,default:true}},{timestamps:true}));
-export const Customer=model('Customer',new Schema({branch:{...oid,ref:'Branch'},name:String,phone:{type:String,index:true},email:String,addresses:[{label:String,address:String,default:Boolean}],loyaltyPoints:n,totalSpend:n,lastOrderAt:Date},{timestamps:true}));
+/**
+ * Customer — Phase 9 CRM.
+ *
+ * SCOPE DECISION: customers are RESTAURANT-WIDE, not branch-specific.
+ *
+ * A chain's guest is a guest of the restaurant: someone who orders from
+ * Kalanki on Monday and Patan on Friday is one person, and their loyalty
+ * balance, lifetime spend and history must aggregate. Keeping them
+ * branch-scoped (the pre-Phase-9 behaviour) silently created a duplicate
+ * profile per branch and split the very numbers a CRM exists to report.
+ *
+ * `branch` is retained as the HOME branch — where the guest was first seen —
+ * so branch attribution, reporting and the existing branch-scoped list
+ * endpoint keep working. It is no longer an isolation boundary; `restaurant`
+ * is. Tenant isolation is therefore strictly stronger than before: every
+ * query is filtered by restaurant, which the old model could not express.
+ *
+ * `phoneKey` is the normalised phone (digits only, Nepali country code and
+ * trunk zero stripped) and carries a unique partial index per restaurant.
+ * Deduplication is enforced by the database, not by a lookup that can race.
+ */
+const customerSchema=new Schema({
+  restaurant:{...oid,ref:'Restaurant',required:true,index:true},
+  // Home branch: where this guest was first seen. Attribution, not isolation.
+  branch:{...oid,ref:'Branch',index:true},
+  name:{type:String,trim:true,maxlength:120},
+  phone:{type:String,trim:true,maxlength:30,index:true},
+  // Normalised phone. The dedupe key.
+  phoneKey:{type:String,trim:true,maxlength:30,index:true},
+  email:{type:String,trim:true,lowercase:true,maxlength:160},
+  addresses:[{
+    label:{type:String,trim:true,maxlength:60},
+    address:{type:String,trim:true,maxlength:300},
+    default:{type:Boolean,default:false}
+  }],
+  // Free-text operational notes: "always calls ahead", "difficult stairs".
+  notes:{type:String,trim:true,maxlength:2000},
+  preferences:{
+    dietary:{type:String,enum:['none','vegetarian','vegan','halal','jain'],default:'none'},
+    spiceLevel:{type:String,enum:['none','mild','medium','hot','extra-hot'],default:'medium'},
+    allergies:[{type:String,trim:true,maxlength:60}],
+    favouriteItems:[{...oid,ref:'MenuItem'}],
+    seating:{type:String,trim:true,maxlength:60},
+    contactPreference:{type:String,enum:['phone','sms','email','none'],default:'phone'},
+    marketingOptIn:{type:Boolean,default:false}
+  },
+  tags:[{type:String,trim:true,lowercase:true,maxlength:40}],
+  loyalty:{
+    points:{type:Number,default:0,min:0},
+    tier:{type:String,enum:['bronze','silver','gold','platinum'],default:'bronze'},
+    lifetimePoints:{type:Number,default:0,min:0},
+    joinedAt:Date
+  },
+  // Denormalised rollups, recomputed from orders. Never authored by hand.
+  stats:{
+    totalOrders:{type:Number,default:0,min:0},
+    completedOrders:{type:Number,default:0,min:0},
+    cancelledOrders:{type:Number,default:0,min:0},
+    totalSpend:{type:Number,default:0,min:0},
+    totalRefunded:{type:Number,default:0,min:0},
+    averageOrderValue:{type:Number,default:0,min:0},
+    firstOrderAt:{type:Date,default:null},
+    lastOrderAt:{type:Date,default:null},
+    statsUpdatedAt:{type:Date,default:null}
+  },
+  // Legacy fields kept so nothing that reads them breaks. Mirrored from stats.
+  loyaltyPoints:n,
+  totalSpend:n,
+  lastOrderAt:Date,
+  // Customers are deactivated, never hard-deleted: orders reference them and
+  // financial history must stay intact.
+  active:{type:Boolean,default:true,index:true},
+  deactivatedAt:{type:Date,default:null},
+  deactivatedBy:{...oid,ref:'User',default:null},
+  deactivationReason:{type:String,trim:true,maxlength:300},
+  // Set when this record was merged into another during deduplication.
+  mergedInto:{...oid,ref:'Customer',default:null}
+},{timestamps:true});
+// One profile per phone per restaurant. Partial so historical rows without a
+// usable phone are not forced into the constraint.
+/**
+ * Derive the tenant and the dedupe key from whatever the caller supplied.
+ *
+ * Plenty of existing code (and every pre-Phase-9 caller) creates a Customer
+ * with just a branch and a phone. Making `restaurant` required without this
+ * hook would break those call sites and, worse, tempt a caller to pass a
+ * restaurant that disagrees with the branch. Deriving it from the branch keeps
+ * the two consistent by construction, and normalising the phone here means no
+ * write path can bypass deduplication.
+ */
+customerSchema.pre('validate',async function deriveCustomerScope(){
+  if(!this.restaurant&&this.branch){
+    const branch=await mongoose.model('Branch').findById(this.branch).select('restaurant').lean();
+    if(branch?.restaurant)this.restaurant=branch.restaurant;
+  }
+  if(this.phone){
+    const digits=String(this.phone).replace(/\D+/g,'');
+    let key=digits;
+    if(key.startsWith('00977'))key=key.slice(5);
+    else if(key.startsWith('977')&&key.length>10)key=key.slice(3);
+    if(key.length>10&&key.startsWith('0'))key=key.replace(/^0+/,'');
+    else if(key.length===11&&key.startsWith('0'))key=key.slice(1);
+    if(key)this.phoneKey=key;
+  }
+});
+customerSchema.index({restaurant:1,phoneKey:1},{unique:true,name:'customer_restaurant_phone',partialFilterExpression:{phoneKey:{$type:'string'}}});
+customerSchema.index({restaurant:1,name:1},{name:'customer_restaurant_name'});
+customerSchema.index({restaurant:1,email:1},{name:'customer_restaurant_email'});
+customerSchema.index({restaurant:1,active:1,'stats.lastOrderAt':-1},{name:'customer_restaurant_recent'});
+export const Customer=model('Customer',customerSchema);
 // Phase 6C — reservations.
 const reservationSchema=new Schema({
   restaurant:{...oid,ref:'Restaurant',required:true,index:true},

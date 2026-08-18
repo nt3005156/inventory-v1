@@ -635,6 +635,97 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## Customers & CRM (Phase 9)
+
+### Scope: customers are restaurant-wide
+
+This is the central decision of the phase, and it changed existing behaviour.
+
+Before Phase 9 a `Customer` carried only a `branch`, and the storefront
+deduplicated on `{branch, phone}`. A guest who ordered from Kalanki on Monday
+and Patan on Friday became **two profiles**, splitting the very lifetime-spend
+and loyalty figures a CRM exists to report.
+
+Customers are now scoped to the **restaurant**. `branch` is retained as the
+*home* branch — where the guest was first seen — for attribution, reporting
+and the existing branch-scoped list endpoint. It is no longer an isolation
+boundary; `restaurant` is. Tenant isolation is therefore strictly *stronger*
+than before, because the old model had no restaurant field to filter on at all.
+
+One consequence, deliberately accepted: a reservation may now be booked at any
+branch for a guest first seen elsewhere. The guard that previously rejected
+this (`Customer belongs to another branch`) now checks the restaurant instead.
+
+### Deduplication
+
+Phone numbers are normalised before comparison — `+977 9800000001`,
+`9779800000001`, `09800000001` and `9800000001` are one person. The normalised
+value is stored as `phoneKey` and carries a **unique partial index per
+restaurant**, so deduplication is enforced by the database rather than by a
+lookup that can race. Every write path — CRM, POS and the public storefront —
+converges on one `findOrCreateCustomer()` helper.
+
+Two different restaurants may of course each hold the same phone number.
+
+### Derived statistics
+
+`stats` and loyalty tiers are **always recomputed from orders**, never
+incremented in place and never writable by a client — an incremented counter
+drifts the moment an order is refunded, cancelled or edited.
+
+| Figure | Rule |
+|---|---|
+| `totalSpend` | Settled orders, **minus refunds** |
+| `cancelledOrders` | Counted, but excluded from spend |
+| `averageOrderValue` | `totalSpend / completedOrders` |
+| Loyalty tier | Derived from lifetime spend: silver 15k, gold 50k, platinum 100k |
+
+Rollups refresh after a payment or refund **commits** — never inside the
+transaction, because a reporting figure must not be able to fail a sale.
+`POST /customers/:id/recalculate` repairs any drift.
+
+### API
+
+| Route | Roles |
+|---|---|
+| `GET /customers/search` — phone, name, email or customer ID | staff+ |
+| `GET /customers/:id`, `GET /customers/:id/history` | staff+ |
+| `POST /customers`, `PATCH /customers/:id` | staff+ |
+| `GET /customers/summary` | manager+ |
+| `POST /customers/:id/loyalty`, `POST /customers/merge` | manager+ |
+| `PATCH /customers/:id/active` | owner |
+| `DELETE /customers/:id` | **405 — always** |
+
+Search terms are escaped before reaching a regular expression, so `.*` matches
+nothing rather than everyone.
+
+### Privacy
+
+There is **no public customer API**. Every route above requires
+authentication, a record belonging to another restaurant answers `404` rather
+than `403` (a 403 would confirm it exists), and the public storefront never
+returns profile data — order confirmations and tracking expose neither email,
+loyalty, notes nor lifetime spend.
+
+### Deletion
+
+Customers are **deactivated, never deleted**: orders reference them, and
+destroying a profile would orphan financial history. `DELETE` returns 405 and
+says so. Deactivation is reversible and audited.
+
+Duplicates created before this phase can be reconciled with
+`POST /customers/merge`, which repoints orders, unions addresses, sums loyalty
+points and leaves a tombstone (`mergedInto`) so old links still resolve.
+
+### Migration
+
+`ensureCustomerIndexes()` runs at startup: it backfills `restaurant` from the
+home branch and `phoneKey` from the phone, merges the per-branch duplicates the
+old model created, and only then builds the unique index — which would
+otherwise fail against that existing data. It drops the constraint first so a
+re-run cannot deadlock against the duplicates it exists to clean, and it is
+idempotent.
+
 ## Online payments (Phase 8B)
 
 eSewa ePay v2 and Khalti ePayment v2 are fully integrated: initiation,

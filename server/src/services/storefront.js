@@ -7,6 +7,7 @@ import {applyModifierPricing, resolveModifiers, toOrderModifiers, normalizeInstr
 import {listStations, routeItemToStation} from './stations.js';
 import {recordRedemption, resolveOrderDiscount, validateCoupon} from './discounts.js';
 import {availablePaymentMethods} from './paymentConfig.js';
+import {findOrCreateCustomer} from './customers.js';
 
 // Phase 8A — public online ordering.
 //
@@ -333,18 +334,19 @@ export async function placePublicOrder({input, requestKey, session}) {
     throw publicError(`${method === 'esewa' ? 'eSewa' : 'Khalti'} is not available right now`, 503);
   }
 
-  // Reuse an existing customer by phone so a returning guest builds history,
-  // rather than creating a duplicate record on every order.
-  let customer = await Customer.findOne({branch: branch._id, phone: guest.phone}).session(session || null);
-  if (!customer) {
-    [customer] = await Customer.create([{
-      branch: branch._id, name: guest.name, phone: guest.phone, email: guest.email,
-      addresses: address ? [{label: 'Delivery', address, default: true}] : []
-    }], {session: session || undefined});
-  } else if (address && !(customer.addresses || []).some(a => clean(a.address) === address)) {
-    customer.addresses.push({label: 'Delivery', address, default: false});
-    await customer.save({session: session || undefined});
-  }
+  // Reuse an existing customer so a returning guest builds history rather than
+  // a duplicate record. Phase 9 made this restaurant-wide and moved it behind
+  // one shared helper, so the storefront, the POS and the CRM all converge on
+  // the same profile — and the unique index settles any concurrent race.
+  const {customer} = await findOrCreateCustomer({
+    restaurantId: branch.restaurant,
+    branchId: branch._id,
+    name: guest.name,
+    phone: guest.phone,
+    email: guest.email,
+    address,
+    session
+  });
 
   await assertCartStock({branchId: branch._id, lines, session});
 
