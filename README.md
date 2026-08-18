@@ -635,6 +635,41 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## POS modifier catalog integrity (Phase 11A)
+
+The modifier **engine** shipped in Phase 4B — selection validation,
+cardinality, variant/extra pricing and ingredient deltas — and is unchanged.
+Phase 11A hardens the **catalog** that engine reads.
+
+An audit authored ten deliberately incoherent catalogs; five were accepted:
+
+| Accepted before | Consequence at the till | Now |
+|---|---|---|
+| Option pointing at **another restaurant's ingredient** | Order rejected 404 for every guest picking it | Refused at authoring |
+| `qty` with **no unit** | Converted against the base unit and deducted the **wrong** amount | Refused |
+| `minSelect` above the option count | Group unorderable — every attempt rejected | Refused |
+| `single` select with `minSelect > 1` | Contradiction, unorderable | Refused |
+| `variant` group where no option changes price | Size choice that silently does nothing | Refused |
+
+The cross-tenant case was **not** a data leak — the order path already blocked
+it (`Modifier X is not available for this restaurant`), which is why it went
+unnoticed. The defect was that breakage surfaced as a support call from the
+counter rather than a validation error where an operator could fix it. The
+same checks run on **edit** as well as create, so an update is not a way
+around them.
+
+### The reference catalog
+
+```
+Burger (base 200)
+├── Size    (variant, single, required)     Small 150 · Medium 200 · Large 260
+└── Extras  (extra,  multi, max 3)          Cheese +40 (20g) · Bacon +60 · Sauce +15
+```
+
+A variant **replaces** the line price; extras are **deltas**. Large + Cheese +
+Bacon = 260 + 40 + 60 = **360**, and two of them deduct **40g** of cheese.
+Verified end to end against the database, not just the response.
+
 ## Rider production readiness (Phase 12)
 
 ### Account provisioning — four vulnerabilities fixed

@@ -124,6 +124,11 @@ export function normalizeModifierGroups(groups){
       const qty=Number(o.qty||0);
       if(qty>0 && !o.ingredient) throw httpError(`Option "${o.name}" sets a quantity but no ingredient`,400);
       if(kind==='removal' && o.ingredient && !(qty>0)) throw httpError(`Removal "${o.name}" needs the quantity to remove`,400);
+      // 11A: a quantity with no unit is unresolvable at the till. The order
+      // path converts qty into the ingredient's base unit, and with no unit to
+      // convert FROM it silently assumed the base unit -- which produced a
+      // wrong deduction rather than an error.
+      if(o.ingredient && qty>0 && !clean(o.unit)) throw httpError(`Option "${o.name}" needs a unit for its quantity`,400);
       return {
         key:clean(o.key),
         name:clean(o.name),
@@ -140,8 +145,46 @@ export function normalizeModifierGroups(groups){
     const minSelect=Number(g.minSelect||0), maxSelect=Number(g.maxSelect||0);
     if(maxSelect>0 && minSelect>maxSelect) throw httpError(`${g.name} has a minimum above its maximum`,400);
     if(selection==='single' && maxSelect>1) throw httpError(`${g.name} is single-select but allows ${maxSelect}`,400);
+    // 11A: a minimum the group can never satisfy is a menu that cannot be
+    // ordered -- the till would reject every attempt with no way to comply.
+    if(minSelect>options.length) throw httpError(`${g.name} requires ${minSelect} choices but only offers ${options.length}`,400);
+    if(selection==='single' && minSelect>1) throw httpError(`${g.name} is single-select but requires ${minSelect}`,400);
+    // 11A: a variant group exists to re-price the line (Small/Medium/Large).
+    // If no option changes the price at all it is a decorative choice that
+    // silently does nothing at the till.
+    if(kind==='variant' && !options.some(o=>o.priceOverride!==null||Number(o.priceDelta||0)!==0)){
+      throw httpError(`${g.name} is a variant group but no option changes the price`,400);
+    }
     return {key:clean(g.key),name:clean(g.name),kind,selection,required:Boolean(g.required),minSelect,maxSelect,options};
   });
+}
+
+/**
+ * 11A: every ingredient a modifier option points at must belong to THIS
+ * restaurant.
+ *
+ * The order path already refuses a foreign ingredient at the till, so this is
+ * not a data leak -- but without it the breakage surfaces as a menu item that
+ * fails for every guest who picks that option, which is a support call rather
+ * than a validation error. Rejecting it at authoring time is where an operator
+ * can actually fix it.
+ */
+async function assertModifierIngredientsOwned(groups, restaurantId, session){
+  if(!groups?.length) return;
+  const ids=[];
+  for(const g of groups) for(const o of (g.options||[])) if(o.ingredient) ids.push(String(o.ingredient));
+  if(!ids.length) return;
+  const unique=[...new Set(ids)];
+  const owned=await Ingredient.find({_id:{$in:unique},restaurant:restaurantId})
+    .select('_id').session(session||null).lean();
+  const ownedSet=new Set(owned.map(i=>String(i._id)));
+  for(const g of groups){
+    for(const o of (g.options||[])){
+      if(o.ingredient && !ownedSet.has(String(o.ingredient))){
+        throw httpError(`Option "${o.name}" uses an ingredient that does not belong to this restaurant`,400);
+      }
+    }
+  }
 }
 
 export async function listMenuItems({ user, q, category, active, page=1, limit=50, branchId }){
@@ -256,6 +299,8 @@ export async function getRecipeVersions({ menuId, user }){
 
 export async function createMenuItem({ input, user }){
   const restaurantId = await resolveRestaurant(user);
+  const normalizedModifierGroups = normalizeModifierGroups(input.modifierGroups);
+  await assertModifierIngredientsOwned(normalizedModifierGroups, restaurantId);
   if(!['owner','manager'].includes((await userRestaurantContext(user)).role)) throw httpError('Only owner/manager can create menu items',403);
   const name = clean(input.name);
   if(!name || name.length<2) throw httpError('Menu name must be at least 2 characters',400);
@@ -302,7 +347,7 @@ export async function createMenuItem({ input, user }){
     yield: yieldVal,
     yieldUnit: clean(input.yieldUnit)||'serving',
     recipe,
-    modifierGroups: normalizeModifierGroups(input.modifierGroups)||[],
+    modifierGroups: normalizedModifierGroups||[],
     station: (await resolveStation({restaurantId, code: input.station})) || undefined,
     prepMinutes: Number(input.prepMinutes || 0),
     recipeVersion: 1,
@@ -360,7 +405,11 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
     row.price=Math.round(p*100)/100;
   }
   if(patch.vatInclusive!==undefined) row.vatInclusive=Boolean(patch.vatInclusive);
-  if(patch.modifierGroups!==undefined) row.modifierGroups=normalizeModifierGroups(patch.modifierGroups);
+  if(patch.modifierGroups!==undefined){
+    const groups=normalizeModifierGroups(patch.modifierGroups);
+    await assertModifierIngredientsOwned(groups, row.restaurant);
+    row.modifierGroups=groups;
+  }
   if(patch.station!==undefined) row.station=(await resolveStation({restaurantId, code: patch.station}))||undefined;
   if(patch.prepMinutes!==undefined) row.prepMinutes=Number(patch.prepMinutes);
   if(patch.vatRate!==undefined) row.vatRate=Number(patch.vatRate);
