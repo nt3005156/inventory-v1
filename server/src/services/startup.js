@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {resolveCorsPolicy, resolveTrustProxy} from './deployment.js';
 import {ensureMonthCloseIndexes} from './monthCloseMigration.js';
 import {ensureSupplierCatalogIndexes} from './supplierCatalogMigration.js';
 import {ensurePurchaseOrderIndexes} from './purchaseOrderMigration.js';
@@ -43,34 +44,14 @@ export async function ensureOperationalIndexes() {
   for (const migrate of OPERATIONAL_MIGRATIONS) await migrate();
 }
 
-export function configuredClientOrigins(env = process.env) {
-  return String(env.CLIENT_URL || '')
-    .split(',')
-    .map(value => value.trim().replace(/\/$/, ''))
-    .filter(Boolean);
-}
+// Origin parsing and the environment-class rules now live in deployment.js so
+// the HTTP layer, the Socket.IO layer and startup validation cannot drift.
+export {allowedOrigins as configuredClientOrigins} from './deployment.js';
 
 function validateClientOrigins(env) {
-  const origins = configuredClientOrigins(env);
-  if (env.NODE_ENV === 'production' && origins.length === 0) {
-    throw new Error('CLIENT_URL is required in production');
-  }
-
-  for (const origin of origins) {
-    if (origin === '*') throw new Error('CLIENT_URL must list explicit HTTP(S) origins');
-    let parsed;
-    try {
-      parsed = new URL(origin);
-    } catch {
-      throw new Error(`CLIENT_URL contains an invalid origin: ${origin}`);
-    }
-    const normalized = origin.replace(/\/$/, '');
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== normalized) {
-      throw new Error(`CLIENT_URL must contain origins only, without paths: ${origin}`);
-    }
-  }
-
-  return origins;
+  // Throws in staging/production when CLIENT_URL is missing, wildcarded, or
+  // otherwise unusable; returns the allowlist (possibly empty in development).
+  return resolveCorsPolicy(env).origins;
 }
 
 export function validateRuntimeEnvironment(env = process.env) {
@@ -88,6 +69,9 @@ export function validateRuntimeEnvironment(env = process.env) {
   }
 
   validateClientOrigins(env);
+  // A bad TRUST_PROXY (true/*) silently breaks client-IP detection and rate
+  // limiting, so it is a startup failure rather than a runtime surprise.
+  resolveTrustProxy(env);
 }
 
 export async function verifyTransactionCapableDatabase(connection = mongoose.connection) {

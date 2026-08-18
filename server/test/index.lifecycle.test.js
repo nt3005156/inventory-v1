@@ -103,6 +103,140 @@ describe('production API process lifecycle', () => {
     assert.match(readOutput(), /JWT_SECRET must be replaced/);
   });
 
+  test('refuses to start in production without CLIENT_URL rather than serving every origin', async () => {
+    const child = spawnApi({
+      NODE_ENV: 'production',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: '',
+      PORT: String(await availablePort())
+    });
+    const readOutput = childOutput(child);
+    const result = await waitForExit(child);
+
+    assert.equal(result.code, 1);
+    assert.match(readOutput(), /CLIENT_URL is required in production/);
+  });
+
+  test('refuses to start in production with a wildcard CLIENT_URL', async () => {
+    const child = spawnApi({
+      NODE_ENV: 'production',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: '*',
+      PORT: String(await availablePort())
+    });
+    const readOutput = childOutput(child);
+    const result = await waitForExit(child);
+
+    assert.equal(result.code, 1);
+    assert.match(readOutput(), /CLIENT_URL must list explicit HTTP\(S\) origins/);
+  });
+
+  test('refuses to start when TRUST_PROXY would trust client-supplied forwarding headers', async () => {
+    const child = spawnApi({
+      NODE_ENV: 'production',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: 'https://ops.example.com',
+      TRUST_PROXY: 'true',
+      PORT: String(await availablePort())
+    });
+    const readOutput = childOutput(child);
+    const result = await waitForExit(child);
+
+    assert.equal(result.code, 1);
+    assert.match(readOutput(), /TRUST_PROXY must not be true/);
+  });
+
+  test('refuses to start a staging deployment without an explicit origin allowlist', async () => {
+    // APP_ENV=staging with NODE_ENV=development must NOT get the permissive
+    // development fallback: staging is hardened exactly like production.
+    const child = spawnApi({
+      NODE_ENV: 'development',
+      APP_ENV: 'staging',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: '',
+      PORT: String(await availablePort())
+    });
+    const readOutput = childOutput(child);
+    const result = await waitForExit(child);
+
+    assert.equal(result.code, 1);
+    assert.match(readOutput(), /CLIENT_URL is required in staging/);
+  });
+
+  test('ignores forwarding headers entirely when TRUST_PROXY is disabled', async () => {
+    // This is the case that distinguishes a real configuration read from a
+    // hardcoded `trust proxy = 1`: with no proxy trusted, X-Forwarded-For must
+    // have no effect at all on the client identity used for rate limiting.
+    const port = await availablePort();
+    const child = spawnApi({
+      NODE_ENV: 'production',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: 'https://ops.example.com',
+      TRUST_PROXY: 'false',
+      PORT: String(port)
+    });
+    const readOutput = childOutput(child);
+
+    try {
+      await waitForOutput(child, readOutput, new RegExp(`API ready on port ${port}`));
+
+      const posture = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+      assert.equal(posture.trustProxy, 'false');
+
+      const spoofed = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: {'X-Forwarded-For': '203.0.113.9'}
+      });
+      assert.equal((await spoofed.json()).clientIp, '127.0.0.1',
+        'a forged X-Forwarded-For must not become the client IP when no proxy is trusted');
+    } finally {
+      child.kill('SIGKILL');
+      await waitForExit(child).catch(() => null);
+    }
+  });
+
+  test('reads the real client IP behind the expected single nginx hop', async () => {
+    const port = await availablePort();
+    const allowedOrigin = 'https://ops.example.com';
+    const child = spawnApi({
+      NODE_ENV: 'production',
+      MONGODB_URI: replset.getUri(),
+      JWT_SECRET: productionSecret,
+      CLIENT_URL: allowedOrigin,
+      TRUST_PROXY: '1',
+      PORT: String(port)
+    });
+    const readOutput = childOutput(child);
+
+    try {
+      await waitForOutput(child, readOutput, new RegExp(`API ready on port ${port}`));
+
+      const posture = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+      assert.equal(posture.trustProxy, '1');
+      assert.equal(posture.environment, 'production');
+
+      // What nginx actually sends (client/nginx.conf appends $remote_addr).
+      const proxied = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: {'X-Forwarded-For': '203.0.113.9'}
+      });
+      assert.equal((await proxied.json()).clientIp, '203.0.113.9');
+
+      // A caller who prepends their own entry cannot displace the address
+      // nginx appended, so they cannot forge their rate-limit identity.
+      const forged = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: {'X-Forwarded-For': '9.9.9.9, 203.0.113.9'}
+      });
+      assert.equal((await forged.json()).clientIp, '203.0.113.9');
+    } finally {
+      child.kill('SIGKILL');
+      await waitForExit(child).catch(() => null);
+    }
+  });
+
   test('becomes ready, enforces configured CORS origins, and exits cleanly on SIGTERM', async () => {
     const port = await availablePort();
     const allowedOrigin = 'http://localhost:8080';
@@ -121,7 +255,27 @@ describe('production API process lifecycle', () => {
       const health = await fetch(`http://127.0.0.1:${port}/health`, {headers: {Origin: allowedOrigin}});
       assert.equal(health.status, 200);
       assert.equal(health.headers.get('access-control-allow-origin'), allowedOrigin);
-      assert.deepEqual(await health.json(), {ok: true, database: 'connected', startup: 'ready'});
+      // /health also reports the resolved deployment posture (Phase 8A.6) so an
+      // operator can confirm from outside the container which environment
+      // class, CORS mode and proxy trust the process actually booted with.
+      assert.deepEqual(await health.json(), {
+        ok: true,
+        database: 'connected',
+        startup: 'ready',
+        environment: 'production',
+        cors: 'allowlist',
+        trustProxy: 'loopback',
+        rateLimit: 'per-instance-memory',
+        clientIp: '127.0.0.1'
+      });
+
+      // TRUST_PROXY is unset here, so the default 'loopback' applies: a proxy
+      // on this host may set forwarding headers. That is the whole point of the
+      // default, and it is asserted rather than assumed.
+      const viaLocalProxy = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: {'X-Forwarded-For': '203.0.113.9'}
+      });
+      assert.equal((await viaLocalProxy.json()).clientIp, '203.0.113.9');
 
       const untrusted = await fetch(`http://127.0.0.1:${port}/health`, {headers: {Origin: 'https://untrusted.example'}});
       assert.equal(untrusted.status, 200);

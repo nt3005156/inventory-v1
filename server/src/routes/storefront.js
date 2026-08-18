@@ -1,6 +1,6 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
-import rateLimit from 'express-rate-limit';
+import {createRateLimiter} from '../services/rateLimiting.js';
 import {z} from 'zod';
 import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
@@ -71,16 +71,18 @@ const fail = (res, e) => publicFail(res, e);
 // own abuse controls. Reads are looser than writes; placing an order is the
 // expensive operation and is limited hardest.
 //
+// Buckets are keyed by req.ip, which honours the audited `trust proxy` setting
+// (services/deployment.js). Counters are per API instance — correct for the
+// single-instance Compose deployment, and documented in README as requiring a
+// shared store before running multiple API containers.
+//
 // Limits are disabled under NODE_ENV=test: a suite legitimately places dozens
 // of orders in seconds, and throttling it would test the limiter rather than
-// the behaviour. The limiter itself is covered by a dedicated test that builds
-// its own limited app.
-// The env var is read per request, not at module load: ES imports are hoisted,
-// so a test harness that sets NODE_ENV cannot win a load-time race.
-const limiter = options => {
-  const live = rateLimit({standardHeaders: true, legacyHeaders: false, ...options});
-  return (req, res, next) => (process.env.NODE_ENV === 'test' ? next() : live(req, res, next));
-};
+// the behaviour. The limiter itself is covered by dedicated tests that build
+// their own limited app. The predicate runs per request, not at module load:
+// ES imports are hoisted, so a harness setting NODE_ENV cannot win that race.
+const limiter = (name, options) =>
+  createRateLimiter({name, ...options, enabled: () => process.env.NODE_ENV !== 'test'});
 
 export const PUBLIC_RATE_LIMITS = Object.freeze({
   browse: {windowMs: 60_000, max: 120},
@@ -89,10 +91,10 @@ export const PUBLIC_RATE_LIMITS = Object.freeze({
   track: {windowMs: 60_000, max: 20}
 });
 
-const browseLimit = limiter(PUBLIC_RATE_LIMITS.browse);
-const quoteLimit = limiter(PUBLIC_RATE_LIMITS.quote);
-const orderLimit = limiter(PUBLIC_RATE_LIMITS.order);
-const trackLimit = limiter(PUBLIC_RATE_LIMITS.track);
+const browseLimit = limiter('public:browse', PUBLIC_RATE_LIMITS.browse);
+const quoteLimit = limiter('public:quote', PUBLIC_RATE_LIMITS.quote);
+const orderLimit = limiter('public:order', PUBLIC_RATE_LIMITS.order);
+const trackLimit = limiter('public:track', PUBLIC_RATE_LIMITS.track);
 
 
 const clean = value => String(value ?? '').trim();

@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {Order} from '../models/operations.js';
+import {resolveCorsOptions} from './deployment.js';
 
 const SOCKET_ROLES = ['owner', 'manager', 'staff'];
 const MANAGEMENT_ROLES = new Set(['owner', 'manager']);
@@ -69,9 +70,13 @@ export function leaveBranch(socket, branchId) {
 
 export function attachRealtime(httpServer, {corsOrigin} = {}) {
   io = new Server(httpServer, {
+    // Socket.IO does its own CORS check, so it must use the same resolved
+    // policy as Express — otherwise a rejected HTTP origin could still open a
+    // websocket. credentials stays false: auth is a Bearer token in the
+    // handshake, never a cookie.
     cors: {
-      origin: corsOrigin ?? (process.env.CLIENT_URL?.split(',') || true),
-      credentials: true
+      origin: corsOrigin ?? resolveCorsOptions().origin,
+      credentials: false
     }
   });
 

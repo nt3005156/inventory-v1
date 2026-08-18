@@ -36,6 +36,15 @@ services:
       PORT: 4000
       MONGODB_URI: ${COMPOSE_MONGODB_URI:-mongodb://mongo:27017/mittho_ops?replicaSet=rs0}
       CLIENT_URL: ${CLIENT_URL:-http://localhost:5173,http://localhost:8080}
+      # Deployment class. Compose defaults to development; set APP_ENV=staging
+      # or production on the real host so CORS refuses to fall back to
+      # reflect-any-origin.
+      APP_ENV: ${APP_ENV:-development}
+      # Exactly one reverse proxy (the `web` nginx) sits in front of this API,
+      # and the port is published on 127.0.0.1 only, so Express trusts one hop
+      # and reads the client address nginx appended to X-Forwarded-For.
+      # Add a hop only if you actually add a proxy in front of nginx.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
     depends_on:
       mongo-init:
         condition: service_completed_successfully

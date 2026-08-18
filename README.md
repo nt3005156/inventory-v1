@@ -595,7 +595,9 @@ Open `http://localhost:5173`. Vite proxies `/api` and `/socket.io` to the API on
 | `MONGODB_URI` | Native API URI; must resolve to a writable replica set or sharded cluster. |
 | `COMPOSE_MONGODB_URI` | Optional API URI override for Compose. Empty uses the bundled `mongo:27017` replica member. |
 | `JWT_SECRET` | At least 32 characters. Known placeholders are rejected when `NODE_ENV=production`. |
-| `CLIENT_URL` | Comma-separated exact HTTP(S) browser origins, with no paths or wildcard. Required in production. |
+| `CLIENT_URL` | Comma-separated exact HTTP(S) browser origins, with no paths or wildcard. Required in staging and production. |
+| `APP_ENV` | Deployment class: `development`, `test`, `staging`, `production`. Overrides `NODE_ENV` for security decisions. Unrecognised values are rejected at startup. |
+| `TRUST_PROXY` | How many reverse proxies sit in front of the API. `1` for the bundled Nginx. Defaults to `loopback`. `true`/`*` are rejected. |
 | `PORT` | API listen port, 1–65535. Compose fixes the internal API port at 4000. |
 | `ESEWA_MERCHANT_CODE` | Optional integration setting; no credential is hard-coded. |
 | `KHALTI_SECRET_KEY` | Optional integration setting; no credential is hard-coded. |
@@ -609,15 +611,142 @@ The API refuses to listen until configuration is valid, MongoDB reports transact
 `GET /health` returns HTTP 200 only when startup has completed and Mongoose is connected. The Docker web container proxies the same endpoint:
 
 ```json
-{"ok":true,"database":"connected","startup":"ready"}
+{
+  "ok": true,
+  "database": "connected",
+  "startup": "ready",
+  "environment": "production",
+  "cors": "allowlist",
+  "trustProxy": "1",
+  "rateLimit": "per-instance-memory",
+  "clientIp": "203.0.113.9"
+}
 ```
 
+`environment`, `cors`, `trustProxy` and `rateLimit` report the posture the
+process actually booted with, and `clientIp` is the address the API resolved for
+the caller. Together they let an operator confirm from outside the container
+that proxy trust and CORS are configured as intended, without reading env vars
+off the host. See **Deployment hardening (Phase 8A.6)** below.
+
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
+
+## Deployment hardening (Phase 8A.6)
+
+### Expected topology
+
+```
+Browser
+   │  https (TLS terminates at the host proxy / load balancer)
+   ▼
+web  — Nginx  (client/nginx.conf, container port 80, published :8080)
+   │  http, docker network
+   ▼
+api  — Express (container port 4000, published on 127.0.0.1 only)
+   │
+   ▼
+mongo — replica set rs0 (never published)
+```
+
+Nginx is the **only** reverse proxy in front of the API. It sets `Host`,
+`X-Real-IP` and appends the peer address to `X-Forwarded-For`, and the API port
+is bound to loopback on the host, so nothing external can reach Express
+directly. If you place another proxy or load balancer in front of `web`, raise
+`TRUST_PROXY` by that number of hops — and only by that number.
+
+### Environment classes
+
+`development`, `test`, `staging` and `production` are treated separately.
+`NODE_ENV` cannot express staging (build tooling only understands "production"
+or not), so `APP_ENV` is the explicit deployment class and takes precedence.
+
+| Class | CORS | Notes |
+|---|---|---|
+| `development` | `reflect-any-origin` when `CLIENT_URL` is empty | Local convenience only. |
+| `test` | same as development | Rate limits are bypassed; see below. |
+| `staging` | `allowlist`, `CLIENT_URL` mandatory | Hardened identically to production. **Never** falls back to permissive CORS, even with `NODE_ENV=development`. |
+| `production` | `allowlist`, `CLIENT_URL` mandatory | Startup fails if missing, wildcarded, path-bearing, or plaintext `http` for a non-loopback host. |
+
+An unrecognised `APP_ENV` is a startup error. An unrecognised `NODE_ENV` is
+treated as production, so an unexpected value fails to the strict side rather
+than silently unlocking the permissive path.
+
+`Access-Control-Allow-Credentials` is never sent. Authentication is a Bearer
+token held by the SPA, not a cookie, so no origin ever needs to send ambient
+credentials — and credentials combined with a reflected origin is the classic
+CORS foot-gun.
+
+### Trust proxy
+
+| `TRUST_PROXY` | Effect |
+|---|---|
+| unset | `loopback` — only a proxy on this host may set forwarding headers (safe default). |
+| `1`, `2`, … | Trust exactly N hops. Use `1` for the bundled Nginx. |
+| `false` / `0` | No proxy; `req.ip` is the socket peer and `X-Forwarded-For` is ignored. |
+| `loopback`, `uniquelocal`, CIDR list | Passed to Express verbatim. |
+| `true`, `*` | **Rejected at startup.** |
+
+The default is deliberately not `1`: with no proxy actually in front, trusting
+one hop makes the caller's own `X-Forwarded-For` authoritative, letting anyone
+forge their rate-limit identity. Trusting exactly the hops that exist means a
+prepended forged entry is discarded and the address Nginx appended wins.
+
+### Rate limiting
+
+| Surface | Window | Max | Key |
+|---|---|---|---|
+| `GET /api/public/branches`, `/api/public/menu` | 60 s | 120 | client IP |
+| `POST /api/public/quote` | 60 s | 30 | client IP |
+| `POST /api/public/orders` | 15 min | 8 | client IP |
+| `GET /api/public/orders/:orderNo` (track) | 60 s | 20 | client IP |
+| `POST /api/auth/login` | 15 min | 10 | client IP |
+
+Authenticated staff endpoints are otherwise not rate limited; they are protected
+by JWT authentication and RBAC. The limiter supports keying by user id
+(`byUser`) so an abusive account cannot exhaust the bucket of everyone sharing
+an office NAT address, and that path is covered by tests.
+
+The bucket key is `req.ip`, which honours the `trust proxy` setting above.
+IPv4-mapped IPv6 addresses are folded so a single client cannot occupy two
+buckets.
+
+**Scope — read this before scaling out:**
+
+```
+Single API instance:      supported
+Multiple API instances:   requires a shared rate-limit store such as Redis
+```
+
+Counters live in each process's memory. With N API containers behind a load
+balancer the effective limit is up to N × max. This is **not** solved.
+
+**Redis decision:** Redis is not part of this project's infrastructure and the
+Compose deployment runs exactly one `api` service, so adding
+`rate-limit-redis` today would introduce a production dependency and an
+operational failure mode for no present benefit. Instead the store is injected:
+
+```js
+import {configureRateLimitStore} from './services/rateLimiting.js';
+import RedisStore from 'rate-limit-redis';
+
+configureRateLimitStore(({name, windowMs}) => new RedisStore({/* … */}));
+```
+
+Call it once at startup before the routers are imported. No route changes.
+`GET /health` reports `rateLimit: "per-instance-memory"` or `"shared-store"` so
+the active scope is observable in a running deployment.
+
+Limits are bypassed when `NODE_ENV=test` — a functional suite legitimately
+places dozens of orders in seconds. The predicate is evaluated per request, not
+at module load, and the limiter itself is covered by tests that mount it
+unconditionally on their own Express app.
 
 ## Production deployment checklist
 
 1. Generate a unique secret (for example, `openssl rand -hex 32`) and set `JWT_SECRET`.
-2. Set `CLIENT_URL` to the exact public HTTPS origin; do not use `*`.
+2. Set `CLIENT_URL` to the exact public HTTPS origin; do not use `*`. Set `APP_ENV=production` (or `staging` for a staging host — never leave staging on the development default).
+2a. Set `TRUST_PROXY` to the real number of proxies in front of the API — `1` for the bundled Nginx. Confirm afterwards with `GET /health`: `clientIp` must be the real browser address, not the proxy's.
+2b. Rate limiting is per API instance. Run exactly one `api` container, or introduce a shared store first (see **Deployment hardening**).
 3. Use a backed-up MongoDB replica set/sharded cluster. The bundled one-member Compose replica set provides transaction semantics but **not high availability**.
 4. If the Compose API should connect to managed MongoDB, set `COMPOSE_MONGODB_URI` to that transaction-capable URI. The base Compose file still starts its bundled Mongo services; remove/disable those services in the deployment-specific override when they are not needed.
 5. Publish the web service through a TLS reverse proxy or load balancer. Keep MongoDB private and keep the direct API port private/loopback-only.
