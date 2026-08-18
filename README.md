@@ -161,7 +161,7 @@ once on first entry, so time-in-stage is measurable rather than estimated.
 | Partial payment | `POST /api/orders/:id/payments` with `amount` |
 | Multiple payment methods | Repeat payments with different `method` values |
 | Settlement | Full payment closes the check and releases the table |
-| **Table bill** | `GET /api/tables/:id/bill` |
+| **Table settlement** | `GET /api/tables/:id/settlement` |
 
 **Equal split reconciles to the paisa.** Naive division loses or invents money — 1740.20 split
 three ways is 580.0666…, and three rounded shares of 580.07 would collect 1740.21. Each share is
@@ -173,9 +173,32 @@ so there remains one payment code path. Shares are computed from the **outstandi
 split after a partial payment divides only what is left. Each guest may then settle their share
 with a different tender.
 
+**Table settlement** totals every check seated at a table, with a per-tender breakdown (refunds
+net off) and a `readyToClear` flag, so a host can see whether a party split across several checks
+still owes anything without opening each check individually.
+
 **`GET /api/tables/:id/bill`** aggregates every check on a table — which may be several after a
 split — reporting the combined total, paid, balance, per-check position and a tender breakdown, so
 a host can close the table confidently.
+| Operation | Endpoint |
+|---|---|
+| Split bill onto a second check | `POST /api/orders/:id/split` |
+| Pay a share of specific items | `POST /api/orders/:id/payments` with `items` |
+| **Equal split** | `POST /api/orders/:id/split-equal` with `ways` |
+| Partial payment / multiple methods | `POST /api/orders/:id/payments` with `amount` + `method` |
+| Check settlement | `GET /api/orders/:id/payment-summary` |
+| **Table settlement** | `GET /api/tables/:id/settlement` |
+
+**Equal split** divides the *outstanding balance* (so it still works after a deposit) into shares
+that sum **exactly** to the amount owed. Naive division strands money: Rs. 435.05 / 3 rounds to
+145.02, and three of those overshoot by a paisa, so the last guest's payment is rejected and the
+check is left open. The split is computed in integer paisa with the remainder distributed one
+paisa at a time, so the shares always reconcile. The endpoint is a **quote** — the till then takes
+each share as an ordinary payment, keeping one payment path.
+
+**Table settlement** totals every check seated at a table, with a per-tender breakdown (refunds
+net off) and a `readyToClear` flag, so a host can see whether a party split across several checks
+still owes anything without opening each one.
 
 ## Reservations (Phase 6C)
 

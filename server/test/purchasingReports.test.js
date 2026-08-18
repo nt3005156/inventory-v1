@@ -15,6 +15,8 @@ const EVENT_DAY = daysAgo(1);
 const BEFORE_EVENT = daysAgo(2);
 const DAY_TWO = daysAgo(6);
 const DAY_ONE = daysAgo(7);
+// Deliberately older than the reporting window, for the liability-history test.
+const OLD_INVOICE = daysAgo(20);
 
 let world;
 let supplier;
@@ -42,7 +44,7 @@ function report(query = {}, user = world.owner) {
   return request(`/api/reports/purchasing?${search}`, {token: tokenFor(user)});
 }
 
-async function createApprovedPo({qty = 10, unitPrice = 2, orderDate = '2026-08-10'} = {}) {
+async function createApprovedPo({qty = 10, unitPrice = 2, orderDate = DAY_ONE} = {}) {
   sequence += 1;
   const created = await request('/api/purchase-orders', {
     method: 'POST',
@@ -77,7 +79,7 @@ async function createInvoice(overrides = {}, branch = world.branchA) {
       branch: String(branch._id),
       supplier: String(supplier._id),
       invoiceNo: `REPORT-${sequence}`,
-      invoiceDate: '2026-08-01',
+      invoiceDate: OLD_INVOICE,
       subtotal: 100,
       ...overrides
     }
@@ -145,8 +147,9 @@ describe('purchasing report periods', () => {
     });
     assert.equal(returned.status, 201, returned.body?.message);
 
-    const canonical = new Date('2026-08-10T06:00:00.000Z');
-    const outsideCreatedAt = new Date('2026-08-12T06:00:00.000Z');
+    // Anchored to DAY_ONE so the window under test always contains them.
+    const canonical = new Date(`${DAY_ONE}T06:00:00.000Z`);
+    const outsideCreatedAt = new Date(`${DAY_TWO}T06:00:00.000Z`);
     const poId = new mongoose.Types.ObjectId(po._id);
     const receiptId = new mongoose.Types.ObjectId(received.body.receipt._id);
     const returnId = new mongoose.Types.ObjectId(returned.body.purchaseReturn._id);
@@ -237,7 +240,7 @@ describe('purchasing report financial history', () => {
   });
 
   it('reports backdated invoice voids as explicit period credits with historical as-of balances', async () => {
-    const invoice = await createInvoice({invoiceDate: '2026-08-10'});
+    const invoice = await createInvoice({invoiceDate: DAY_ONE});
     const voided = await request(`/api/supplier-invoices/${invoice._id}`, {
       method: 'PATCH', token: tokenFor(world.manager), body: {status: 'void', expectedVersion: invoice.__v}
     });

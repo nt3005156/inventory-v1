@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
-import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, reopenOrder, getTableHistory, MAX_SEATS} from '../services/tables.js';
+import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, reopenOrder, getTableHistory, getTableSettlement, MAX_SEATS} from '../services/tables.js';
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
 
@@ -157,6 +157,15 @@ r.post('/tables/:id/merge', auth(roles), async (req, res) => {
     fail(res, e);
   } finally {
     session.endSession();
+  }
+});
+
+// What the whole table owes across every check seated there.
+r.get('/tables/:id/settlement', auth(roles), async (req, res) => {
+  try {
+    res.json(await getTableSettlement({tableId: req.params.id, user: req.user}));
+  } catch (e) {
+    fail(res, e);
   }
 });
 

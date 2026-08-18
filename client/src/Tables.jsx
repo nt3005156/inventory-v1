@@ -432,6 +432,40 @@ export default function Tables({call, branches = [], user, token}) {
                           </button>
                         </div>
                       )}
+                      {canOperate && check.dueAmount > 0 && (
+                        <div className="table-ops equal-split">
+                          <select
+                            value={ops[check._id]?.ways || ''}
+                            onChange={async e => {
+                              const ways = Number(e.target.value);
+                              setOps(x => ({...x, [check._id]: {...x[check._id], ways: e.target.value, shares: null}}));
+                              if (!ways) return;
+                              try {
+                                const quote = await call(`/orders/${check._id}/split-equal`, {
+                                  method: 'POST', body: JSON.stringify({ways})
+                                });
+                                setOps(x => ({...x, [check._id]: {...x[check._id], ways: e.target.value, shares: quote.shares}}));
+                              } catch (err) { setError(err.message); }
+                            }}
+                          >
+                            <option value="">Split equally…</option>
+                            {[2, 3, 4, 5, 6, 8].map(n => <option key={n} value={n}>{n} ways</option>)}
+                          </select>
+                          {!!ops[check._id]?.shares?.length && (
+                            <span className="share-quote">
+                              {ops[check._id].shares.map((share, i) => (
+                                <button
+                                  key={i}
+                                  className="kds-go"
+                                  disabled={!!busy}
+                                  title={`Take share ${i + 1}`}
+                                  onClick={() => pay(check, share)}
+                                >{rs(share)}</button>
+                              ))}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {canOperate && ((check.items || []).length > 1 || (check.items || []).some(i => i.qty > 1)) ? (
                         <div className="table-split">
                           {(check.items || []).map(item => (
@@ -477,6 +511,29 @@ export default function Tables({call, branches = [], user, token}) {
                       </button>
                     ))}
                   </div>
+                  {canOperate && orders.length > 1 && (
+                    <div className="kds-actions">
+                      <button
+                        className="receive"
+                        disabled={!!busy}
+                        onClick={async () => {
+                          setBusy(table._id + 'settle');
+                          try {
+                            const view = await call(`/tables/${table._id}/settlement`);
+                            setOps(x => ({...x, [table._id]: {...x[table._id], settlement: view.summary}}));
+                          } catch (e) { setError(e.message); } finally { setBusy(''); }
+                        }}
+                      >{busy === table._id + 'settle' ? 'Loading…' : 'Settlement'}</button>
+                    </div>
+                  )}
+                  {ops[table._id]?.settlement && (
+                    <p className="table-meta settlement-line">
+                      {ops[table._id].settlement.checks} checks ·
+                      paid {rs(ops[table._id].settlement.paid)} ·
+                      due {rs(ops[table._id].settlement.due)}
+                      {ops[table._id].settlement.readyToClear ? ' · ready to clear' : ''}
+                    </p>
+                  )}
                   {canManage && (
                     <div className="kds-actions">
                       <button

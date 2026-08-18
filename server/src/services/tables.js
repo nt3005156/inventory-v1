@@ -604,3 +604,71 @@ export async function getTableHistory({tableId, user, from, to, limit = 100, ses
     }))
   };
 }
+
+
+/**
+ * What a whole table owes, across every check seated there.
+ *
+ * A party split onto several checks otherwise forces the host to open each one
+ * to see whether the table can be released.
+ */
+export async function getTableSettlement({tableId, user, session}) {
+  const {Order: OrderModel, Payment: PaymentModel} = await import('../models/operations.js');
+  const mongooseLib = (await import('mongoose')).default;
+  if (!mongooseLib.isValidObjectId(tableId)) throw httpError('Invalid table', 400);
+  const table = await RestaurantTable.findById(tableId).session(session || null);
+  if (!table) throw httpError('Table not found', 404);
+  await assertTenantBranchAccess(user, table.branch, {session});
+
+  const checks = await OrderModel.find({
+    table: table._id,
+    status: {$in: [...OPEN_ORDER_STATUSES, 'completed']}
+  }).sort({createdAt: 1}).session(session || null).lean();
+
+  const ids = checks.map(c => c._id);
+  const payments = ids.length
+    ? await PaymentModel.find({order: {$in: ids}}).session(session || null).lean()
+    : [];
+
+  const byOrder = new Map();
+  for (const payment of payments) {
+    const key = String(payment.order);
+    if (!byOrder.has(key)) byOrder.set(key, []);
+    byOrder.get(key).push(payment);
+  }
+
+  const byMethod = {};
+  for (const payment of payments) {
+    // Refund rows carry a negative amount and net off here.
+    const key = payment.method || 'cash';
+    byMethod[key] = money((byMethod[key] || 0) + Number(payment.amount));
+  }
+
+  const rows = checks.map(check => ({
+    id: check._id,
+    orderNo: check.orderNo,
+    status: check.status,
+    total: money(check.total),
+    paid: money(check.paidAmount),
+    due: money(check.dueAmount),
+    settled: money(check.dueAmount) <= 0,
+    payments: (byOrder.get(String(check._id)) || []).length,
+    seatedAt: check.createdAt
+  }));
+
+  const open = rows.filter(r => !r.settled);
+  return {
+    table: {id: table._id, name: table.name, area: table.area, seats: table.seats, status: table.status},
+    checks: rows,
+    summary: {
+      checks: rows.length,
+      openChecks: open.length,
+      total: money(rows.reduce((sum, r) => sum + r.total, 0)),
+      paid: money(rows.reduce((sum, r) => sum + r.paid, 0)),
+      due: money(rows.reduce((sum, r) => sum + r.due, 0)),
+      byMethod,
+      // The table can be turned over only when nothing is owed.
+      readyToClear: open.length === 0
+    }
+  };
+}

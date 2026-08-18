@@ -187,6 +187,9 @@ export function summarisePayments(order, payments = []) {
     taken,
     refunded,
     refundable: money(Math.max(0, taken - refunded)),
+    // Whether the check is square. Previously absent, so callers reading
+    // `settled` silently got undefined.
+    settled: money(order.dueAmount) <= 0,
     byMethod,
     count: payments.length
   };
