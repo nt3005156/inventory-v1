@@ -635,6 +635,78 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## Rider app (Phase 11)
+
+### What a rider sees
+
+A rider logging in gets the courier workspace instead of the staff shell
+(`RiderApp.jsx`), rendered straight after the login gate. The backend refuses
+them every operational endpoint regardless — this only stops a phone user
+staring at a menu where nothing works. Mobile-first: one job in focus, one
+large primary action, tap-to-call the customer.
+
+`GET /deliveries/mine/dashboard` returns identity, shift state, workload
+against capacity, the job in hand and today's delivered/failed counts —
+computed server-side from the caller's own token, because a client that
+assembled those figures itself could be pointed at another rider's data.
+
+### Security fix: the rider payload leaked margin data
+
+Phase 10's rider endpoints populated the order wholesale, which handed a
+courier `foodCost`, `recipeCost`, `packagingCost` and `inventoryRequirements`
+— per-item margins and recipe quantities. Phase 11 replaces this with a
+hand-built `riderDeliveryView()`: the rider now gets the address, the customer
+name and phone (needed at the door, and previously *missing*), what to collect,
+and item names with quantities so they can check the bag. Nothing else.
+
+A regression test asserts each leaked field never appears in either the list or
+the detail response.
+
+### Authentication
+
+`POST /api/auth/login` and `/auth/register` moved out of `index.js` into
+`routes/auth.js`. They were inline in the app file, so **no integration test
+could reach them** — rider login had zero coverage despite the role shipping in
+Phase 10. Behaviour is unchanged; the test harness now mounts the same router
+production does, and login is covered.
+
+Login answers identically for an unknown email and a wrong password, so the
+endpoint cannot be used to discover which accounts exist.
+
+### Rider boundaries (all tested)
+
+| Attempt | Result |
+|---|---|
+| Anonymous / invalid / expired JWT | `401` on every rider route, read and write |
+| Staff calling a rider-only route | `403` |
+| Rider calling any staff route | `403` |
+| Rider A reading or writing rider B's delivery | `404` — never `403`, which would confirm it exists |
+| Rider reading the unassigned pool | Empty; detail is `404` |
+| Rider from another restaurant | Empty board, `404` on our deliveries |
+| Forged `rider` id in the request body | Rejected; identity comes from the token only |
+| Rider cancelling a delivery | `403` — cancelling has money in it |
+| Rider editing their own capacity | `400`, strict schema |
+| Skipped, duplicate, completed or cancelled transition | `409`, database unchanged |
+
+### Realtime
+
+Riders join only their private `rider:<id>` room. Requesting a branch at
+handshake time is ignored, `join:branch` is refused, and a test publishes a
+branch-only `inventory:update` to prove no kitchen or stock traffic reaches a
+rider socket. Assignment, reassignment and status changes each push to the
+correct rider; a test asserts an unrelated rider hears nothing.
+
+The UI distinguishes connected / reconnecting / offline, and separates "your
+session expired" (re-login) from "the network blipped" (retry) — a rider on a
+bike loses signal constantly.
+
+### Availability
+
+`PATCH /deliveries/mine/availability` toggles shift state for the authenticated
+rider only. Now **audited** (`rider_available` / `rider_unavailable`) — it was
+persisted but not audited in Phase 10, so a rider going off shift mid-rush left
+no trail. A deactivated rider cannot put themselves back on shift.
+
 ## Addresses & delivery (Phase 10)
 
 ### The rider role

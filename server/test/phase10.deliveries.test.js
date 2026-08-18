@@ -500,7 +500,12 @@ describe('10 — rider authorisation', () => {
     const queue = await request('/api/deliveries/mine', {token: riderToken()});
     assert.equal(queue.status, 200);
     assert.equal(queue.body.length, 1);
-    assert.equal(String(queue.body[0].rider), String(rider._id));
+    // Phase 11 narrowed the rider payload to a hand-built view (it previously
+    // leaked recipe costs), so `rider` is no longer echoed back. The isolation
+    // guarantee is asserted against the returned delivery's identity instead,
+    // and confirmed in the database.
+    const returned = await Delivery.findById(queue.body[0]._id);
+    assert.equal(String(returned.rider), String(rider._id));
   });
 
   it('hides unassigned deliveries from every rider', async () => {

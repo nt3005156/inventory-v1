@@ -17,6 +17,7 @@ import MonthClose from './MonthClose.jsx';
 import Reservations from './Reservations.jsx';
 import Customers from './Customers.jsx';
 import Deliveries from './Deliveries.jsx';
+import RiderApp from './RiderApp.jsx';
 import Storefront from './Storefront.jsx';
 import './style.css';
 
@@ -78,6 +79,13 @@ function App() {
       setToken(x.token);
       setUser(x.user);
     }}/>;
+  }
+
+  // Phase 11: a rider gets the courier workspace instead of the staff shell.
+  // The backend refuses them every operational endpoint regardless; this stops
+  // a phone user staring at a navigation menu where nothing works.
+  if (user?.role === 'rider') {
+    return <RiderApp call={call} user={user} token={token} onLogout={logout}/>;
   }
 
   const nav = [

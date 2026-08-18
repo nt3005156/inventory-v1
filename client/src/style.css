@@ -219,3 +219,61 @@
 .dlv-rider-actions{display:flex;gap:6px}
 .dlv-rider-actions button{flex:1;padding:5px 8px;border:1px solid #d8dce3;background:#fff;border-radius:6px;cursor:pointer;font-size:12px}
 .dlv-rider-actions button:disabled{opacity:.4;cursor:not-allowed}
+
+/* ── Rider workspace (Phase 11) ──────────────────────────────────────────── */
+/* Mobile-first: this is used one-handed on a phone, so touch targets are
+   large and the layout is a single column at every width. */
+.rider{max-width:640px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:12px;font-size:15px}
+.rider-centre{min-height:70vh;display:flex;align-items:center;justify-content:center}
+.rider-panel{background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:24px;text-align:center;display:flex;flex-direction:column;gap:12px}
+.rider-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.rider-head>div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.rider-hello{font-weight:700;font-size:17px}
+.rider-live{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8a94a6}
+.rider-live.is-live{color:#1d6f36}
+.rider-live.is-reconnecting{color:#8a6116}
+.rider-signout{background:none;border:1px solid #d8dce3;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;white-space:nowrap}
+.rider-shift{background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:14px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.rider-shift>div{display:flex;flex-direction:column;gap:2px}
+.rider-muted{color:#8a94a6;font-size:13px}
+.rider-primary{background:#b8322f;color:#fff;border:none;border-radius:10px;padding:12px 18px;font-weight:600;font-size:15px;cursor:pointer}
+.rider-primary:disabled{opacity:.5;cursor:not-allowed}
+.rider-ghost{background:#fff;border:1px solid #d8dce3;border-radius:10px;padding:12px 18px;cursor:pointer;font-size:14px}
+.rider-ghost:disabled{opacity:.5;cursor:not-allowed}
+.rider-big{width:100%;padding:16px;font-size:16px}
+.rider-alert{padding:11px 14px;border-radius:10px;font-size:14px}
+.rider-error{background:#fdecec;color:#a12622;border:1px solid #f5c2c0}
+.rider-warn{background:#fdf4e3;color:#8a6116;border:1px solid #f0dcb0}
+.rider-ok{background:#eaf7ee;color:#1d6f36;border:1px solid #b9e3c6;cursor:pointer}
+.rider-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.rider-stat{background:#fff;border:1px solid #e6e8ec;border-radius:10px;padding:12px 8px;display:flex;flex-direction:column;align-items:center;gap:2px}
+.rider-stat-value{font-size:22px;font-weight:700;color:#1f2733}
+.rider-stat-label{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#8a94a6;text-align:center}
+.rider-tabs{display:flex;gap:6px}
+.rider-tabs button{flex:1;background:#fff;border:1px solid #e6e8ec;border-radius:10px;padding:11px;cursor:pointer;font-size:14px;color:#6b7280}
+.rider-tabs button.is-active{background:#fdf3f2;border-color:#b8322f;color:#b8322f;font-weight:600}
+.rider-empty{background:#fff;border:1px dashed #e6e8ec;border-radius:12px;padding:28px 16px;text-align:center;color:#8a94a6}
+.rider-job{background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:8px}
+.rider-job.is-out_for_delivery{border-left:4px solid #2c4a70}
+.rider-job.is-delivered{border-left:4px solid #1d6f36}
+.rider-job.is-failed{border-left:4px solid #a12622}
+.rider-job-head{background:none;border:none;padding:0;display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;width:100%;text-align:left;font-size:15px}
+.rider-job-head>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rider-chip{border-radius:999px;padding:2px 9px;font-size:11px;background:#eef1f6;color:#3f4a5a}
+.rider-chip.is-out_for_delivery,.rider-chip.is-picked_up{background:#e3ecf7;color:#2c4a70}
+.rider-chip.is-delivered{background:#eaf7ee;color:#1d6f36}
+.rider-chip.is-failed,.rider-chip.is-cancelled{background:#fdecec;color:#a12622}
+.rider-amount{font-weight:700;white-space:nowrap}
+.rider-address{margin:0;font-size:15px;line-height:1.4}
+.rider-note{margin:0;font-size:14px;color:#6b7280;font-style:italic}
+.rider-collect{margin:0;background:#fdf4e3;color:#8a6116;border-radius:8px;padding:8px 10px;font-size:14px;font-weight:600}
+.rider-detail{border-top:1px solid #f1f2f5;padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.rider-detail h4{margin:4px 0 0;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a94a6}
+.rider-dl{display:grid;grid-template-columns:auto 1fr;gap:5px 16px;margin:0;font-size:14px}
+.rider-dl dt{color:#6b7280}
+.rider-dl dd{margin:0;color:#1f2733}
+.rider-dl a{color:#b8322f;font-weight:600;text-decoration:none}
+.rider-items{margin:0;padding-left:18px;font-size:14px;color:#1f2733}
+.rider-failure{margin:0;color:#a12622;font-size:14px}
+.rider-actions{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+@media (min-width:520px){.rider-actions{flex-direction:row}.rider-actions .rider-big{flex:2}.rider-actions .rider-ghost{flex:1}}

@@ -21,6 +21,7 @@ import {
   listDeliveries,
   listRiderDeliveries,
   listRiders,
+  riderDashboard,
   riderHistory,
   setOwnAvailability,
   updateDeliveryStatus,
@@ -51,6 +52,15 @@ const DELIVERY_STATUSES = [
 
 // ── Rider self-service ───────────────────────────────────────────────────────
 // Declared first so 'mine' is never swallowed by the ':id' routes below.
+
+/** Rider home screen. Everything is derived from the token's own identity. */
+r.get('/deliveries/mine/dashboard', auth(['rider']), async (req, res) => {
+  try {
+    res.json(await riderDashboard({user: req.user}));
+  } catch (e) {
+    fail(res, e);
+  }
+});
 
 r.get('/deliveries/mine', auth(['rider']), async (req, res) => {
   try {

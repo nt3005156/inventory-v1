@@ -15,7 +15,7 @@
  */
 import mongoose from 'mongoose';
 import {Audit, User} from '../models/index.js';
-import {Branch, DELIVERY_TRANSITIONS, Delivery, Order} from '../models/operations.js';
+import {Branch, Customer, DELIVERY_TRANSITIONS, Delivery, Order} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 import {publishKitchenOrder, publishDeliveryEvent} from './realtime.js';
@@ -126,17 +126,84 @@ export async function updateRiderProfile({user, riderId, input}) {
   return rider;
 }
 
-/** A rider setting their own shift state. They may not change anything else. */
+/**
+ * A rider setting their own shift state. They may not change anything else.
+ *
+ * The rider identity comes from the verified token, never from the request
+ * body, so a rider cannot toggle somebody else's shift.
+ */
 export async function setOwnAvailability({user, available}) {
   const rider = await User.findOne({_id: user.id, role: 'rider'});
   if (!rider) throw httpError('Rider not found', 404);
   if (available && rider.rider?.active === false) {
     throw httpError('Your rider account is inactive. Contact your manager.', 403);
   }
+  const before = Boolean(rider.rider?.available);
   rider.rider = {...(rider.rider?.toObject?.() || rider.rider || {}), available: Boolean(available)};
   rider.markModified('rider');
   await rider.save();
+
+  // Going off shift mid-rush is an operational fact a manager may need to
+  // reconstruct later, so it is audited like any other state change.
+  await Audit.create({
+    entity: 'rider', entityId: rider._id, branch: rider.branch,
+    action: available ? 'rider_available' : 'rider_unavailable',
+    before: {available: before}, after: {available: Boolean(available)},
+    user: user.id
+  });
   return rider;
+}
+
+/**
+ * Everything the rider home screen needs, in one call.
+ *
+ * Computed server-side from the rider's own deliveries: a client that
+ * assembled these figures itself could be pointed at another rider's data.
+ */
+export async function riderDashboard({user}) {
+  const rider = await User.findById(user.id).select('name branch rider').lean();
+  if (!rider || rider.role === 'staff') throw httpError('Rider not found', 404);
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const [live, todayDelivered, todayFailed] = await Promise.all([
+    Delivery.find({rider: user.id, status: {$in: [...LIVE_DELIVERY_STATUSES]}})
+      .sort({createdAt: 1})
+      .populate('order', 'orderNo total type paymentMethod paidAmount dueAmount customer')
+      .lean(),
+    Delivery.countDocuments({rider: user.id, status: 'delivered', deliveredAt: {$gte: startOfDay}}),
+    Delivery.countDocuments({rider: user.id, status: 'failed', failedAt: {$gte: startOfDay}})
+  ]);
+
+  const customerIds = live.map(d => d.order?.customer).filter(Boolean);
+  const customers = customerIds.length
+    ? await Customer.find({_id: {$in: customerIds}}).select('name phone').lean()
+    : [];
+  const byId = new Map(customers.map(c => [String(c._id), c]));
+  const views = live.map(d => riderDeliveryView(d, {
+    customer: d.order?.customer ? byId.get(String(d.order.customer)) : null
+  }));
+
+  const maxConcurrent = Number(rider.rider?.maxConcurrent || 3);
+  // The job in hand: whichever live delivery is furthest along.
+  const rank = {out_for_delivery: 0, picked_up: 1, assigned: 2, pending: 3};
+  const current = [...views].sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9))[0] || null;
+
+  return {
+    rider: {
+      name: rider.name,
+      active: rider.rider?.active !== false,
+      available: Boolean(rider.rider?.available),
+      vehicle: rider.rider?.vehicle || 'motorcycle'
+    },
+    activeDelivery: current,
+    workload: views.length,
+    capacity: maxConcurrent,
+    atCapacity: views.length >= maxConcurrent,
+    today: {delivered: todayDelivered, failed: todayFailed},
+    deliveries: views
+  };
 }
 
 // ── Dispatch ─────────────────────────────────────────────────────────────────
@@ -424,22 +491,94 @@ export async function updateDeliveryStatus({user, deliveryId, status, reason, pr
 
 // ── Reads ────────────────────────────────────────────────────────────────────
 
+/**
+ * The exact shape a rider is allowed to see.
+ *
+ * Built by hand rather than by returning the document, because a rider is an
+ * external-facing courier and the delivery/order graph carries information
+ * that is none of their business: per-item `foodCost` and `recipeCost` are
+ * margin data, and `inventoryRequirements` describes recipes. Populating the
+ * order wholesale leaked all three.
+ *
+ * They get exactly what is needed to complete the job: where to go, who to
+ * call, what to collect, and whether money is owed on the doorstep.
+ */
+function riderDeliveryView(delivery, {customer} = {}) {
+  const order = delivery.order && typeof delivery.order === 'object' ? delivery.order : null;
+  const due = Number(order?.dueAmount ?? 0);
+  const method = String(order?.paymentMethod || '').toLowerCase();
+
+  return {
+    _id: delivery._id,
+    status: delivery.status,
+    address: delivery.address,
+    // Contact details for THIS delivery only. A rider needs to reach the
+    // customer at the door; they never get the CRM profile behind it.
+    customerName: customer?.name || null,
+    customerPhone: delivery.phone || customer?.phone || null,
+    instructions: delivery.instructions || null,
+    estimatedMinutes: delivery.estimatedMinutes || 0,
+    dueAt: delivery.dueAt || null,
+    assignedAt: delivery.assignedAt || null,
+    pickedUpAt: delivery.pickedUpAt || null,
+    dispatchedAt: delivery.dispatchedAt || null,
+    deliveredAt: delivery.deliveredAt || null,
+    failedAt: delivery.failedAt || null,
+    failureReason: delivery.failureReason || null,
+    createdAt: delivery.createdAt,
+    order: order
+      ? {
+        orderNo: order.orderNo,
+        type: order.type,
+        total: order.total,
+        // Whether to collect cash, and how much. The only money fact a
+        // courier needs.
+        paymentMethod: order.paymentMethod || null,
+        collectOnDelivery: due > 0,
+        amountDue: due,
+        itemCount: Array.isArray(order.items)
+          ? order.items.reduce((sum, i) => sum + Number(i.qty || 0), 0)
+          : undefined,
+        // Names and quantities only, so the rider can check the bag. No
+        // costs, no recipes, no modifiers.
+        items: Array.isArray(order.items)
+          ? order.items.map(i => ({name: i.name, qty: i.qty}))
+          : undefined
+      }
+      : null
+  };
+}
+
 /** A rider's own queue. Never exposes anything not assigned to them. */
 export async function listRiderDeliveries({user, includeCompleted = false}) {
   const filter = {rider: user.id};
   if (!includeCompleted) filter.status = {$in: [...LIVE_DELIVERY_STATUSES]};
-  return Delivery.find(filter)
+  const deliveries = await Delivery.find(filter)
     .sort({createdAt: 1})
     .limit(100)
-    .populate('order', 'orderNo total type paymentMethod paidAmount dueAmount')
+    .populate('order', 'orderNo total type paymentMethod paidAmount dueAmount customer')
     .lean();
+
+  const customerIds = deliveries.map(d => d.order?.customer).filter(Boolean);
+  const customers = customerIds.length
+    ? await Customer.find({_id: {$in: customerIds}}).select('name phone').lean()
+    : [];
+  const byId = new Map(customers.map(c => [String(c._id), c]));
+
+  return deliveries.map(d => riderDeliveryView(d, {
+    customer: d.order?.customer ? byId.get(String(d.order.customer)) : null
+  }));
 }
 
 export async function getDeliveryForRider({user, deliveryId}) {
   const delivery = await riderDeliveryOrFail(user, deliveryId);
-  return Delivery.findById(delivery._id)
-    .populate('order', 'orderNo total type paymentMethod paidAmount dueAmount items')
+  const full = await Delivery.findById(delivery._id)
+    .populate('order', 'orderNo total type paymentMethod paidAmount dueAmount items customer')
     .lean();
+  const customer = full.order?.customer
+    ? await Customer.findById(full.order.customer).select('name phone').lean()
+    : null;
+  return riderDeliveryView(full, {customer});
 }
 
 /** Staff view of a branch's deliveries. */

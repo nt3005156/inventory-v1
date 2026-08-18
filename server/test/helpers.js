@@ -9,6 +9,7 @@ import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
 import customersRouter from '../src/routes/customers.js';
 import deliveriesRouter from '../src/routes/deliveries.js';
+import authRouter from '../src/routes/auth.js';
 import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
@@ -43,6 +44,8 @@ export async function startTestApp() {
   if (!server) {
     const app = express();
     app.use(express.json());
+    // Mounted so login is exercised by tests, exactly as production does it.
+    app.use('/api', authRouter);
     app.use('/api', customersRouter);
     app.use('/api', deliveriesRouter);
     app.use('/api', operations);
