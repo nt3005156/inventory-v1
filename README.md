@@ -635,6 +635,60 @@ off the host. See **Deployment hardening (Phase 8A.6)** below.
 
 During shutdown, the API stops realtime delivery, closes the HTTP server, and disconnects MongoDB. Docker allows 15 seconds before forced termination.
 
+## Purchasing & inventory audit (Phase 13)
+
+An adversarial security and data-integrity audit. Purchasing and inventory
+were found **largely correct**; the audit verified the guarantees against the
+live API rather than assuming them, and pinned each in a regression suite.
+
+### Verified working, now pinned
+
+| Guarantee | Evidence |
+|---|---|
+| Over-receiving | 500 against a 100 order → 409, stock untouched, no ledger row |
+| Over-receiving the remainder | 60 with 40 outstanding → 409 |
+| Receiving idempotency | `Idempotency-Key` is **mandatory**; replay → 200, banked once |
+| Damaged goods | Excluded from sellable stock (20 received, 5 damaged → +15) |
+| Over-return / replay | 200 of 100 → 409; replayed return deducts once |
+| Return optimistic locking | Stale `expectedVersion` → 409 |
+| Overpayment | 10,000 invoice → 3,000 then 7,000 → balance 0; further payment 409 |
+| VAT arithmetic | Subtotal/VAT/total mismatch → 400 |
+| Negative stock | Refused atomically; **no ledger row written** |
+| Concurrency | 3 parallel 60% deductions → at most one wins, never negative |
+| Tenant isolation | Cross-restaurant PO, receive, return, adjust, report all refused |
+| Ledger completeness | Every row carries prev/change/new, user, reference, idempotency key, and `previous + change === new` |
+
+### Two defects found and fixed
+
+**1. Internal error disclosure.** `fail()` in `routes/purchasing.js` returned
+`e.message` verbatim. For a ZodError that is the serialised issue array — a
+**607-character** dump of schema structure, expected types and field paths —
+and for an unexpected fault, the raw exception text. Now sanitised to ~28
+characters. Deliberate operator messages (`custom` issues, unrecognised-key
+names, and all 4xx business refusals) are preserved, because a sanitised
+error must not become a useless one.
+
+**2. Mass assignment.** Purchase order schemas were not `.strict()`, so
+`status`, `approvedBy`, `restaurant`, `total`, `poNo` and misspelled fields
+were silently dropped. **Not exploitable** — every protected value is
+server-derived and the injections were verifiably ignored — but silent
+acceptance hides typos and means a future field could quietly become
+client-writable. Now rejected outright.
+
+### Negative stock is defended twice
+
+Mutation testing showed that removing the ledger's `after < 0` guard did *not*
+produce negative stock: the FEFO batch allocator refuses independently.
+Removing **both** does break it, and a test now pins that. This is genuine
+defence in depth, confirmed rather than assumed.
+
+### Not changed
+
+No transactions were added — receiving, returns, payments and adjustments
+already run inside `withTransaction` with idempotency keys, verified by the
+existing rollback tests. No indexes were added: every collection already
+carries tenant-prefixed compound indexes matching its real query patterns.
+
 ## POS modifier catalog integrity (Phase 11A)
 
 The modifier **engine** shipped in Phase 4B — selection validation,

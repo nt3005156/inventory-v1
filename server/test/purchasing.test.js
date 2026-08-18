@@ -48,7 +48,6 @@ async function createPo(orderedQty = 1000, extras = {}) {
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
       items: [{ingredient: String(world.ingredient._id), orderedQty, unit: 'g', unitPrice: 0.05}],
-      total: orderedQty * 0.05,
       ...body
     }
   });
@@ -398,7 +397,6 @@ describe('GET /api/reports/purchasing', () => {
         branch: String(world.branchB._id),
         supplier: String(other._id),
         items: [{ingredient: String(world.ingredient._id), orderedQty: 50, unit: 'g', unitPrice: 1}],
-        total: 50
       }
     });
 
@@ -586,11 +584,15 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
         supplier: String(supplier._id),
         status: 'approved',
         items: [{ingredient: String(world.ingredient._id), orderedQty: 10, unit: 'g', unitPrice: 1}],
-        total: 10
       }
     });
-    assert.equal(forced.status, 201);
-    assert.equal(forced.body.status, 'draft');
+    // Phase 13: PO schemas are .strict(), so an injected protected field is
+    // now rejected outright. Previously it was accepted and silently ignored
+    // (the response was 201 with status still 'draft'), which was safe but
+    // hid the attempt. Refusing is strictly better; the guarantee that a PO
+    // can never be born approved is asserted either way.
+    assert.equal(forced.status, 400, 'an injected status must be refused');
+    assert.match(forced.body.message, /Unrecognized field|Invalid/i);
 
     const pending = await patchPoStatus(po.body._id, 'pending', {notes: 'Weekly stock request'});
     assert.equal(pending.status, 200, pending.body?.message);
@@ -692,7 +694,6 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
         branch: String(world.branchB._id),
         supplier: String(supplier._id),
         items: [{ingredient: String(world.ingredient._id), orderedQty: 10, unit: 'g', unitPrice: 1}],
-        total: 10
       }
     });
     assert.equal(other.status, 201, other.body?.message);
@@ -705,7 +706,6 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
         branch: String(world.branchB._id),
         supplier: String(supplier._id),
         items: [{ingredient: String(world.ingredient._id), orderedQty: 5, unit: 'g', unitPrice: 1}],
-        total: 5
       }
     })).status, 403);
   });

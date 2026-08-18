@@ -91,7 +91,6 @@ function createDraftPo({idempotencyKey, branch = world.branchA._id, user = world
       branch: String(branch),
       supplier: String(supplier._id),
       items: [{ingredient: String(world.ingredient._id), orderedQty: 400, unit: 'g', unitPrice: 0.05}],
-      total: 20
     }
   });
 }
@@ -231,7 +230,6 @@ describe('socket purchasing events', () => {
         body: {
           supplier: String(supplier._id),
           items: [{ingredient: String(world.ingredient._id), orderedQty: 500, unit: 'g', unitPrice: 0.05}],
-          total: 25,
           notes: 'Realtime edit',
           expectedVersion: created.body.__v
         }

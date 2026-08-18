@@ -379,8 +379,10 @@ describe('catalog-authoritative purchase orders', () => {
           orderedQty: 1,
           unitPrice: 0.000001,
           unit: 'kg'
-        }],
-        total: 0.01
+        }]
+        // Phase 13: a client-supplied `total` is now refused outright rather
+        // than ignored. The assertions below still prove the server derives
+        // every figure from the catalog, which is this test's real point.
       }
     });
     assert.equal(created.status, 201, created.body?.message);

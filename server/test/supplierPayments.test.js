@@ -299,7 +299,9 @@ describe('POST /api/supplier-invoices/:id/payments', () => {
       Audit.create = originalCreate;
     }
     assert.equal(response.status, 500, JSON.stringify(response.body));
-    assert.match(response.body.message, /forced payment audit failure/);
+    // Phase 13: the internal fault text is no longer returned to the
+    // client; the rollback below is the guarantee under test.
+    assert.equal(response.body.message, 'Server error');
     assert.equal(await SupplierPayment.countDocuments({invoice: invoice._id}), 0);
     assert.equal(await SupplierPaymentCounter.countDocuments(), 0);
     assert.equal(await Audit.countDocuments({entity: 'supplier_payment'}), 0);
@@ -401,7 +403,9 @@ describe('POST /api/supplier-payments/:id/reverse', () => {
       Audit.create = originalCreate;
     }
     assert.equal(response.status, 500, JSON.stringify(response.body));
-    assert.match(response.body.message, /forced reversal audit failure/);
+    // Phase 13: the internal fault text is no longer returned to the
+    // client; the rollback below is the guarantee under test.
+    assert.equal(response.body.message, 'Server error');
     const payment = await SupplierPayment.findById(posted.body.payment._id)
       .select('+reversalIdempotencyKey +reversalRequestHash').lean();
     assert.equal(payment.status, 'posted');

@@ -49,11 +49,53 @@ import {publishPurchasingEvent, publishInventoryEvent} from '../services/realtim
 import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
 
 const r = Router();
+/**
+ * Phase 13: sanitise purchasing errors.
+ *
+ * This previously returned `e.message` verbatim. For a ZodError that is the
+ * serialised issue array -- a ~600 character dump of internal schema
+ * structure, expected types and field paths -- and for an unexpected fault it
+ * is the raw exception text, which can carry driver or query detail. Neither
+ * belongs in an HTTP response on endpoints that move money and stock.
+ *
+ * Deliberate 4xx messages authored in the services are still passed through:
+ * "Cannot receive more than the outstanding quantity" is exactly what an
+ * operator needs to see.
+ */
 const fail = (res, e) => {
   const status = e?.status || (e?.name === 'ZodError' ? 400 : 500);
-  return res.status(status).json({message: e?.message || 'Request failed'});
+  let message = e?.message || 'Request failed';
+
+  if (e?.name === 'ZodError' || /^\[\s*\{/.test(String(message))) {
+    const issue = Array.isArray(e?.issues) ? e.issues[0] : null;
+    // A `custom` issue carries a message authored in the schema for the
+    // operator ("Damage notes are required when the reason is other"). Those
+    // are useful and safe, so they survive. Everything else is a structural
+    // complaint whose wording exposes internal types and paths, and is
+    // reduced to the offending field name.
+    if (issue?.code === 'custom' && issue.message) {
+      message = issue.message;
+    } else if (issue?.code === 'unrecognized_keys') {
+      // Naming the rejected key is what makes a strict-schema refusal
+      // actionable, and the key came from the caller so it discloses nothing.
+      const keys = (issue.keys || []).join(', ');
+      message = keys ? `Unrecognized field: ${keys}` : 'Unrecognized field in request';
+    } else {
+      const field = issue?.path?.length ? issue.path.join('.') : null;
+      message = field ? `Invalid ${field}` : 'Some details are missing or invalid';
+    }
+  } else if (e?.name === 'MongoServerError' || e?.name === 'ValidationError' || e?.name === 'CastError') {
+    message = 'We could not process that request';
+  } else if (status >= 500) {
+    message = 'Server error';
+  }
+  return res.status(status).json({message: String(message).slice(0, 300)});
 };
 
+// Phase 13: .strict() so a client cannot post protected or misspelled fields.
+// The server already derived every total, status and audit stamp itself and
+// ignored injected values, but silently accepting them hides typos and means
+// a future field addition could quietly become client-writable.
 const poLineSchema = z.object({
   ingredient: z.string(),
   catalogItem: z.string().optional(),
@@ -63,7 +105,7 @@ const poLineSchema = z.object({
   unitPrice: z.number().positive().optional(),
   priceIncludesVat: z.boolean().optional(),
   vatRate: z.number().min(0).max(100).optional()
-});
+}).strict();
 const poCreateSchema = z.object({
   branch: z.string(),
   supplier: z.string(),
@@ -72,7 +114,7 @@ const poCreateSchema = z.object({
   expectedDeliveryDate: z.string().nullable().optional(),
   deliveryAddress: z.string().trim().max(500).optional(),
   notes: z.string().trim().max(1000).optional()
-});
+}).strict();
 const poUpdateSchema = z.object({
   supplier: z.string(),
   items: z.array(poLineSchema).min(1).max(100),
@@ -80,7 +122,7 @@ const poUpdateSchema = z.object({
   deliveryAddress: z.string().trim().max(500).optional(),
   notes: z.string().trim().max(1000).optional(),
   expectedVersion: z.number().int().nonnegative()
-});
+}).strict();
 const reportDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Report dates must use YYYY-MM-DD');
 const purchasingReportQuerySchema = z.object({
   branch: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid branch').optional(),

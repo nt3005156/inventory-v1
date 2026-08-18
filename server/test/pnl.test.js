@@ -28,8 +28,9 @@ async function createApprovedPo(orderedQty = 1000) {
     body: {
       branch: String(world.branchA._id),
       supplier: String(supplier._id),
-      items: [{ingredient: String(world.ingredient._id), orderedQty, unit: 'g', unitPrice: 0.05}],
-      total: orderedQty * 0.05
+      // Phase 13: PO schemas are .strict(); the server derives every total,
+      // so a client-supplied `total` is now refused rather than ignored.
+      items: [{ingredient: String(world.ingredient._id), orderedQty, unit: 'g', unitPrice: 0.05}]
     }
   });
   assert.equal(created.status, 201, created.body?.message);

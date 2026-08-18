@@ -324,7 +324,9 @@ describe('POST /api/supplier-invoices', () => {
       Audit.create = originalCreate;
     }
     assert.equal(response.status, 500, JSON.stringify(response.body));
-    assert.match(response.body.message, /forced audit failure/);
+    // Phase 13: the internal fault text is no longer returned to the
+    // client; the rollback below is the guarantee under test.
+    assert.equal(response.body.message, 'Server error');
     assert.equal(await SupplierInvoice.countDocuments({invoiceNoNormalized: 'ROLLBACK-1'}), 0);
   });
 
