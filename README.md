@@ -689,6 +689,55 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## POS split payments (11F)
+
+Multiple tenders, partial payment, running balance, overpayment refusal and
+the refund rules shipped in Phase 4D. 11F audited them against the running API
+and fixed three gaps.
+
+### Verified working, now pinned
+
+One bill split across cash + card + eSewa settles exactly, the balance falls
+correctly at each step, and the order only completes when the due amount
+reaches zero. Overpayment, negative and zero amounts are refused with nothing
+banked. Over-refunding is refused; a partial refund leaves the sale
+`completed`, a full one moves it to `refunded`. Refunds are supervisor-only.
+
+### Three defects fixed
+
+**1. A double-clicked payment banked twice.** Goods receiving and supplier
+payments both require an `Idempotency-Key`; the customer till — the one a
+cashier actually hammers on a slow connection — ignored it. Payments now
+accept a key, a replay returns `200` with the original payment, and a unique
+partial index on `{order, idempotencyKey}` enforces it at the database.
+
+**2. A retried refund paid the guest back twice.** Refunds now honour the same
+key. The index is scoped to `status: 'paid'` because one refund may legitimately
+split across several original tenders and write several rows under one key.
+
+**3. There was no way to reverse a payment taken by mistake.** The only
+correction was a refund, which misstates a till error as money returned to a
+customer.
+
+### Reversal vs refund
+
+| | Refund | Reversal |
+|---|---|---|
+| Meaning | Money genuinely returned to a guest | A till **mistake** (wrong tender/amount) |
+| Record | Stays on the books | Original row kept and marked `reversed` |
+| Effect | `refundAmount` rises | Balance reopens, correct tender can be taken |
+| Who | Owner or manager | **Owner only** |
+
+`POST /api/payments/:id/reverse` is deliberately narrow: it requires a reason,
+refuses a second attempt, and refuses any tender that has been fully or
+partly refunded — that amount would be ambiguous. Every reversal is audited.
+
+### Note
+
+The `Payment` reversal fields were initially added with `schema.add()` after
+the model had compiled. `status` persisted but `reversedAt` silently did not,
+so a double reversal succeeded. Fields must be declared in the schema literal.
+
 ## POS coupons (11E)
 
 The coupon engine shipped in Phase 4C and implements all ten requirements:

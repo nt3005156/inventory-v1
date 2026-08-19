@@ -89,7 +89,7 @@ export function allocateRefund(payments, amount) {
  * a partial refund leaves it completed with a running refundAmount so the till
  * can still see what was settled.
  */
-export async function refundOrder({orderId, amount, reason, user, session}) {
+export async function refundOrder({orderId, amount, reason, user, session, idempotencyKey}) {
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
   await assertTenantBranchAccess(user, order.branch, {session});
@@ -108,6 +108,17 @@ export async function refundOrder({orderId, amount, reason, user, session}) {
   if (!(target > 0)) throw httpError('Refund amount must be greater than zero', 400);
   if (target > refundable) throw httpError('Refund exceeds the amount paid on this order', 400);
 
+  // 11F: a replayed refund key returns the original rows instead of refunding
+  // again. Without this a retried request paid the guest back twice.
+  const key = String(idempotencyKey || '').trim();
+  if (key) {
+    const existing = await Payment.find({order: order._id, idempotencyKey: key})
+      .session(session || null);
+    if (existing.length) {
+      return {order, refunds: existing, replayed: true};
+    }
+  }
+
   const allocations = allocateRefund(payments, target);
   const note = clean(reason);
 
@@ -120,7 +131,8 @@ export async function refundOrder({orderId, amount, reason, user, session}) {
       status: 'refunded',
       refundOf: allocation.payment._id,
       reason: note || undefined,
-      cashier: user.id
+      cashier: user.id,
+      ...(key ? {idempotencyKey: key} : {})
     }], {session: session || undefined});
     created.push(row);
     // Mark the original as refunded only once it is fully reversed.
@@ -172,6 +184,71 @@ function refundedAgainst(payments, paymentId) {
 }
 
 /** Payment summary for an order: what was taken, by which tender, and what is left. */
+/**
+ * 11F: reverse a payment that should never have been recorded.
+ *
+ * Distinct from a refund. A refund is money genuinely returned to a guest and
+ * must remain on the record for reconciliation. A reversal corrects a till
+ * MISTAKE — wrong tender, wrong amount, wrong order — and puts the balance
+ * back so the correct payment can be taken.
+ *
+ * Deliberately narrow: owners only, never a payment that has already been
+ * refunded, and never on a settled-and-closed order that has moved on. The
+ * original row is kept and marked, so the correction is auditable rather than
+ * erased.
+ */
+export async function reversePayment({paymentId, reason, user, session}) {
+  const note = clean(reason);
+  if (note.length < 3) throw httpError('A reason is required to reverse a payment', 400);
+
+  const payment = await Payment.findById(paymentId).session(session || null);
+  if (!payment) throw httpError('Payment not found', 404);
+  if (payment.amount < 0 || payment.refundOf) {
+    throw httpError('A refund row cannot be reversed', 409);
+  }
+  if (payment.reversedAt) throw httpError('This payment is already reversed', 409);
+  if (payment.status === 'refunded') {
+    throw httpError('A refunded payment cannot be reversed; it was money genuinely returned', 409);
+  }
+
+  const order = await Order.findById(payment.order).session(session || null);
+  if (!order) throw httpError('Order not found', 404);
+  await assertTenantBranchAccess(user, order.branch, {session});
+
+  // Anything already given back against this tender makes a reversal
+  // ambiguous, so it is refused rather than guessed at.
+  const siblings = await Payment.find({order: order._id}).session(session || null);
+  if (refundedAgainst(siblings, payment._id) > 0) {
+    throw httpError('This payment has been partly refunded and cannot be reversed', 409);
+  }
+
+  payment.reversedAt = new Date();
+  payment.reversedBy = user.id;
+  payment.reversalReason = note;
+  payment.status = 'reversed';
+  await payment.save({session: session || undefined});
+
+  const amount = money(payment.amount);
+  order.paidAmount = money(Math.max(0, Number(order.paidAmount || 0) - amount));
+  order.dueAmount = money(Math.max(0, Number(order.total || 0) - Number(order.paidAmount)));
+  // The bill is open again, so it must not still read as settled.
+  if (order.dueAmount > 0 && order.status === 'completed') {
+    order.status = 'confirmed';
+    order.completedAt = null;
+  }
+  await order.save({session: session || undefined});
+
+  await Audit.create([{
+    entity: 'payment', entityId: payment._id, branch: order.branch,
+    action: 'payment_reversed',
+    before: {amount, method: payment.method, status: 'paid'},
+    after: {reason: note, dueAmount: order.dueAmount},
+    user: user.id
+  }], {session: session || undefined});
+
+  return {payment, order};
+}
+
 export function summarisePayments(order, payments = []) {
   const byMethod = {};
   for (const payment of payments) {

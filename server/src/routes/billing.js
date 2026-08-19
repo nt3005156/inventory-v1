@@ -5,7 +5,7 @@ import {auth} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder, quoteEqualSplit, buildTableBill} from '../services/billing.js';
-import {refundOrder, summarisePayments} from '../services/refunds.js';
+import {refundOrder, reversePayment, summarisePayments} from '../services/refunds.js';
 import {refreshCustomerStatsSafe} from '../services/customers.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
@@ -66,7 +66,8 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
         transactionId: body.transactionId,
         items: body.items,
         user: req.user,
-        session
+        session,
+        idempotencyKey: req.headers['idempotency-key']
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
@@ -74,7 +75,7 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
     // Phase 9: CRM rollups refresh after the money is committed, never inside
     // the transaction — a reporting figure must not be able to fail a sale.
     await refreshCustomerStatsSafe(result.order?.customer);
-    res.status(201).json(result);
+    res.status(result.replayed ? 200 : 201).json(result);
   } catch (e) {
     fail(res, e);
   } finally {
@@ -94,7 +95,8 @@ r.post('/orders/:id/refunds', auth(['owner', 'manager']), async (req, res) => {
         amount: body.amount,
         reason: body.reason,
         user: req.user,
-        session
+        session,
+        idempotencyKey: req.headers['idempotency-key']
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
@@ -104,7 +106,35 @@ r.post('/orders/:id/refunds', auth(['owner', 'manager']), async (req, res) => {
     // A refund changes lifetime spend, so the profile must not keep showing
     // revenue the restaurant gave back.
     await refreshCustomerStatsSafe(result.order?.customer);
-    res.status(201).json(result);
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (e) {
+    fail(res, e);
+  } finally {
+    session.endSession();
+  }
+});
+
+/**
+ * 11F: reverse a payment taken by mistake (wrong tender, wrong amount).
+ *
+ * Owner-only, and deliberately distinct from a refund: a refund is money
+ * genuinely returned to a guest and stays on the record, whereas a reversal
+ * corrects a till error and reopens the balance. The original row is kept and
+ * marked, never deleted.
+ */
+r.post('/payments/:id/reverse', auth(['owner']), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const body = z.object({reason: z.string().trim().min(3).max(300)}).strict().parse(req.body || {});
+    let result;
+    await session.withTransaction(async () => {
+      result = await reversePayment({
+        paymentId: req.params.id, reason: body.reason, user: req.user, session
+      });
+    });
+    await publishKitchenOrder(result.order, 'kitchen:status');
+    await refreshCustomerStatsSafe(result.order?.customer);
+    res.json(result);
   } catch (e) {
     fail(res, e);
   } finally {

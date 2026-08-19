@@ -410,7 +410,35 @@ Order.schema.index({branch:1,completedAt:1},{name:'order_branch_completed',spars
 // Phase 8A.5 — one public order per idempotency key. Enforced by the database
 // so a double-click cannot win a race between two application-level checks.
 Order.schema.index({publicRequestKey:1},{unique:true,name:'order_public_request_key',partialFilterExpression:{publicRequestKey:{$type:'string'}}});
-export const Payment=model('Payment',new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'}},{timestamps:true}));
+/**
+ * 11F: order payments carry an idempotency key.
+ *
+ * A double-clicked "Pay" button banked the amount twice — verified against the
+ * running API before this was added. Supplier payments and goods receiving
+ * already required a key; customer payments did not, which is the path a
+ * cashier actually hammers on a slow connection.
+ *
+ * `reversedAt`/`reversalReason` support reversing a MISTAKE (wrong tender,
+ * wrong amount) as distinct from a refund, which is money genuinely returned
+ * to a guest and must stay on the record.
+ */
+export const Payment=model('Payment',new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded','reversed'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'},
+  // 11F: one payment per idempotency key per order, so a double-clicked
+  // "Pay" cannot bank the amount twice.
+  idempotencyKey:{type:String,trim:true,maxlength:200,select:false},
+  // A reversal corrects a till MISTAKE (wrong tender/amount) and reopens the
+  // balance. Distinct from a refund, which is money genuinely returned and
+  // must stay on the record.
+  reversedAt:{type:Date,default:null},
+  reversedBy:{...oid,ref:'User',default:null},
+  reversalReason:{type:String,trim:true,maxlength:300}},{timestamps:true}));
+// One payment per key per order. Partial so historical rows without a key are
+// not forced into the constraint.
+// A PAYMENT is one row per key, so the pair is unique. A REFUND may split
+// across several original tenders and therefore writes several rows under one
+// key, so the constraint is scoped to non-refund rows; refund replay is
+// handled by the lookup in refundOrder().
+Payment.schema.index({order:1,idempotencyKey:1},{unique:true,name:'payment_order_idempotency',partialFilterExpression:{idempotencyKey:{$type:'string'},status:'paid'}});
 const purchaseOrderLineSchema=new Schema({
   ingredient:{...oid,ref:'Ingredient',required:true,immutable:true},
   catalogItem:{...oid,ref:'SupplierIngredient',immutable:true},

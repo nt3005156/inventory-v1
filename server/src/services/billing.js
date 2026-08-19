@@ -84,7 +84,7 @@ async function loadOpenOrder(orderId, user, session) {
   return order;
 }
 
-export async function applyPayment({orderId, amount, method, transactionId, items, user, session}) {
+export async function applyPayment({orderId, amount, method, transactionId, items, user, session, idempotencyKey}) {
   const order = await loadOpenOrder(orderId, user, session);
   if (CLOSED.includes(order.status) && Number(order.dueAmount || 0) <= 0) {
     throw httpError('Order is already closed', 409);
@@ -98,14 +98,37 @@ export async function applyPayment({orderId, amount, method, transactionId, item
   if (!(payAmount > 0)) throw httpError('Payment amount is required', 400);
   const due = money(order.dueAmount);
   if (payAmount > due) throw httpError('Payment exceeds due amount', 400);
-  const payment = (await Payment.create([{
-    order: order._id,
-    amount: payAmount,
-    method,
-    transactionId,
-    cashier: user.id,
-    status: 'paid'
-  }], {session: session || undefined}))[0];
+  // 11F: a replayed key returns the original payment rather than banking a
+  // second one. A cashier double-clicking "Pay" on a slow connection took the
+  // money twice before this existed.
+  const key = String(idempotencyKey || '').trim();
+  if (key) {
+    const existing = await Payment.findOne({order: order._id, idempotencyKey: key})
+      .session(session || null);
+    if (existing) return {payment: existing, order, replayed: true};
+  }
+
+  let payment;
+  try {
+    payment = (await Payment.create([{
+      order: order._id,
+      amount: payAmount,
+      method,
+      transactionId,
+      cashier: user.id,
+      status: 'paid',
+      ...(key ? {idempotencyKey: key} : {})
+    }], {session: session || undefined}))[0];
+  } catch (error) {
+    // Two concurrent requests with the same key: the unique index refuses the
+    // loser, whose correct answer is the winner's payment.
+    if (error?.code === 11000 && key) {
+      const winner = await Payment.findOne({order: order._id, idempotencyKey: key})
+        .session(session || null);
+      if (winner) return {payment: winner, order, replayed: true};
+    }
+    throw error;
+  }
   order.paidAmount = money(Number(order.paidAmount || 0) + payAmount);
   order.dueAmount = money(Math.max(0, Number(order.total || 0) - order.paidAmount));
   const justClosed = order.dueAmount <= 0;
