@@ -43,8 +43,13 @@ function pay(orderId, body, token = staff()) {
   return request(`/api/orders/${orderId}/payments`, {method: 'POST', token, body});
 }
 
+// Phase 12 made a reason mandatory on every refund, so cases that are not
+// about the reason itself supply a default one. The rule is pinned directly in
+// phase12.refunds.financial.controls.test.js.
 function refund(orderId, body = {}, token = manager()) {
-  return request(`/api/orders/${orderId}/refunds`, {method: 'POST', token, body});
+  return request(`/api/orders/${orderId}/refunds`, {
+    method: 'POST', token, body: {reason: 'Test refund', ...body}
+  });
 }
 
 describe('Phase 4D — payment tender methods', () => {

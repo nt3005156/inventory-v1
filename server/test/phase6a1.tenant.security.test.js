@@ -226,7 +226,8 @@ describe('Phase 6A.1 — legitimate permissions are unchanged', () => {
     });
     assert.equal(paid.status, 201, paid.body?.message);
     const refunded = await request(`/api/orders/${victimOrder._id}/refunds`, {
-      method: 'POST', token: tokenFor(world.manager), body: {amount: 10}
+      // Phase 12 made a refund reason mandatory.
+      method: 'POST', token: tokenFor(world.manager), body: {amount: 10, reason: 'Tenant control check'}
     });
     assert.equal(refunded.status, 201, refunded.body?.message);
   });

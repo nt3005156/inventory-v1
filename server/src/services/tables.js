@@ -334,7 +334,14 @@ export async function mergeTableOrders({fromTableId, intoTableId, user, session}
   recountOrder(dest);
   await dest.save({session: session || undefined});
 
-  await Payment.updateMany({order: source._id}, {$set: {order: dest._id}}, {session: session || undefined});
+  // The tenders follow the check onto the surviving order. `reparentPayments`
+  // is the one sanctioned exception to the append-only payment guard: it moves
+  // which order a payment belongs to and nothing else.
+  await Payment.updateMany(
+    {order: source._id},
+    {$set: {order: dest._id}},
+    {session: session || undefined, reparentPayments: true}
+  );
 
   const sourceStatus = source.status;
   source.status = 'cancelled';

@@ -6,6 +6,7 @@ import {auth} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Order} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
+import {assertNoStrandedMoney} from '../services/refunds.js';
 import {publishKitchenOrder, publishInventoryEvent} from '../services/realtime.js';
 import {moveStock} from '../services/inventoryLedger.js';
 import {
@@ -489,6 +490,9 @@ r.post('/online-orders/:id/reject', auth(['owner', 'manager']), async (req, res)
         throw Object.assign(new Error(`This order is already ${order.status}`), {status: 409});
       }
       // No stock was deducted for an unaccepted order, so nothing to reverse.
+      // Money is another matter: a prepaid web order must be refunded before
+      // the branch may reject it, or the guest's cash is stranded.
+      await assertNoStrandedMoney(order, {session});
       order.status = 'cancelled';
       order.rejectedOnlineAt = new Date();
       order.rejectionReason = body.reason;

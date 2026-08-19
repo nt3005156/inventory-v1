@@ -513,6 +513,8 @@ function Dialog({dialog, detail, summary, busy, onClose, onPay, onRefund, onReve
   const refundInvalid = dialog.kind === 'refund'
     && (!(value > 0) || value > refundable + 1e-9 || reason.trim().length < 3);
   const reverseInvalid = dialog.kind === 'reverse' && reason.trim().length < 3;
+  // A refund that clears the last refundable rupee voids the sale.
+  const isFullRefund = dialog.kind === 'refund' && value > 0 && value >= refundable - 1e-9;
 
   return (
     <div className="pa-modal" role="dialog" aria-modal="true">
@@ -541,6 +543,13 @@ function Dialog({dialog, detail, summary, busy, onClose, onPay, onRefund, onReve
             <h3>Refund</h3>
             <p className="pa-warn">
               This returns money to the customer and cannot be undone.
+            </p>
+            {/* The server decides all of this; the note only tells the manager
+                what is about to happen so a full refund is not a surprise. */}
+            <p className={isFullRefund ? 'pa-warn' : 'pa-dim'}>
+              {isFullRefund
+                ? 'Full refund: the sale is voided and the ingredients are returned to stock.'
+                : 'Partial refund: money only. Stock is not returned.'}
             </p>
             <p className="pa-dim">{detail.orderNo} · refundable {rs(refundable)}</p>
             <label>Amount

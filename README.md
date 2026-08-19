@@ -689,6 +689,63 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Refunds, voiding and financial controls (Phase 12 — financial)
+
+The refund engine shipped in Phase 4D and was hardened in 11F. This phase did
+not rebuild it: it audited the money-out paths against the running API and
+fixed five defects, each reproduced with evidence and a passing control before
+any code changed.
+
+### The rules, as enforced
+
+| Rule | Behaviour |
+|---|---|
+| Partial refund | Money only. Rs 1,000 paid less Rs 300 refunded leaves Rs 700 paid. The sale stays `completed` and **no stock is returned** — the food left the kitchen. |
+| Full refund | Voids the sale. `completed` → `refunded`, and the ingredients go back through `reverseOrderStock()`, the same immutable-ledger path a cancellation uses. |
+| Allocation | Newest tender first, so money goes back the way it came. Each reversal names the payment it reverses. |
+| Authorisation | Manager and owner only, enforced server-side. |
+| Reason | Mandatory, minimum three characters, written to the audit row *and* the reversal. |
+| Original payment | Immutable. Never rewritten, never deleted. |
+
+### Five defects fixed
+
+**1. Cancelling a part-paid order stranded the guest's money.** The cancel
+succeeded with the cash still banked, and `refundOrder()` then refused because
+the order was cancelled — the money was neither the restaurant's nor returned.
+`assertNoStrandedMoney()` now blocks the cancel (and the online-order reject)
+while any refundable amount is held, naming the figure. Control: cancelling an
+unpaid order still works.
+
+**2. A full refund left the ingredients deducted.** Only the cancel path called
+`reverseOrderStock()`. A voided sale now restores stock through the ledger —
+verified by asserting `previous + change === new` on the `REVERSAL` row, and
+that a partial-then-full sequence writes exactly one restoration.
+
+**3. A refund could be issued with no reason at all,** leaving an audit row an
+auditor could do nothing with.
+
+**4. A settled payment row could be silently rewritten.** `payment.amount = 1;
+payment.save()` succeeded and the money simply changed. Append-only was a
+convention, not a constraint. It is now enforced at both the document and query
+layers. The single sanctioned exception is a table merge re-parenting tenders
+onto the surviving check, which must pass `reparentPayments: true` and may
+change nothing but `order`.
+
+**5. A reversed tender still counted as refundable.** Found while probing a
+surviving mutation: a 300 cash + 491 khalti order with the cash reversed
+reported 791 refundable while holding 491, so the reversed 300 could be handed
+to the guest a second time.
+
+### Refunding a live ticket
+
+`REFUNDABLE_STATUSES` was widened beyond `completed`: a deposit on a ticket the
+kitchen is still cooking can now be handed back. Such a refund reopens the
+balance and leaves the ticket live — only `REFUND_CLOSES_FROM`
+(`completed`, `refunded`) closes an order as `refunded`, and only that closure
+returns stock. `cancelled` is refundable *only* so money stranded by rows
+cancelled before fix 1 existed can still be repaid; it never reopens the ticket
+and never restores stock twice.
+
 ## POS management workspace (Phase 14)
 
 Phases 11A–11F built a tested POS engine that was **entirely API-only**:

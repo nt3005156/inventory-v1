@@ -422,7 +422,7 @@ Order.schema.index({publicRequestKey:1},{unique:true,name:'order_public_request_
  * wrong amount) as distinct from a refund, which is money genuinely returned
  * to a guest and must stay on the record.
  */
-export const Payment=model('Payment',new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded','reversed'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'},
+const paymentSchema=new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded','reversed'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'},
   // 11F: one payment per idempotency key per order, so a double-clicked
   // "Pay" cannot bank the amount twice.
   idempotencyKey:{type:String,trim:true,maxlength:200,select:false},
@@ -431,7 +431,49 @@ export const Payment=model('Payment',new Schema({order:{...oid,ref:'Order',index
   // must stay on the record.
   reversedAt:{type:Date,default:null},
   reversedBy:{...oid,ref:'User',default:null},
-  reversalReason:{type:String,trim:true,maxlength:300}},{timestamps:true}));
+  reversalReason:{type:String,trim:true,maxlength:300}},{timestamps:true});
+
+// Phase 12: a settled payment row is evidence, not working state.
+//
+// Money that has been taken may only be corrected by APPENDING a reversal or a
+// refund row; rewriting the original would erase the trail an auditor relies
+// on. `pending` rows are exempt because the online-payment path legitimately
+// upgrades its own stub to `paid` once the gateway confirms.
+const FROZEN_PAYMENT_PATHS=['amount','method','order','refundOf','cashier'];
+paymentSchema.post('init',function(){this.$locals.settledOnLoad=['paid','refunded','reversed'].includes(this.get('status'));});
+paymentSchema.pre('save',function(next){
+  if(this.isNew||!this.$locals.settledOnLoad)return next();
+  const frozen=[...FROZEN_PAYMENT_PATHS,'transactionId'].filter(path=>this.isModified(path));
+  if(frozen.length){
+    return next(Object.assign(new Error(`A settled payment cannot be rewritten (${frozen.join(', ')}); append a refund or reversal instead`),{status:409}));
+  }
+  next();
+});
+// The same rule at the query layer, so a bare updateOne() cannot walk around
+// the document hook. Status transitions (paid -> refunded/reversed) stay legal;
+// the money itself does not move.
+function refusePaymentRewrite(next){
+  const update=this.getUpdate()||{};
+  const touched=new Set();
+  for(const [operator,payload] of Object.entries(update)){
+    if(operator.startsWith('$')){
+      if(payload&&typeof payload==='object')for(const path of Object.keys(payload))touched.add(path.split('.')[0]);
+    }else touched.add(operator.split('.')[0]);
+  }
+  // Merging two table checks re-parents tenders onto the surviving order. That
+  // moves no money — the amount, method and tender identity are untouched — so
+  // it is allowed, but only when the caller says so explicitly.
+  // Only `order` is ever exempt, so an amount or method change still fails
+  // even when the escape hatch is used.
+  const allowed=this.getOptions?.()?.reparentPayments===true?['order']:[];
+  const frozen=FROZEN_PAYMENT_PATHS.filter(path=>touched.has(path)&&!allowed.includes(path));
+  if(frozen.length){
+    return next(Object.assign(new Error(`A payment cannot be rewritten (${frozen.join(', ')}); append a refund or reversal instead`),{status:409}));
+  }
+  next();
+}
+for(const hook of ['updateOne','updateMany','findOneAndUpdate'])paymentSchema.pre(hook,refusePaymentRewrite);
+export const Payment=model('Payment',paymentSchema);
 // One payment per key per order. Partial so historical rows without a key are
 // not forced into the constraint.
 // A PAYMENT is one row per key, so the pair is unique. A REFUND may split

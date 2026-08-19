@@ -2,6 +2,8 @@ import {Audit} from '../models/index.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
+import {reverseOrderStock} from './inventoryLedger.js';
+import {userRestaurantContext} from './supplierCatalog.js';
 
 // Phase 4D — Payments: refunds.
 //
@@ -11,7 +13,18 @@ import {money} from './billing.js';
 // append-only: the original row is never rewritten, and the sum of all rows for
 // an order always equals what the guest is currently out of pocket.
 
-export const REFUNDABLE_STATUSES = Object.freeze(['completed', 'refunded']);
+// A refund works against money that was actually taken, so any order holding a
+// settled tender can be refunded. Phase 12 widened this from
+// ['completed','refunded']: a part-paid ticket held cash that could not be
+// given back through the refund path at all, which is how money got stranded
+// when the ticket was then cancelled.
+export const REFUNDABLE_STATUSES = Object.freeze([
+  'draft', 'held', 'pending', 'confirmed', 'accepted', 'preparing', 'ready',
+  'out_for_delivery', 'completed', 'refunded', 'cancelled'
+]);
+
+/** Statuses from which a full refund closes the ticket as 'refunded'. */
+export const REFUND_CLOSES_FROM = Object.freeze(['completed', 'refunded']);
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), {status});
@@ -19,9 +32,20 @@ function httpError(message, status = 400) {
 
 const clean = value => String(value ?? '').trim();
 
-/** Payments that represent money in (excludes prior refund rows). */
+/**
+ * Payments that represent money actually in the till.
+ *
+ * Excludes prior refund rows (negative), failed tenders, unconfirmed `pending`
+ * gateway stubs, and — Phase 12 — REVERSED rows. A reversal means the tender
+ * was never really taken; leaving it in made it refundable, so a cash payment
+ * that had been reversed could still be handed back to the guest a second
+ * time. Reproduced against the running API: a 300 cash + 491 khalti order with
+ * the cash reversed reported 791 refundable while holding 491.
+ */
+const MONEY_IN_STATUSES = new Set(['paid', 'refunded']);
+
 export function settledPayments(payments = []) {
-  return payments.filter(p => Number(p.amount) > 0 && p.status !== 'failed');
+  return payments.filter(p => Number(p.amount) > 0 && MONEY_IN_STATUSES.has(p.status || 'paid'));
 }
 
 /** What has already been refunded against an order. */
@@ -89,19 +113,52 @@ export function allocateRefund(payments, amount) {
  * a partial refund leaves it completed with a running refundAmount so the till
  * can still see what was settled.
  */
+/**
+ * Phase 12: refuse to close a ticket that is still holding the guest's money.
+ *
+ * Cancelling a part-paid order used to succeed and leave the cash banked with
+ * no refund path left — `refundOrder()` then refused because the order was
+ * cancelled. The money was stranded: not the restaurant's, not returned.
+ * Refund first, then cancel.
+ */
+export async function assertNoStrandedMoney(order, {session} = {}) {
+  const payments = await Payment.find({order: order._id}).session(session || null);
+  const outstanding = refundableAmount(payments);
+  if (outstanding > 0) {
+    throw httpError(
+      `This order still holds ${outstanding} of the guest's money; refund it before closing the ticket`,
+      409
+    );
+  }
+  return outstanding;
+}
+
 export async function refundOrder({orderId, amount, reason, user, session, idempotencyKey}) {
   const order = await Order.findById(orderId).session(session || null);
   if (!order) throw httpError('Order not found', 404);
   await assertTenantBranchAccess(user, order.branch, {session});
 
-  if (order.status === 'cancelled') throw httpError('A cancelled order cannot be refunded', 409);
+  // A cancelled ticket normally has nothing to refund: assertNoStrandedMoney()
+  // now blocks the cancel while money is still held, and its stock was already
+  // reversed by the cancel. Rows cancelled BEFORE that guard existed can still
+  // be holding the guest's cash, so a cancelled order is refundable rather
+  // than a dead end — money only, since REFUND_CLOSES_FROM excludes it and the
+  // stock reversal has already happened. An order with nothing left to refund
+  // still fails below on `refundable <= 0`.
   if (!REFUNDABLE_STATUSES.includes(order.status)) {
-    throw httpError('Only a settled order can be refunded', 409);
+    throw httpError('This order cannot be refunded', 409);
   }
 
   const payments = await Payment.find({order: order._id}).sort({createdAt: 1}).session(session || null);
   const refundable = refundableAmount(payments);
   if (refundable <= 0) throw httpError('This order has nothing left to refund', 409);
+
+  // Phase 12: money leaving the till must always name a why. Previously a
+  // reason was optional, so a refund could be issued with no explanation at
+  // all and the audit row carried nothing an auditor could act on. Checked
+  // after the state guards so an unrefundable order still answers 409.
+  const note = clean(reason);
+  if (note.length < 3) throw httpError('A reason is required to refund a payment', 400);
 
   // No amount means refund whatever is left.
   const target = amount === undefined || amount === null ? refundable : money(amount);
@@ -120,7 +177,6 @@ export async function refundOrder({orderId, amount, reason, user, session, idemp
   }
 
   const allocations = allocateRefund(payments, target);
-  const note = clean(reason);
 
   const created = [];
   for (const allocation of allocations) {
@@ -147,8 +203,30 @@ export async function refundOrder({orderId, amount, reason, user, session, idemp
   order.refundAmount = totalRefunded;
   order.paidAmount = money(Math.max(0, Number(order.paidAmount || 0) - target));
   order.dueAmount = money(Math.max(0, Number(order.total || 0) - order.paidAmount));
-  const fullyRefunded = order.paidAmount <= 0;
-  if (fullyRefunded) order.status = 'refunded';
+
+  // "Fully refunded" means every rupee still refundable has gone back. Stated
+  // against `refundable` rather than `paidAmount` because that is what the
+  // payment rows actually say; the two agree, and pinning it to one of them
+  // keeps a single source of truth.
+  const fullyRefunded = money(refundable - target) <= 0;
+  // Only a settled ticket closes as refunded. Refunding a deposit on a ticket
+  // the kitchen is still cooking leaves it live with the balance owing again.
+  const closes = fullyRefunded && REFUND_CLOSES_FROM.includes(beforeStatus);
+  if (closes) order.status = 'refunded';
+
+  // Phase 12: a FULL refund voids the sale, so the ingredients go back the way
+  // a cancellation returns them — through reverseOrderStock(), which reverses
+  // the immutable RECIPE_DEDUCTION rows against their original batches. A
+  // PARTIAL refund is money only: the food still left the kitchen.
+  let inventoryReversed = false;
+  if (closes && order.inventoryDeducted && !order.inventoryReversed) {
+    const context = await userRestaurantContext(user, {session});
+    await reverseOrderStock({
+      order, status: 'refunded', user: context.userId, restaurantId: context.restaurantId
+    }, session);
+    order.inventoryReversed = true;
+    inventoryReversed = true;
+  }
   await order.save({session: session || undefined});
 
   await Audit.create([{
@@ -162,9 +240,11 @@ export async function refundOrder({orderId, amount, reason, user, session, idemp
       refundAmount: order.refundAmount,
       paidAmount: order.paidAmount,
       status: order.status,
+      fullyRefunded,
+      inventoryReversed,
       methods: allocations.map(a => ({method: a.method, amount: a.amount}))
     },
-    reason: note || undefined,
+    reason: note,
     user: user.id
   }], {session: session || undefined});
 
@@ -173,6 +253,7 @@ export async function refundOrder({orderId, amount, reason, user, session, idemp
     refunds: created,
     amount: target,
     fullyRefunded,
+    inventoryReversed,
     remainingRefundable: money(refundable - target)
   };
 }
