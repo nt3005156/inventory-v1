@@ -689,6 +689,45 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## POS discounts (11D)
+
+The discount engine shipped in Phase 4C: percentage and fixed, line and order
+scope, coupon clamping, and an `order_discount` audit entry. 11D bounds it.
+
+### The policy, and why it needed a ceiling
+
+The chosen policy is **any staff may discount, and everything is audited** — a
+counter should not need a manager for a small goodwill gesture. The audit
+found that implemented as *unlimited* and audited: a till operator could take
+**100% off any order**, and the audit would faithfully record the theft. A
+reason was also optional, which makes the trail close to useless.
+
+The policy is unchanged. It is now bounded:
+
+| Setting | Default | Applies to |
+|---|---|---|
+| `staffMaxDiscountPercent` | 20% | Non-supervisors |
+| `staffMaxDiscountAmount` | 500 | Non-supervisors |
+| `maxDiscountPercent` | 100% | **Everyone, including owners** |
+
+All three are per-restaurant. The hard ceiling exists to catch a mistyped
+100%, not a dishonest one. A reason is now **mandatory**.
+
+### Evasion is closed
+
+Ceilings are checked on the **combined** manual write-off, not per discount:
+
+- Splitting one write-off across several lines is authorised on the **sum**.
+- A 15% line discount **plus** a 15% order discount is ~28% combined; each is
+  individually under a 20% ceiling, so the combination is checked too.
+
+Coupons are exempt from the till ceiling — their limits are set by management
+in the coupon itself, not typed at the counter.
+
+The legacy bare-numeric form (`discount: 100`) has nowhere to carry a reason
+and is a documented contract, so it is exempt from the reason requirement —
+but it is still subject to every ceiling.
+
 ## POS modifier catalog integrity (Phase 11A)
 
 The modifier **engine** shipped in Phase 4B — selection validation,

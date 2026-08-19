@@ -74,12 +74,12 @@ describe('Phase 4C — discount maths', () => {
   });
 
   it('combines a manual discount with a coupon and clamps the pair', () => {
-    const combined = resolveOrderDiscount({subtotalAfterItems: 1000, manual: {kind: 'percentage', value: 10}, couponAmount: 150});
+    const combined = resolveOrderDiscount({subtotalAfterItems: 1000, manual: {kind: 'percentage', value: 10, reason: 'Test discount'}, couponAmount: 150});
     assert.equal(combined.manualAmount, 100);
     assert.equal(combined.couponAmount, 150);
     assert.equal(combined.orderDiscountTotal, 250);
     // Together they can never exceed the order.
-    const clamped = resolveOrderDiscount({subtotalAfterItems: 500, manual: {kind: 'fixed', value: 400}, couponAmount: 300});
+    const clamped = resolveOrderDiscount({subtotalAfterItems: 500, manual: {kind: 'fixed', value: 400, reason: 'Test discount'}, couponAmount: 300});
     assert.equal(clamped.orderDiscountTotal, 500);
   });
 
@@ -110,7 +110,7 @@ describe('Phase 4C — item and order discounts on POST /api/orders', () => {
   });
 
   it('applies a fixed item discount', async () => {
-    const res = await order({items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 100}}]});
+    const res = await order({items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 100, reason: 'Test discount'}}]});
     assert.equal(res.status, 201, res.body?.message);
     assert.equal(res.body.itemDiscount, 100);
     assert.equal(res.body.vat, 78); // 13% of 600
@@ -138,8 +138,8 @@ describe('Phase 4C — item and order discounts on POST /api/orders', () => {
 
   it('stacks an item discount under an order discount', async () => {
     const res = await order({
-      items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 100}}],
-      discount: {kind: 'percentage', value: 10}
+      items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 100, reason: 'Test discount'}}],
+      discount: {kind: 'percentage', value: 10, reason: 'Test discount'}
     });
     assert.equal(res.status, 201, res.body?.message);
     assert.equal(res.body.subtotal, 700);
@@ -152,15 +152,15 @@ describe('Phase 4C — item and order discounts on POST /api/orders', () => {
   });
 
   it('refuses a discount larger than the order', async () => {
-    assert.equal((await order({discount: {kind: 'fixed', value: 99999}})).status, 400);
-    assert.equal((await order({discount: {kind: 'percentage', value: 150}})).status, 400);
+    assert.equal((await order({discount: {kind: 'fixed', value: 99999, reason: 'Test discount'}})).status, 400);
+    assert.equal((await order({discount: {kind: 'percentage', value: 150, reason: 'Test discount'}})).status, 400);
     assert.equal((await order({discount: -50})).status, 400);
   });
 
   it('rejects an over-large manual discount but clamps a generous coupon', async () => {
     // A mistyped manual amount is refused outright...
-    assert.equal((await order({discount: {kind: 'fixed', value: 5000}})).status, 400);
-    assert.equal((await order({items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 5000}}]})).status, 400);
+    assert.equal((await order({discount: {kind: 'fixed', value: 5000, reason: 'Test discount'}})).status, 400);
+    assert.equal((await order({items: [{menuItem: String(world.menu._id), qty: 2, discount: {kind: 'fixed', value: 5000, reason: 'Test discount'}}]})).status, 400);
     // ...but a management-set coupon worth more than the order simply zeroes it.
     await makeCoupon({code: 'GENEROUS', kind: 'fixed', value: 5000});
     const res = await order({coupon: 'GENEROUS'});
@@ -306,7 +306,7 @@ describe('Phase 4C — coupons', () => {
 
   it('stacks a coupon with a manual discount', async () => {
     await makeCoupon({code: 'STACK', kind: 'fixed', value: 100});
-    const res = await order({coupon: 'STACK', discount: {kind: 'fixed', value: 50}});
+    const res = await order({coupon: 'STACK', discount: {kind: 'fixed', value: 50, reason: 'Test discount'}});
     assert.equal(res.status, 201, res.body?.message);
     assert.equal(res.body.couponDiscount, 100);
     assert.equal(res.body.manualDiscount, 50);
@@ -347,9 +347,12 @@ describe('Phase 4C — coupons', () => {
 
 describe('Phase 4C — authorization', () => {
   it('lets any staff apply a manual discount', async () => {
-    const res = await order({discount: {kind: 'percentage', value: 25}}, staff());
+    // POS 11D: staff still discount without a supervisor, but 25% is above
+    // the default 20% staff ceiling, so this uses a within-policy figure.
+    // The ceiling itself is covered in phase11d.pos.discounts.test.js.
+    const res = await order({discount: {kind: 'percentage', value: 20, reason: 'Test discount'}}, staff());
     assert.equal(res.status, 201, res.body?.message);
-    assert.equal(res.body.manualDiscount, 175);
+    assert.equal(res.body.manualDiscount, 140);
   });
 
   it('restricts coupon management to owners and managers', async () => {

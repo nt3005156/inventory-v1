@@ -144,7 +144,7 @@ describe('Phase 4E — GET /api/orders/:id/receipt', () => {
         menuItem: String(cheese._id), qty: 1,
         modifiers: [{group: 'extras', option: 'spicy'}],
         specialInstructions: 'No coriander',
-        discount: {kind: 'fixed', value: 30}
+        discount: {kind: 'fixed', value: 30, reason: 'Test discount'}
       }]
     });
     const res = await receipt(order._id);

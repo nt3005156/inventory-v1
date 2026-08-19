@@ -1,7 +1,26 @@
 import mongoose from 'mongoose';
 const {Schema,model}=mongoose;
 const n={type:Number,default:0}; const oid={type:Schema.Types.ObjectId};
-export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300}},{timestamps:true}));
+/**
+ * 11D: manual discount ceilings.
+ *
+ * The policy is "any staff may discount, and every discount is audited" — a
+ * counter should not need a manager for a Rs 20 goodwill gesture. But
+ * "unlimited and audited" is not a control: a till operator could zero a
+ * Rs 40,000 banquet bill and the audit would faithfully record the theft.
+ *
+ * These are the ceilings above which a discount requires a supervisor. They
+ * are per-restaurant so an operator can set their own risk appetite, and the
+ * defaults are deliberately generous enough not to obstruct normal service.
+ */
+export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},
+  // Largest percentage a non-supervisor may apply to a line or an order.
+  staffMaxDiscountPercent:{type:Number,default:20,min:0,max:100},
+  // Largest absolute amount a non-supervisor may take off one order.
+  staffMaxDiscountAmount:{type:Number,default:500,min:0},
+  // Hard ceiling for EVERYONE, including an owner. Guards a mistyped 100%
+  // rather than a dishonest one; set to 100 to disable.
+  maxDiscountPercent:{type:Number,default:100,min:0,max:100},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300}},{timestamps:true}));
 export const Branch=model('Branch',new Schema({restaurant:{...oid,ref:'Restaurant',index:true},name:{type:String,required:true},code:{type:String,uppercase:true},address:String,phone:String,pan:{type:String,trim:true,maxlength:20},active:{type:Boolean,default:true}},{timestamps:true}));
 const inventoryBalanceSchema=new Schema({
   branch:{...oid,ref:'Branch',required:true,index:true},

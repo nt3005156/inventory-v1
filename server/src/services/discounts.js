@@ -22,6 +22,56 @@ export const normalizeCode = value => clean(value).toUpperCase();
  * taken as NPR off. Either way the result is clamped to the base so a discount
  * can never exceed what is being discounted or turn a line negative.
  */
+/** Roles that may exceed the staff discount ceiling. */
+export const DISCOUNT_SUPERVISOR_ROLES = Object.freeze(['owner', 'manager']);
+
+/**
+ * 11D: authorise a manual discount against the restaurant's ceilings.
+ *
+ * Policy: ANY staff member may discount, and every discount is audited — a
+ * counter should not need a manager for a small goodwill gesture. But
+ * "unlimited and audited" is not a control, so a discount above the staff
+ * ceiling needs a supervisor, and a hard ceiling applies to everyone to catch
+ * a mistyped 100%.
+ *
+ * A reason is mandatory. An unexplained discount is indistinguishable from
+ * theft after the fact, which defeats the point of auditing it.
+ */
+export function assertDiscountAuthorized({kind, value, amount, base, user, restaurant, scope = 'order'}) {
+  const reason = clean(restaurant?.__reason ?? '');
+  const role = String(user?.role || '');
+  const isSupervisor = DISCOUNT_SUPERVISOR_ROLES.includes(role);
+
+  const hardPercent = Number(restaurant?.maxDiscountPercent ?? 100);
+  const staffPercent = Number(restaurant?.staffMaxDiscountPercent ?? 20);
+  const staffAmount = Number(restaurant?.staffMaxDiscountAmount ?? 500);
+
+  // Percentage equivalent, so a fixed amount is measured on the same scale.
+  const effectivePercent = base > 0 ? (Number(amount) / Number(base)) * 100 : 0;
+
+  if (effectivePercent > hardPercent + 1e-9) {
+    throw httpError(
+      `A discount above ${hardPercent}% is not permitted on this ${scope}`,
+      403
+    );
+  }
+  if (isSupervisor) return {requiresSupervisor: false, role};
+
+  if (effectivePercent > staffPercent + 1e-9) {
+    throw httpError(
+      `A discount above ${staffPercent}% needs a manager. Ask a supervisor to apply it.`,
+      403
+    );
+  }
+  if (Number(amount) > staffAmount + 1e-9) {
+    throw httpError(
+      `A discount above ${staffAmount} needs a manager. Ask a supervisor to apply it.`,
+      403
+    );
+  }
+  return {requiresSupervisor: false, role};
+}
+
 export function computeDiscountAmount({kind, value, base, maxDiscount = null}) {
   const amount = Number(value);
   const target = money(base || 0);
