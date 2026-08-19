@@ -86,6 +86,9 @@ const buildBurger = async () => {
   return res.body;
 };
 
+const stockOf = async ingredientId =>
+  (await InventoryBalance.findOne({branch: world.branchA._id, ingredient: ingredientId}))?.quantity ?? 0;
+
 const placeOrder = (menuItemId, modifiers, qty = 1) =>
   request('/api/orders', {
     method: 'POST', token: manager(),
@@ -216,6 +219,85 @@ describe('11A — Size and Extras catalog', () => {
     } else {
       assert.equal(res.status, 400);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11C — variants override the base price
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('11C — variant pricing and consumption', () => {
+  /** Regular 350 / Large 450, on a 350 base, over a 250g recipe. */
+  const sizedItem = (largeExtra = null) => ({
+    name: 'Biryani',
+    price: 350,
+    recipe: [{ingredient: String(cheese._id), qty: 250, unit: 'g'}],
+    modifierGroups: [{
+      key: 'size', name: 'Size', kind: 'variant', selection: 'single', required: true,
+      options: [
+        {key: 'regular', name: 'Regular', priceOverride: 350, isDefault: true},
+        {
+          key: 'large', name: 'Large', priceOverride: 450,
+          // A variant may also consume more of the recipe ingredient.
+          ...(largeExtra ? {ingredient: String(cheese._id), qty: largeExtra, unit: 'g'} : {})
+        }
+      ]
+    }, {
+      key: 'extras', name: 'Extras', kind: 'extra', selection: 'multi',
+      options: [{key: 'raita', name: 'Raita', priceDelta: 60}]
+    }]
+  });
+
+  it('replaces the base price rather than adding to it', async () => {
+    const created = await createItem(sizedItem());
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+
+    const regular = await placeOrder(created.body._id, [{group: 'size', option: 'regular'}]);
+    assert.equal(regular.status, 201);
+    assert.equal(regular.body.items[0].unitPrice, 350);
+
+    const large = await placeOrder(created.body._id, [{group: 'size', option: 'large'}]);
+    assert.equal(large.status, 201);
+    assert.equal(large.body.items[0].unitPrice, 450,
+      'Large REPLACES the 350 base, it does not add to it');
+    assert.equal(large.body.items[0].basePrice, 350, 'the catalog base is still recorded');
+  });
+
+  it('still adds extras on top of the overridden price', async () => {
+    const created = await createItem(sizedItem());
+    const res = await placeOrder(created.body._id, [
+      {group: 'size', option: 'large'}, {group: 'extras', option: 'raita'}
+    ]);
+    assert.equal(res.status, 201);
+    // 450 override + 60 delta. An override silences other VARIANTS, not extras.
+    assert.equal(res.body.items[0].unitPrice, 510);
+  });
+
+  it('lets a variant consume more stock, so food cost follows the size', async () => {
+    // Without this a "Large" would eat the same ingredients as a Regular and
+    // report an inflated margin.
+    const created = await createItem(sizedItem(125));
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+
+    const before = await stockOf(cheese._id);
+    const regular = await placeOrder(created.body._id, [{group: 'size', option: 'regular'}]);
+    const afterRegular = await stockOf(cheese._id);
+
+    const large = await placeOrder(created.body._id, [{group: 'size', option: 'large'}]);
+    const afterLarge = await stockOf(cheese._id);
+
+    assert.equal(before - afterRegular, 250, 'Regular uses the recipe quantity');
+    assert.equal(afterRegular - afterLarge, 375, 'Large uses the recipe plus its own 125g');
+    assert.ok(large.body.items[0].foodCost > regular.body.items[0].foodCost,
+      'a larger portion must cost more to make');
+  });
+
+  it('persists the chosen size on the ticket', async () => {
+    const created = await createItem(sizedItem());
+    const res = await placeOrder(created.body._id, [{group: 'size', option: 'large'}]);
+    const stored = await Order.findById(res.body._id);
+    const variant = stored.items[0].modifiers.find(m => m.kind === 'variant');
+    assert.equal(variant.name, 'Large', 'the kitchen and the receipt must know the size');
   });
 });
 
