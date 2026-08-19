@@ -689,6 +689,48 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## POS coupons (11E)
+
+The coupon engine shipped in Phase 4C and implements all ten requirements:
+code, percentage/fixed, validity window, minimum order, maximum discount,
+total usage limit, per-customer limit, branch scope, menu-item scope and
+redemption records. 11E audited each against the running API and fixed one
+real defect.
+
+### Defect: the usage limit could be exceeded
+
+The total usage limit was enforced by counting redemptions in
+`validateCoupon()` and then inserting — a read-then-write race. Two concurrent
+transactions both read `used = 0` against a `usageLimit` of 1, both inserted,
+and the coupon was **redeemed twice**. Reproduced against the database before
+the fix.
+
+`recordRedemption()` now claims the limit atomically:
+
+```js
+Coupon.updateOne(
+  {_id: coupon._id, timesRedeemed: {$lt: limit}},
+  {$inc: {timesRedeemed: 1}}
+)
+```
+
+Only one writer can move the counter while it is still below the limit; the
+loser matches no document and is refused. The unique `{coupon, order}` index
+separately prevents one order redeeming the same coupon twice.
+
+**Guarded twice, deliberately.** `validateCoupon()` still checks first so a
+guest gets a clear message before the order is priced; the atomic claim is the
+guarantee. Removing either alone is safe, removing both is not, and tests pin
+each.
+
+### A note on testing concurrency
+
+Driving the race over HTTP did **not** reproduce it — Express serialises the
+requests, so two mutations of the fix survived an over-the-wire concurrency
+test. Only genuinely overlapping `mongoose` sessions expose a read-then-write
+race. Concurrency tests that go through the HTTP layer can give false
+confidence.
+
 ## POS discounts (11D)
 
 The discount engine shipped in Phase 4C: percentage and fixed, line and order

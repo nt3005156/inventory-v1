@@ -237,20 +237,56 @@ export function resolveOrderDiscount({subtotalAfterItems, manual, couponAmount =
   return {manualAmount, couponAmount: money(couponAmount), orderDiscountTotal: total};
 }
 
-/** Records a redemption so usage limits hold across orders. */
+/**
+ * Records a redemption so usage limits hold across orders.
+ *
+ * 11E: the total usage limit is CLAIMED atomically here, not merely checked
+ * in validateCoupon(). Counting redemptions and then inserting is a
+ * read-then-write race: two concurrent transactions both read `used = 0`
+ * against a usageLimit of 1, both insert, and the coupon is redeemed twice.
+ * Reproduced against the database before this was changed.
+ *
+ * The conditional $inc below is the real guarantee. Only one writer can move
+ * timesRedeemed from N to N+1 while it is still below the limit; the loser
+ * matches no document and is refused. validateCoupon() still runs first so a
+ * guest gets a clear message in the ordinary case -- this closes the window
+ * between that check and the insert.
+ */
 export async function recordRedemption({coupon, order, restaurantId, branchId, customerId, amount, user, session}) {
-  const [row] = await CouponRedemption.create([{
-    coupon: coupon._id,
-    restaurant: restaurantId,
-    branch: branchId || null,
-    order: order._id,
-    customer: customerId || null,
-    code: coupon.code,
-    amount: money(amount),
-    redeemedBy: user?.id || user?._id || null
-  }], {session});
-  await Coupon.updateOne({_id: coupon._id}, {$inc: {timesRedeemed: 1}}, {session});
-  return row;
+  const limit = Number(coupon.usageLimit || 0);
+  if (limit > 0) {
+    const claimed = await Coupon.updateOne(
+      {_id: coupon._id, timesRedeemed: {$lt: limit}},
+      {$inc: {timesRedeemed: 1}},
+      {session}
+    );
+    if (!claimed.modifiedCount) {
+      throw httpError(`Coupon ${coupon.code} has reached its usage limit`, 409);
+    }
+  } else {
+    await Coupon.updateOne({_id: coupon._id}, {$inc: {timesRedeemed: 1}}, {session});
+  }
+
+  try {
+    const [row] = await CouponRedemption.create([{
+      coupon: coupon._id,
+      restaurant: restaurantId,
+      branch: branchId || null,
+      order: order._id,
+      customer: customerId || null,
+      code: coupon.code,
+      amount: money(amount),
+      redeemedBy: user?.id || user?._id || null
+    }], {session});
+    return row;
+  } catch (error) {
+    // The unique {coupon, order} index refusing means this order already
+    // redeemed the coupon, so the claim above must not stand.
+    if (error?.code === 11000) {
+      throw httpError(`Coupon ${coupon.code} has already been applied to this order`, 409);
+    }
+    throw error;
+  }
 }
 
 /** Validates and normalizes a coupon definition before it is stored. */
