@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import {Ingredient, MenuItem, User} from '../models/index.js';
-import {Branch, INVENTORY_MOVEMENT_TYPES, WASTE_CATEGORY_TYPES, InventoryBalance, InventoryTransaction, Notification, Order} from '../models/operations.js';
+import {Branch, INVENTORY_MOVEMENT_TYPES, WASTE_CATEGORY_TYPES, InventoryBalance, InventoryTransaction, Notification, Order, Restaurant} from '../models/operations.js';
 import {addBatchStock, removeBatchStock} from './inventoryBatches.js';
 
 function canonical(value) {
@@ -120,6 +120,14 @@ export async function moveStock({
   const restaurant=branchRecord.restaurant;
   if(String(ingredientRecord.restaurant)!==String(restaurant))throw httpError('Inventory movement ingredient does not belong to the branch restaurant',403);
   if(String(userRecord.restaurantId)!==String(restaurant))throw httpError('Inventory movement user does not belong to the branch restaurant',403);
+  // Phase 15: the expired-stock rule is per-restaurant, not hard-coded.
+  // Waste, adjustments and returns always reach expired stock — writing off
+  // what has gone bad is exactly what they are for.
+  const alwaysAllowsExpired=['WASTE','ADJUSTMENT','RETURN'].includes(type);
+  const restaurantRecord=await Restaurant.findById(restaurant).select('expiryPolicy').session(session).lean();
+  const expiryPolicy=clean(restaurantRecord?.expiryPolicy)||'block';
+  if(!['block','warn','allow'].includes(expiryPolicy))throw httpError('Invalid restaurant expiry policy',409);
+  const policyAllowsExpired=expiryPolicy!=='block';
   const movementUnit=clean(unit||ingredientRecord.unit);
   if(!movementUnit||movementUnit.length>30)throw httpError('Inventory movement unit is required');
   const normalizedReason=clean(reason);
@@ -195,9 +203,26 @@ export async function moveStock({
       unit:movementUnit,
       batchId,
       batchNumber,
-      allowExpired:allowExpired??['WASTE','ADJUSTMENT','RETURN'].includes(type),
+      allowExpired:allowExpired??(alwaysAllowsExpired||policyAllowsExpired),
       strategy: normalizedStrategy
     },session);
+    // Policy 'warn': the sale is allowed, but an expired lot leaving the
+    // shelf must not do so silently.
+    if(expiryPolicy==='warn'&&!alwaysAllowsExpired){
+      const today=new Date(new Date().toISOString().slice(0,10));
+      const expiredUsed=(batchMovements||[]).filter(row=>row.expiryDate&&new Date(row.expiryDate)<today);
+      if(expiredUsed.length){
+        try{
+          await Notification.create([{
+            branch,
+            type:'expired_stock_consumed',
+            title:'Expired stock used',
+            body:`${ingredientRecord.name || 'Ingredient'} — ${expiredUsed.length} expired batch(es) consumed under the 'warn' expiry policy`,
+            referenceId:ingredient
+          }]);
+        }catch{}
+      }
+    }
     }catch(batchErr){
       if(batchErr?.status===409 && /Insufficient/.test(batchErr.message)){
         try{

@@ -259,12 +259,23 @@ export default function Inventory({call, branches = [], user, token}) {
           <div style={{marginTop:'6px', display:'grid', gap:'4px', maxHeight:'160px', overflow:'auto'}}>
             {alerts.slice(0,8).map(a=> (
               <div key={String(a._id)} style={{display:'flex', justifyContent:'space-between', padding:'6px', background: a.severity==='critical'?'#ffe4e6': a.severity==='warning'?'#fffbeb':'#f0fdf4', borderRadius:'4px', border:'1px solid #e5e7eb'}}>
-                <span><b style={{textTransform:'capitalize'}}>{String(a.type).replaceAll('_',' ')}</b> — {a.title || a.body?.slice(0,60)} {a.ingredientName && '('+a.ingredientName+')'}</span>
+                <span>
+                  {/* Phase 15: the graded tier, so a batch expiring tomorrow
+                      is visibly not the same as one expiring in three weeks. */}
+                  {a.tier && (
+                    <b style={{
+                      marginRight:'6px', padding:'1px 6px', borderRadius:'999px', fontSize:'10px',
+                      textTransform:'uppercase', letterSpacing:'.4px', color:'#fff',
+                      background: a.tier==='expired'?'#991b1b': a.tier==='critical'?'#dc2626': a.tier==='warning'?'#d97706':'#64748b'
+                    }}>{a.tier}</b>
+                  )}
+                  <b style={{textTransform:'capitalize'}}>{String(a.type).replaceAll('_',' ')}</b> — {a.title || a.body?.slice(0,60)} {a.ingredientName && '('+a.ingredientName+')'}
+                </span>
                 <span style={{fontSize:'11px', opacity:0.7}}>{a.branchName || ''} • {a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-NP') : ''}</span>
               </div>
             ))}
           </div>
-          <small style={{opacity:0.6}}>Low/out of stock • Expired/expiry approaching • Unusual consumption • Negative inventory attempts (FEFO-ready)</small>
+          <small style={{opacity:0.6}}>Low/out of stock • Expiry tiers: expired / critical / warning • Unusual consumption • Negative inventory attempts (FEFO)</small>
         </div>
       )}
       {!loading && !rows.length && !error && <p className="empty">No ledger balances in this scope.</p>}

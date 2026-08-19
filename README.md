@@ -689,6 +689,58 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Lot / batch / expiry inventory (Phase 15 — batches)
+
+Batch-level stock already existed and was not rebuilt: `InventoryBatch` carries
+batch number, supplier, received date, expiry, quantity and unit cost;
+`removeBatchStock()` implements FEFO (with FIFO selectable per movement); the
+ledger already refused to sell expired stock; and the alert endpoints already
+reported expired / expiring / fresh. Auditing that against the running API
+found two real gaps.
+
+### Expiry tiers
+
+`expiryTier()` grades a lot instead of lumping everything into one bucket:
+
+| Tier | Meaning | Severity |
+|---|---|---|
+| `expired` | Past its expiry date | critical |
+| `critical` | Within `expiryCriticalDays` (default **3**) | critical |
+| `warning` | Within `expiryWarningDays` (default **7**) | warning |
+| `notice` | Inside the wider reporting window | info |
+| `fresh` / `no_expiry` | Nothing to act on | info |
+
+**The defect:** batches 2, 5 and 20 days from expiry all came back
+`severity: warning`, so a lot expiring tomorrow looked exactly as urgent as one
+expiring in three weeks. Tiers are now returned per alert along with
+`tierCounts`, and the thresholds are per-restaurant. A critical window wider
+than the warning window is clamped, because otherwise `warning` could never be
+reached.
+
+### Configurable expired-stock policy
+
+`Restaurant.expiryPolicy` replaces a hard-coded rule:
+
+| Policy | Behaviour on a sale |
+|---|---|
+| `block` (default) | Expired lots are skipped; if only expired stock remains the movement is refused `409 Insufficient unexpired inventory`. |
+| `warn` | The sale proceeds, and an `expired_stock_consumed` notification names the ingredient and lot count. |
+| `allow` | No expiry restriction. |
+
+`WASTE`, `ADJUSTMENT` and `RETURN` always reach expired stock whatever the
+policy — writing off what has gone bad is precisely what they are for. A
+partially expired shelf still sells its good lots and refuses to dip into the
+bad ones (pinned by test).
+
+### FEFO
+
+Consumption takes the nearest expiry first, then earliest received as a
+tie-break, with undated lots last so dated stock always moves ahead of stock
+that keeps. `consumptionStrategy: 'fifo'` switches a single movement to
+receipt order without a data migration. Lot totals always reconcile with the
+aggregate balance, and the ledger chain (`previous + change === new`) is
+asserted across batch movements.
+
 ## Stock count lock recovery (runbook)
 
 A stock count holds an exclusive per-branch lock (`activeKey`, enforced by the

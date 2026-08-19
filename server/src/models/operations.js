@@ -14,6 +14,19 @@ const n={type:Number,default:0}; const oid={type:Schema.Types.ObjectId};
  * defaults are deliberately generous enough not to obstruct normal service.
  */
 export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},
+  // Phase 15 — expiry policy. Blocking expired stock from a sale was correct
+  // but hard-coded, so a kitchen could neither relax it for a slow-moving dry
+  // good nor tighten the warning window for fresh produce.
+  //   block  — refuse to consume expired stock on a sale (default, safest)
+  //   warn   — allow it, but raise a notification naming the batch
+  //   allow  — no expiry restriction on consumption
+  // Waste, adjustments and returns always reach expired stock regardless:
+  // writing off what has gone bad is the whole point of those movements.
+  expiryPolicy:{type:String,enum:['block','warn','allow'],default:'block'},
+  // Alert tiers, in days remaining. Defaults follow the brief: 7 then 3.
+  expiryWarningDays:{type:Number,default:7,min:1,max:365},
+  expiryCriticalDays:{type:Number,default:3,min:0,max:365},
+
   // Largest percentage a non-supervisor may apply to a line or an order.
   staffMaxDiscountPercent:{type:Number,default:20,min:0,max:100},
   // Largest absolute amount a non-supervisor may take off one order.

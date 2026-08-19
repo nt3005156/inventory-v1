@@ -3,11 +3,31 @@ import { Ingredient } from '../models/index.js';
 import { Branch, InventoryBatch, InventoryBalance } from '../models/operations.js';
 import { purchaseBranchContext } from './purchaseOrders.js';
 import { userRestaurantContext } from './supplierCatalog.js';
-import { kathmanduDateString, canonicalExpiryDate, expiryState } from './inventoryBatches.js';
+import { kathmanduDateString, canonicalExpiryDate, expiryState, expiryTier, EXPIRY_TIER_SEVERITY } from './inventoryBatches.js';
+import { Restaurant } from '../models/operations.js';
 
 const clean = v => String(v ?? '').trim();
 function httpError(msg, status = 400) { const e = new Error(msg); e.status = status; return e; }
 const money = v => Math.round((Number(v||0)+Number.EPSILON)*100)/100;
+
+/**
+ * Phase 15 — the alert tiers are per-restaurant, defaulting to the brief's
+ * 7-day and 3-day thresholds.
+ */
+export async function resolveExpiryPolicy(restaurantId, session) {
+  const row = await Restaurant.findById(restaurantId)
+    .select('expiryPolicy expiryWarningDays expiryCriticalDays')
+    .session(session || null).lean();
+  const warningDays = Number(row?.expiryWarningDays ?? 7);
+  const criticalDays = Number(row?.expiryCriticalDays ?? 3);
+  return {
+    policy: clean(row?.expiryPolicy) || 'block',
+    warningDays,
+    // A critical window wider than the warning window would make 'warning'
+    // unreachable; clamp rather than emit a tier nothing can ever match.
+    criticalDays: Math.min(criticalDays, warningDays)
+  };
+}
 
 async function resolveScope({ branchId, user }) {
   const identity = await userRestaurantContext(user);
@@ -149,6 +169,8 @@ export async function listExpiryAlerts({ branchId, user, expiringDays = 30, stat
   };
   const sortStage = sortMap[clean(sort)] || sortMap.expiry;
 
+  const policy = await resolveExpiryPolicy(scope.restaurantId);
+
   const [rows, total, summary] = await Promise.all([
     InventoryBatch.find(match)
       .populate('ingredient', 'name code unit category')
@@ -166,11 +188,25 @@ export async function listExpiryAlerts({ branchId, user, expiringDays = 30, stat
     const daysUntil = daysUntilExpiry(row.expiryDate);
     const isExpired = state === 'expired';
     const isExpiring = state === 'expiring';
+    // Phase 15: a flat 'expiring' severity made a 20-day batch look as urgent
+    // as a 2-day one. Tiers are graded and configurable.
+    const tier = expiryTier(row.expiryDate, {
+      quantity: row.quantity,
+      expiringDays: days,
+      warningDays: policy.warningDays,
+      criticalDays: policy.criticalDays
+    });
     return {
       _id: row._id,
       type: isExpired ? 'expired_stock' : isExpiring ? 'near_expiry_stock' : state,
-      severity: isExpired ? 'critical' : isExpiring ? 'warning' : 'info',
-      title: isExpired ? 'Expired stock' : isExpiring ? `Expiring in ${daysUntil}d` : 'Batch status',
+      tier,
+      severity: EXPIRY_TIER_SEVERITY[tier] || 'info',
+      title: isExpired
+        ? 'Expired stock'
+        : tier === 'critical' ? `Critical — expires in ${daysUntil}d`
+        : tier === 'warning' ? `Expiring in ${daysUntil}d`
+        : isExpiring ? `Expiring in ${daysUntil}d`
+        : 'Batch status',
       branch: row.branch?._id || row.branch,
       branchName: row.branch?.name || '',
       ingredient: row.ingredient?._id || row.ingredient,
@@ -204,6 +240,15 @@ export async function listExpiryAlerts({ branchId, user, expiringDays = 30, stat
     filter: wanted || 'expired+expiring',
     pagination: { page: safePage, limit: safeLimit, total, pages: Math.max(1, Math.ceil(total/safeLimit)) },
     summary: summary,
+    policy: {
+      expiryPolicy: policy.policy,
+      warningDays: policy.warningDays,
+      criticalDays: policy.criticalDays
+    },
+    tierCounts: alerts.reduce((acc, alert) => {
+      acc[alert.tier] = (acc[alert.tier] || 0) + 1;
+      return acc;
+    }, {}),
     alerts,
     fefoReady: true,
     consumptionStrategy: 'fefo'

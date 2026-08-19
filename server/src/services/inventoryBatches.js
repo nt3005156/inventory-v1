@@ -58,6 +58,55 @@ export function expiryState(expiryDate, {asOf = new Date(), expiringDays = 30, q
   return 'fresh';
 }
 
+/** Whole days from today (Kathmandu) until a batch expires. Negative = past. */
+export function daysUntilExpiry(expiryDate, asOf = new Date()) {
+  if (!expiryDate) return null;
+  const expiry = canonicalExpiryDate(expiryDate).getTime();
+  const today = canonicalExpiryDate(kathmanduDateString(asOf)).getTime();
+  return Math.floor((expiry - today) / 86400000);
+}
+
+/**
+ * Phase 15 — alert tiers.
+ *
+ * The alert list previously reported one flat 'expiring' severity for
+ * everything inside the window, so a batch with 20 days left looked exactly as
+ * urgent as one with 2. The brief asks for 7-day, 3-day and expired tiers, and
+ * they are configurable per restaurant.
+ *
+ *   expired  → critical, already unusable
+ *   critical → inside expiryCriticalDays (default 3)
+ *   warning  → inside expiryWarningDays  (default 7)
+ *   notice   → inside the wider reporting window
+ *   fresh / no_expiry → informational
+ */
+export const EXPIRY_TIERS = Object.freeze(['expired', 'critical', 'warning', 'notice', 'fresh', 'no_expiry', 'depleted']);
+
+export function expiryTier(expiryDate, {
+  asOf = new Date(),
+  quantity = 1,
+  expiringDays = 30,
+  warningDays = 7,
+  criticalDays = 3
+} = {}) {
+  const state = expiryState(expiryDate, {asOf, expiringDays, quantity});
+  if (state !== 'expiring') return state;
+  const days = daysUntilExpiry(expiryDate, asOf);
+  if (days <= Number(criticalDays)) return 'critical';
+  if (days <= Number(warningDays)) return 'warning';
+  return 'notice';
+}
+
+export const EXPIRY_TIER_SEVERITY = Object.freeze({
+  expired: 'critical',
+  critical: 'critical',
+  warning: 'warning',
+  notice: 'info',
+  fresh: 'info',
+  no_expiry: 'info',
+  depleted: 'info'
+});
+
 async function branchRestaurant(branchId, session) {
   const branch = await Branch.findById(branchId).select('_id restaurant').session(session || null);
   if (!branch) throw httpError('Branch not found', 404);
