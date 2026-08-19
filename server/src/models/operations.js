@@ -195,7 +195,11 @@ const stockCountSchema=new Schema({
   branch:{...oid,ref:'Branch',required:true,index:true,immutable:true},
   countNo:{type:String,required:true,trim:true,maxlength:80,immutable:true},
   scope:{type:String,enum:['full','cycle'],required:true,immutable:true},
-  status:{type:String,enum:['draft','submitted','approved','rejected'],default:'draft',index:true},
+  // Phase 14: `counting` marks a session a counter has actually started
+  // entering figures into, distinct from an empty draft. `stale` is terminal:
+  // the captured snapshot no longer matches the ledger, so the session is
+  // closed unapproved and a recount must be started.
+  status:{type:String,enum:['draft','counting','submitted','approved','rejected','stale'],default:'draft',index:true},
   activeKey:{type:String,trim:true,maxlength:24},
   lines:{type:[stockCountLineSchema],validate:{validator:rows=>Array.isArray(rows)&&rows.length>0,message:'A stock count requires at least one ingredient'}},
   notes:{type:String,trim:true,maxlength:2000},
@@ -211,6 +215,18 @@ const stockCountSchema=new Schema({
   approvedAt:Date,
   rejectedBy:{...oid,ref:'User'},
   rejectedAt:Date,
+  // Phase 14: evidence of a stale-out. `staleLines` names the ingredients whose
+  // stock moved after capture, so the recount is informed rather than blind.
+  staleAt:Date,
+  staleDetectedBy:{...oid,ref:'User'},
+  staleLines:[{
+    ingredient:{...oid,ref:'Ingredient'},
+    ingredientName:{type:String,trim:true,maxlength:160},
+    capturedQty:Number,
+    currentQty:Number
+  }],
+  // Links a recount back to the session it replaces.
+  recountOf:{...oid,ref:'StockCount',default:null,index:true},
   adjustmentTransactions:[{...oid,ref:'InventoryTransaction'}],
   requestKey:{type:String,required:true,trim:true,maxlength:200,select:false,immutable:true},
   requestHash:{type:String,required:true,match:/^[a-f0-9]{64}$/,select:false,immutable:true},
@@ -224,15 +240,22 @@ stockCountSchema.pre('validate',function validateStockCount(){
   this.countedLineCount=lines.filter(line=>line.physicalQty!=null).length;
   this.varianceLineCount=lines.filter(line=>line.physicalQty!=null&&Math.abs(Number(line.physicalQty)-Number(line.systemQty))>1e-9).length;
   this.totalVarianceValue=lines.reduce((sum,line)=>line.physicalQty==null?sum:sum+(Number(line.physicalQty)-Number(line.systemQty))*Number(line.systemUnitCost||0),0);
-  if(['draft','submitted'].includes(this.status)&&!this.activeKey)this.invalidate('activeKey','Active stock counts require a branch lock');
-  if(['approved','rejected'].includes(this.status)&&this.activeKey)this.invalidate('activeKey','Completed stock counts cannot retain a branch lock');
-  if(this.status!=='draft'&&this.countedLineCount!==lines.length)this.invalidate('lines','Every ingredient requires a physical quantity before submission');
-  if(this.status!=='draft'&&(!this.submittedBy||!this.submittedAt))this.invalidate('status','Submitted stock counts require submission evidence');
+  if(['draft','counting','submitted'].includes(this.status)&&!this.activeKey)this.invalidate('activeKey','Active stock counts require a branch lock');
+  if(['approved','rejected','stale'].includes(this.status)&&this.activeKey)this.invalidate('activeKey','Completed stock counts cannot retain a branch lock');
+  // A partially entered `counting` session is legitimate; only submission
+  // onward requires every line.
+  const NEEDS_COMPLETE=['submitted','approved','rejected','stale'];
+  if(NEEDS_COMPLETE.includes(this.status)&&this.countedLineCount!==lines.length)this.invalidate('lines','Every ingredient requires a physical quantity before submission');
+  if(NEEDS_COMPLETE.includes(this.status)&&(!this.submittedBy||!this.submittedAt))this.invalidate('status','Submitted stock counts require submission evidence');
   if(['approved','rejected'].includes(this.status)&&(!this.decisionKey||!this.decisionHash))this.invalidate('status','Completed stock counts require idempotent decision evidence');
   if(this.status==='approved'&&(!this.approvedBy||!this.approvedAt))this.invalidate('status','Approved stock counts require approval evidence');
   const adjustmentCount=this.adjustmentTransactions?.length||0;
   if(this.status==='approved'&&adjustmentCount!==this.varianceLineCount)this.invalidate('adjustmentTransactions','Approved non-zero variances require one ledger movement each');
   if(this.status!=='approved'&&adjustmentCount)this.invalidate('adjustmentTransactions','Only approved stock counts may reference variance movements');
+  // A stale-out is a decision the SYSTEM made, so it carries its own evidence
+  // rather than a decision key.
+  if(this.status==='stale'&&(!this.staleAt||!this.staleLines?.length))this.invalidate('status','Stale stock counts require stale evidence');
+  if(this.status!=='stale'&&(this.staleAt||this.staleLines?.length))this.invalidate('status','Only stale stock counts may carry stale evidence');
   if(this.status==='rejected'&&(!this.rejectedBy||!this.rejectedAt||!this.decisionNote))this.invalidate('status','Rejected stock counts require rejection evidence');
 });
 stockCountSchema.index({restaurant:1,countNo:1},{unique:true,name:'stock_count_restaurant_number'});

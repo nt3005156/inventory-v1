@@ -7,7 +7,7 @@ const WASTE_LABELS = {
   expired: 'Expired', spoiled: 'Spoiled', damaged: 'Damaged', burned: 'Burned', spilled: 'Spilled',
   wrong_preparation: 'Wrong preparation', customer_return: 'Customer return', other: 'Other'
 };
-const COUNT_STATUSES = ['draft', 'submitted', 'approved', 'rejected'];
+const COUNT_STATUSES = ['draft', 'counting', 'submitted', 'approved', 'rejected', 'stale'];
 
 function qtyLabel(qty, unit) {
   const n = Number(qty || 0);
@@ -409,7 +409,18 @@ export default function StockOps({call, branches = [], user, token}) {
       await load();
       await loadHistory(count);
     } catch (err) {
-      setError(err.message || `Could not ${decision === 'approved' ? 'approve' : 'reject'} stock count`);
+      // A stale-out is not a failed request in the usual sense: the session was
+      // closed as STALE and the branch freed, so the list must be refreshed and
+      // the operator told to recount rather than left staring at an error.
+      if (/Stock changed after this count was captured/i.test(err.message || '')) {
+        setError(`${err.message}. This count is now STALE and the branch is free for a recount.`);
+        await load();
+        if (selectedCount?._id) {
+          try { hydrateCount(await call(`/stock-counts/${selectedCount._id}`)); } catch { /* list refresh is enough */ }
+        }
+      } else {
+        setError(err.message || `Could not ${decision === 'approved' ? 'approve' : 'reject'} stock count`);
+      }
     } finally {
       setBusy('');
     }
@@ -424,11 +435,12 @@ export default function StockOps({call, branches = [], user, token}) {
     );
   }
 
-  const activeCount = counts.find(count => ['draft', 'submitted'].includes(count.status));
+  const activeCount = counts.find(count => ['draft', 'counting', 'submitted'].includes(count.status));
   const visibleCounts = countFilter ? counts.filter(count => count.status === countFilter) : counts;
   const managerSelfApproval = user?.role === 'manager' && selectedCount && [selectedCount.createdBy, selectedCount.submittedBy]
     .some(actor => String(actor?._id || actor || '') === userId);
-  const canEditSelected = selectedCount?.status === 'draft'
+  // A part-counted sheet ('counting') is still editable by its counter.
+  const canEditSelected = ['draft', 'counting'].includes(selectedCount?.status)
     && (user?.role === 'owner' || String(selectedCount?.createdBy?._id || selectedCount?.createdBy || '') === userId);
   const allCounted = selectedCount?.lines?.every(line => line.physicalQty != null);
   const selectedWasteItem = items.find(row => String(row.ingredient?._id) === String(wasteIngredient));

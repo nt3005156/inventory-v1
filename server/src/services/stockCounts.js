@@ -8,7 +8,9 @@ import {purchaseBranchContext} from './purchaseOrders.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 
 const EPSILON = 1e-9;
-const COUNT_STATUSES = ['draft', 'submitted', 'approved', 'rejected'];
+const COUNT_STATUSES = ['draft', 'counting', 'submitted', 'approved', 'rejected', 'stale'];
+// Sessions that hold the branch lock and can still be edited by the counter.
+const EDITABLE_STATUSES = ['draft', 'counting'];
 const COUNT_SCOPES = ['full', 'cycle'];
 const clean = value => String(value ?? '').trim();
 const actorId = value => String(value?._id || value || '');
@@ -37,7 +39,7 @@ function fingerprint(value) {
   return crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 }
 
-function normalizedRequest({branchId, scope, ingredientIds, notes}) {
+function normalizedRequest({branchId, scope, ingredientIds, notes, recountOf}) {
   const normalizedScope = clean(scope);
   if (!COUNT_SCOPES.includes(normalizedScope)) throw httpError('Stock count scope must be full or cycle', 400);
   const ids = normalizedScope === 'cycle'
@@ -50,7 +52,8 @@ function normalizedRequest({branchId, scope, ingredientIds, notes}) {
     branchId: String(branchId || ''),
     scope: normalizedScope,
     ingredientIds: ids,
-    notes: clean(notes)
+    notes: clean(notes),
+    recountOf: recountOf ? String(recountOf) : ''
   };
 }
 
@@ -90,6 +93,8 @@ const COUNT_POPULATE = [
   {path: 'submittedBy', select: 'name role'},
   {path: 'approvedBy', select: 'name role'},
   {path: 'rejectedBy', select: 'name role'},
+  {path: 'staleDetectedBy', select: 'name role'},
+  {path: 'recountOf', select: 'countNo status staleAt'},
   {path: 'adjustmentTransactions', select: 'type ingredient previousQty changeQty newQty unit unitCost totalCost reason referenceType referenceId user idempotencyKey createdAt'}
 ];
 
@@ -141,11 +146,11 @@ async function createAudit({count, action, before, after, reason, userId, sessio
   }], {session});
 }
 
-export async function createStockCount({branchId, scope, ingredientIds = [], notes, user, idempotencyKey, session}) {
+export async function createStockCount({branchId, scope, ingredientIds = [], notes, recountOf, user, idempotencyKey, session}) {
   requireTransaction(session);
   const key = clean(idempotencyKey);
   if (key.length < 3 || key.length > 200) throw httpError('A valid Idempotency-Key is required', 400);
-  const normalized = normalizedRequest({branchId, scope, ingredientIds, notes});
+  const normalized = normalizedRequest({branchId, scope, ingredientIds, notes, recountOf});
   const hash = requestEvidence(normalized);
   const context = await purchaseBranchContext({user, branchId: normalized.branchId, session});
   const prior = await StockCount.findOne({
@@ -175,6 +180,22 @@ export async function createStockCount({branchId, scope, ingredientIds = [], not
     ingredient: {$in: ingredients.map(item => item._id)}
   }).select('ingredient quantity averageCost ledgerVersion').session(session).lean();
   const balanceByIngredient = new Map(balances.map(balance => [String(balance.ingredient), balance]));
+  // Phase 14: a recount must name the session it replaces, so a stale-out and
+  // the count that supersedes it are traceable to each other rather than being
+  // two unrelated sheets.
+  let recountOfId = null;
+  if (recountOf) {
+    if (!mongoose.isValidObjectId(recountOf)) throw httpError('Invalid recount reference', 400);
+    const prior = await StockCount.findOne({
+      _id: recountOf, restaurant: context.restaurantId, branch: context.branch._id
+    }).select('status').session(session).lean();
+    if (!prior) throw httpError('The stock count being recounted was not found', 404);
+    if (!['stale', 'rejected'].includes(prior.status)) {
+      throw httpError('Only a stale or rejected stock count can be recounted', 409);
+    }
+    recountOfId = prior._id;
+  }
+
   const id = new mongoose.Types.ObjectId();
   const count = new StockCount({
     _id: id,
@@ -198,6 +219,7 @@ export async function createStockCount({branchId, scope, ingredientIds = [], not
     }),
     notes: normalized.notes,
     createdBy: context.userId,
+    recountOf: recountOfId,
     requestKey: key,
     requestHash: hash
   });
@@ -273,7 +295,7 @@ export async function updateStockCount({countId, lines = [], notes, expectedVers
   const {count, context} = await scopedCount({countId, user, session});
   assertCounter(count, context);
   assertExpectedVersion(count, expectedVersion);
-  if (count.status !== 'draft') throw httpError('Only draft stock counts can be edited', 409);
+  if (!EDITABLE_STATUSES.includes(count.status)) throw httpError('Only draft or in-progress stock counts can be edited', 409);
   if (!lines.length && notes === undefined) throw httpError('No stock count changes were supplied', 400);
 
   const before = auditView(count);
@@ -311,6 +333,12 @@ export async function updateStockCount({countId, lines = [], notes, expectedVers
     });
   }
   if (notes !== undefined) count.notes = clean(notes);
+  // The session moves to `counting` as soon as a real figure is entered, so a
+  // sheet someone is part-way through is distinguishable from an untouched
+  // draft. It never moves back on its own.
+  if (count.status === 'draft' && count.lines.some(line => line.physicalQty != null)) {
+    count.status = 'counting';
+  }
   try {
     await count.save({session});
   } catch (error) {
@@ -334,7 +362,7 @@ export async function submitStockCount({countId, note, expectedVersion, user, se
   const {count, context} = await scopedCount({countId, user, session});
   assertCounter(count, context);
   assertExpectedVersion(count, expectedVersion);
-  if (count.status !== 'draft') throw httpError('Only draft stock counts can be submitted', 409);
+  if (!EDITABLE_STATUSES.includes(count.status)) throw httpError('Only draft or in-progress stock counts can be submitted', 409);
   const missing = count.lines.filter(line => line.physicalQty == null);
   if (missing.length) throw httpError(`Physical quantities are missing for ${missing.length} ingredient${missing.length === 1 ? '' : 's'}`, 409);
 
@@ -424,9 +452,59 @@ export async function decideStockCount({countId, decision, note, expectedVersion
     return Math.abs(currentQty - Number(line.systemQty)) > EPSILON || currentVersion !== Number(line.balanceVersion);
   });
   if (stale.length) {
+    // Phase 14: previously this threw and left the session stuck in
+    // `submitted` still holding the branch lock — the count could never be
+    // approved, never be closed, and no new count could be started for the
+    // branch. It is now closed as STALE, which releases the lock so a recount
+    // can begin, and records exactly which ingredients moved.
+    //
+    // The captured figures are NEVER written to the ledger in this path: the
+    // whole point is that valid movements made after capture must not be
+    // overwritten by a snapshot that predates them.
+    count.status = 'stale';
+    count.staleAt = new Date();
+    count.staleDetectedBy = context.userId;
+    count.staleLines = stale.map(line => {
+      const balance = balanceByIngredient.get(String(line.ingredient));
+      return {
+        ingredient: line.ingredient,
+        ingredientName: line.ingredientName,
+        capturedQty: Number(line.systemQty),
+        currentQty: Number(balance?.quantity || 0)
+      };
+    });
+    // A stale-out is not a human decision, so it must not consume the decision
+    // key — the same key stays usable against the recount. `activeKey` was
+    // already cleared above, and the schema refuses to persist a completed
+    // count that still holds a branch lock, so the release is guaranteed at
+    // two layers rather than by this assignment alone.
+    count.decisionKey = undefined;
+    count.decisionHash = undefined;
+    try {
+      await count.save({session});
+    } catch (error) {
+      if (error?.name === 'VersionError') throw httpError('Stock count changed; refresh before approval', 409);
+      throw error;
+    }
+    await createAudit({
+      count,
+      action: 'stock_count_stale',
+      before,
+      after: auditView(count, {staleLines: count.staleLines}),
+      reason: `Stock moved after capture for ${stale.map(line => line.ingredientName).slice(0, 5).join(', ')}`,
+      userId: context.userId,
+      session
+    });
+    // Returned rather than thrown: throwing would roll back the very
+    // stale-out we just recorded, since the caller runs inside a transaction.
+    // The route turns this into a 409.
     const names = stale.slice(0, 3).map(line => line.ingredientName).join(', ');
     const extra = stale.length > 3 ? ` and ${stale.length - 3} more` : '';
-    throw httpError(`Stock changed after this count was captured for ${names}${extra}; create a fresh count`, 409);
+    return {
+      stale: true,
+      message: `Stock changed after this count was captured for ${names}${extra}; create a fresh count`,
+      count: await populatedCountById(count._id, session)
+    };
   }
 
   const transactions = [];

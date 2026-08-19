@@ -689,6 +689,62 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Inventory counts and stock adjustment (Phase 14 — counts)
+
+A count session engine already existed: full and cycle scopes, an immutable
+system snapshot, variance calculation, approval through the inventory ledger,
+separation of duties, per-branch locking, idempotent create/decide and
+optimistic versioning. None of it was rebuilt. This phase completed the brief's
+state machine and fixed the defect that made stale counts unrecoverable.
+
+### The session lifecycle
+
+```
+Draft → Counting → Submitted → Approved → ledger variance
+                             → Rejected → recount
+                             → STALE    → recount
+```
+
+| State | Meaning |
+|---|---|
+| `draft` | Opened, nothing entered. Holds the branch lock. |
+| `counting` | **New.** At least one physical figure entered. Still editable. |
+| `submitted` | Every line counted, awaiting a decision. Staff cannot decide. |
+| `approved` | Variance posted to the ledger, one `ADJUSTMENT` per non-zero line. |
+| `rejected` | Closed with a mandatory reason. Nothing moves. |
+| `stale` | **New, terminal.** Stock moved after capture; the snapshot is discarded. |
+
+Full counts cover every active ingredient; cycle counts cover a chosen subset
+and touch nothing else. Each line records system quantity, physical quantity,
+variance quantity and variance value, plus who counted it and when.
+
+### Three defects fixed
+
+**1. A stale approval left the session permanently stuck.** It threw, so the
+count stayed `submitted` still holding the branch lock — it could never be
+approved, never be closed, and `POST /stock-counts` answered
+`409 This branch already has an active stock count` forever. **The branch could
+never count again.** A stale-out is now committed as a terminal `stale` state
+that releases the lock, records `staleAt` and lists exactly which ingredients
+moved with their captured and current quantities. It is still a 409 to the
+caller, because the approval genuinely did not happen.
+
+**2. There was no `counting` state,** so a sheet a counter was part-way through
+looked identical to an untouched draft.
+
+**3. A recount had no link to the session it replaced.** `recountOf` now points
+back, is tenant-scoped, and only accepts a `stale` or `rejected` parent.
+
+### Stale protection
+
+The check compares both the captured quantity **and** the ledger version, so a
+movement that nets back to the same number is still detected — the sheet is no
+longer evidence of anything. A stale snapshot is **never** written to the
+ledger: valid movements made after capture always win. Verified under genuine
+concurrency by driving the approval and a stock movement through overlapping
+`mongoose` sessions; whichever loses, the movement is never lost and the ledger
+chain stays intact.
+
 ## Tax invoice and receipt system (Phase 13 — invoicing)
 
 Phase 4E already built sequential per-branch numbering, preview-does-not-

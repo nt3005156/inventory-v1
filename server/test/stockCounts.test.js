@@ -321,7 +321,14 @@ describe('physical inventory stock counts', () => {
     assert.match(approval.body.message, /Stock changed after this count was captured/);
     assert.equal((await InventoryBalance.findOne({branch: world.branchA._id, ingredient: world.ingredient._id})).quantity, 20000);
     assert.equal(await InventoryTransaction.countDocuments({referenceType: 'stock_count'}), 0);
-    assert.equal((await StockCount.findById(created.body._id)).status, 'submitted');
+    // Phase 14: a stale-out is now terminal. Previously the session was left in
+    // `submitted` still holding the branch lock, so it could neither be
+    // approved nor closed and the branch could never start another count. The
+    // ledger protection asserted above is unchanged.
+    const staled = await StockCount.findById(created.body._id);
+    assert.equal(staled.status, 'stale');
+    assert.ok(staled.staleAt, 'the stale-out must be recorded');
+    assert.equal(staled.activeKey, undefined, 'the branch lock must be released');
   });
 
   it('rolls back every variance movement and the decision when any later line cannot reconcile', async () => {
