@@ -689,6 +689,102 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Stock count lock recovery (runbook)
+
+A stock count holds an exclusive per-branch lock (`activeKey`, enforced by the
+unique partial index `stock_count_active_branch`). The lock is released when
+the session reaches a terminal state. Phase 14 fixed the common wedge — a stale
+snapshot now closes itself — but auditing the shipped behaviour against the
+running API found three remaining ways a **submitted** session can hold its
+lock with no route to a decision. While one is held, the branch cannot start
+any new count: `POST /stock-counts` answers
+`409 This branch already has an active stock count`.
+
+| Wedge | Why approval can never succeed |
+|---|---|
+| `missing_ingredient` | A counted ingredient was deleted. Approval calls `moveStock()`, which 404s `Inventory movement ingredient was not found`; the transaction aborts and the session stays submitted and locked. |
+| `orphan_lock` | A terminal count (approved/rejected/stale) still carries `activeKey` from legacy data or a direct database edit. The schema refuses to *save* one, but a raw driver write produces it and it blocks the branch identically. |
+| `no_eligible_approver` | A manager-submitted count where separation of duties leaves nobody able to approve, and no active owner remains. |
+
+### What recovery will and will not do
+
+It **only** releases a branch lock held by a session proven undecidable, and
+appends an audit row saying so. It never approves a count, never posts stock,
+never writes `InventoryBalance` or `InventoryTransaction`, never alters a
+captured `physicalQty`/`systemQty`/variance, and never deletes a count or an
+audit row. A recovered session is closed as `stale` — the same terminal state
+the approval path uses for an untrustworthy snapshot — with its counted figures
+left intact for inspection. The recount is then created normally.
+
+### 1. Dry run (the default)
+
+```bash
+node scripts/recover-stock-count-locks.js --restaurant <restaurantId>
+```
+
+Nothing is written. `--restaurant` is mandatory so a run can never span
+tenants by accident. Optional: `--branch <id>`, `--min-age <minutes>`.
+
+The same thing over HTTP, owner-only:
+
+```bash
+curl -X POST /api/stock-counts/recover-locks -H 'Authorization: Bearer <owner>' \
+     -H 'Content-Type: application/json' -d '{}'
+```
+
+### 2. Review the output
+
+Every locked session is listed with a verdict. Read them before applying:
+
+* `actions[]` — sessions that **would** be recovered, each with `countNo`,
+  `branchName`, `reason`, a plain-English `detail`, `ageMinutes` and the
+  `toStatus` it would move to.
+* `skipped[]` — locked sessions that will **not** be touched, and why
+  (`Approvable by 2 user(s)`, `under the 720-minute threshold`, …).
+
+A session younger than `minAgeMinutes` (default **720 = 12 hours**) is always
+skipped, even when genuinely wedged, so an approval a manager is part-way
+through is never swept out from under them. Widen with `--min-age` only after
+reading the dry run.
+
+### 3. Execute
+
+```bash
+node scripts/recover-stock-count-locks.js --restaurant <id> --apply \
+     --reason "Ingredient deleted in error; branch KTM blocked since 12 Aug"
+```
+
+`--reason` (10+ characters) is mandatory with `--apply` and is written to the
+audit trail. Each session is re-diagnosed inside the write, so anything decided
+between the scan and the write is skipped rather than clobbered.
+
+### 4. Verify
+
+Re-run the dry run. It should report `scanned: 0` for the recovered branches.
+The operation is idempotent — a second `--apply` recovers nothing and writes no
+further audit rows. Confirm the branch works:
+`POST /api/stock-counts` should now return `201`.
+
+### Rollback and recovery considerations
+
+* **There is nothing to roll back in the inventory.** Recovery moves no stock,
+  so balances and the ledger are bit-identical before and after (pinned by
+  test). No stock correction is ever needed afterwards.
+* **The only state change is `status` + `activeKey`** (plus stale evidence).
+  To reverse one, restore `status: 'submitted'` and `activeKey: '<branchId>'`
+  on that document from your backup — but note the wedge will return, because
+  the underlying cause (deleted ingredient, missing approver) is unchanged.
+* **Prefer fixing the cause.** Re-creating the deleted ingredient, or adding an
+  eligible approver, makes the session decidable again through the normal API;
+  the write-time re-check will then skip it automatically.
+* **The audit trail is append-only.** `stock_count_lock_recovered` records the
+  prior status, the lock that was held, the machine-readable reason and the
+  operator. Nothing before it is modified, so the history of who counted what
+  survives recovery intact.
+* Take a database snapshot before the first `--apply` in production, as with
+  any migration. Docker is **not** available in this workspace, so no
+  containerised rehearsal of this runbook has been performed.
+
 ## Inventory counts and stock adjustment (Phase 14 — counts)
 
 A count session engine already existed: full and cycle scopes, an immutable
