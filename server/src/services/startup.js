@@ -16,6 +16,7 @@ import {ensureIngredientIndexes} from './ingredients.js';
 import {ensureRecipeIndexes} from './recipes.js';
 import {ensureCustomerIndexes} from './customerMigration.js';
 import {ensureDeliveryIndexes} from './deliveryMigration.js';
+import {ensureSalesInvoiceIndexes} from './salesInvoiceMigration.js';
 
 const OPERATIONAL_MIGRATIONS = [
   ensureMonthCloseIndexes,
@@ -36,7 +37,10 @@ const OPERATIONAL_MIGRATIONS = [
   ensureCustomerIndexes,
   // Phase 10: backfills branch/restaurant onto deliveries, maps legacy
   // statuses and retires duplicate dispatches before the unique index builds.
-  ensureDeliveryIndexes
+  ensureDeliveryIndexes,
+  // Phase 13: the sales invoice counter's unique index was declared but never
+  // built, so concurrent first-issues minted duplicate tax invoice numbers.
+  ensureSalesInvoiceIndexes
 ];
 
 const INSECURE_PRODUCTION_SECRETS = new Set([

@@ -128,10 +128,11 @@ describe('AUDIT 3 — reprint is inert', () => {
     const first = await receipt(order._id, '?format=html');
     assert.ok(!String(first.body).includes('REPRINT'), 'first print is not a reprint');
 
+    // Reprints are numbered by ordinal from Phase 13: first reprint = (1).
     const second = await receipt(order._id, '?format=html');
-    assert.ok(String(second.body).includes('REPRINT (2)'));
+    assert.ok(String(second.body).includes('REPRINT (1)'));
     const third = await receipt(order._id, '?format=html');
-    assert.ok(String(third.body).includes('REPRINT (3)'));
+    assert.ok(String(third.body).includes('REPRINT (2)'));
 
     const stored = await Order.findById(order._id);
     assert.equal(stored.printCount, 3);

@@ -453,13 +453,28 @@ export default function PosAdmin({call, branches = [], user}) {
                 <div className="pa-receipt">
                   <h3>
                     Receipt {receipt.invoiceNo || '(preview — no invoice number)'}
-                    {receipt.reprint && <span className="pa-chip is-refunded">REPRINT</span>}
+                    {receipt.reprint && (
+                      <span className="pa-chip is-refunded">REPRINT ({receipt.reprintNumber})</span>
+                    )}
+                    {receipt.voided && <span className="pa-chip is-refunded">VOID</span>}
                   </h3>
                   <p className="pa-dim">
                     {receipt.invoiceNo
                       ? `Issued ${stamp(receipt.invoicedAt)} · printed ${receipt.printCount ?? 1}×`
                       : 'Previewing does not allocate an invoice number.'}
                   </p>
+                  {receipt.voided && (
+                    <p className="pa-warn">
+                      This tax invoice was voided{receipt.voidReason ? `: ${receipt.voidReason}` : ''}.
+                      The number is retained so the VAT sequence stays gapless.
+                    </p>
+                  )}
+                  {receipt.tampered && (
+                    <p className="pa-warn">
+                      This order no longer matches the figure the invoice was issued
+                      against ({rs(receipt.invoicedTotal)}). Reconcile before reprinting.
+                    </p>
+                  )}
                 </div>
               )}
             </>

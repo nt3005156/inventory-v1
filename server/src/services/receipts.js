@@ -1,3 +1,4 @@
+import {Audit} from '../models/index.js';
 import {Branch, Order, Payment, Restaurant, SalesInvoiceCounter} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
@@ -57,12 +58,27 @@ export async function nextInvoiceNumber({restaurantId, branch, issuedAt = new Da
   const year = Number(new Intl.DateTimeFormat('en', {year: 'numeric', timeZone: 'Asia/Kathmandu'}).format(issuedAt));
   const branchCode = clean(branch.code).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
     || String(branch._id).slice(-4).toUpperCase();
-  const counter = await SalesInvoiceCounter.findOneAndUpdate(
-    {restaurant: restaurantId, branchCode, year},
-    {$inc: {value: 1}, $setOnInsert: {restaurant: restaurantId, branch: branch._id, branchCode, year}},
-    {upsert: true, new: true, session, setDefaultsOnInsert: true}
-  );
-  return `INV-${branchCode}-${year}-${String(counter.value).padStart(6, '0')}`;
+  // The upsert is only atomic because of the unique index on
+  // {restaurant, branchCode, year}. Without it two concurrent first-issues each
+  // insert their own counter, both read value 1, and two different orders are
+  // handed the SAME tax invoice number — reproduced before the index existed.
+  // With the index the loser gets E11000 instead, and retries onto the winner's
+  // document, which is the correct outcome rather than a failed sale.
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const counter = await SalesInvoiceCounter.findOneAndUpdate(
+        {restaurant: restaurantId, branchCode, year},
+        {$inc: {value: 1}, $setOnInsert: {restaurant: restaurantId, branch: branch._id, branchCode, year}},
+        {upsert: true, new: true, session, setDefaultsOnInsert: true}
+      );
+      return `INV-${branchCode}-${year}-${String(counter.value).padStart(6, '0')}`;
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      lastError = error;
+    }
+  }
+  throw httpError('Could not allocate a tax invoice number; please retry', 503, {cause: lastError});
 }
 
 const TYPE_LABELS = {
@@ -127,6 +143,17 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
 
   const taxableValue = money(Number(order.total || 0) - Number(order.vat || 0) - Number(order.deliveryFee || 0));
 
+  // Phase 13: a reprint must be able to prove it still describes the sale the
+  // number was issued against. `invoicedTotal` is pinned at allocation; if the
+  // order has since drifted the document says so rather than quietly printing
+  // a different figure under the same invoice number. Orders invoiced before
+  // this field existed have no pinned total and are reported as unknown, never
+  // as tampered.
+  const invoicedTotal = order.invoicedTotal == null ? null : money(order.invoicedTotal);
+  const tampered = Boolean(
+    order.invoiceNo && invoicedTotal !== null && money(order.total) !== invoicedTotal
+  );
+
   return {
     document: order.invoiceNo ? 'tax_invoice' : 'receipt',
     taxConfigured: Boolean(resolveSellerPan(restaurant, branch)),
@@ -137,6 +164,15 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
     printedAtLocal: kathmanduStamp(),
     reprint: Number(order.printCount || 0) > 1,
     printCount: Number(order.printCount || 0),
+    // The ORDINAL of this reprint, not the print count: the first reprint is
+    // REPRINT (1), matching how a till operator counts them. printCount stays
+    // the raw total, so the original print is print 1 / reprint 0.
+    reprintNumber: Math.max(0, Number(order.printCount || 0) - 1),
+    invoicedTotal,
+    tampered,
+    voided: Boolean(order.invoiceVoidedAt),
+    voidedAt: order.invoiceVoidedAt || null,
+    voidReason: clean(order.invoiceVoidReason) || null,
     currency: restaurant?.currency || 'NPR',
     timezone: 'Asia/Kathmandu',
     seller: {
@@ -188,6 +224,33 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
   };
 }
 
+/**
+ * Phase 13: void an issued tax invoice without releasing its number.
+ *
+ * Cancelling an already-invoiced order used to leave the invoice number on the
+ * order with nothing to say it had been voided, and a reprint was simply
+ * refused with a 409 — so the customer's copy of a numbered tax invoice had no
+ * counterpart in the system. A void keeps the number (a VAT sequence must stay
+ * gapless), stamps the reprint VOID, and records why.
+ */
+export async function voidInvoiceForOrder({order, reason, user, session}) {
+  if (!order.invoiceNo || order.invoiceVoidedAt) return false;
+  order.invoiceVoidedAt = new Date();
+  order.invoiceVoidReason = clean(reason) || 'Order cancelled after the tax invoice was issued';
+  await order.save({session: session || undefined});
+  await Audit.create([{
+    entity: 'order',
+    entityId: order._id,
+    branch: order.branch,
+    action: 'tax_invoice_voided',
+    before: {invoiceNo: order.invoiceNo},
+    after: {invoiceNo: order.invoiceNo, voidedAt: order.invoiceVoidedAt},
+    reason: order.invoiceVoidReason,
+    user: user?.id
+  }], {session: session || undefined});
+  return true;
+}
+
 /** Loads an order and issues (or reuses) its tax invoice number. */
 export async function getReceipt({orderId, user, issue = false, session}) {
   const order = await Order.findById(orderId).session(session || null);
@@ -200,11 +263,17 @@ export async function getReceipt({orderId, user, issue = false, session}) {
 
   // A tax invoice number is only allocated for a real sale, and only once.
   if (issue) {
-    if (['cancelled'].includes(order.status)) throw httpError('A cancelled order cannot be invoiced', 409);
+    // A cancelled order may never be ALLOCATED a number. But if it already has
+    // one, the guest is holding a numbered tax invoice, so a reprint must
+    // remain possible — stamped VOID — rather than being refused outright.
+    if (order.status === 'cancelled' && !order.invoiceNo) {
+      throw httpError('A cancelled order cannot be invoiced', 409);
+    }
     // Checked before the counter is touched, so a misconfigured tenant cannot
     // burn invoice numbers on documents that are not valid tax invoices.
     assertTaxConfig(restaurant, branch);
-    if (!order.invoiceNo) {
+    const firstIssue = !order.invoiceNo;
+    if (firstIssue) {
       order.invoiceNo = await nextInvoiceNumber({
         restaurantId: branch.restaurant,
         branch,
@@ -212,10 +281,34 @@ export async function getReceipt({orderId, user, issue = false, session}) {
         session
       });
       order.invoicedAt = new Date();
+      // Phase 13: pin the figure the number was issued against. Without this a
+      // reprint silently re-rendered whatever the order says today — an order
+      // edited after invoicing reprinted the SAME invoice number showing a
+      // different total, which is exactly the document a VAT audit relies on
+      // being stable.
+      order.invoicedTotal = money(order.total);
+      order.invoicedBy = user?.id || null;
     }
     order.printCount = Number(order.printCount || 0) + 1;
     order.lastPrintedAt = new Date();
     await order.save({session: session || undefined});
+
+    // Every allocation and every reprint is recorded. A tax document that can
+    // be printed an unlimited number of times with no trace is a fraud risk:
+    // the audit row is what distinguishes a genuine reissue from a duplicate
+    // handed to a second guest.
+    await Audit.create([{
+      entity: 'order',
+      entityId: order._id,
+      branch: order.branch,
+      action: firstIssue ? 'tax_invoice_issued' : 'tax_invoice_reprinted',
+      after: {
+        invoiceNo: order.invoiceNo,
+        printCount: order.printCount,
+        total: money(order.invoicedTotal ?? order.total)
+      },
+      user: user?.id
+    }], {session: session || undefined});
   }
 
   const [payments, populated] = await Promise.all([
@@ -236,11 +329,22 @@ export async function getReceipt({orderId, user, issue = false, session}) {
   });
 }
 
+/**
+ * HTML escaping for both text and attribute contexts.
+ *
+ * The apostrophe matters: an unescaped `'` breaks out of any single-quoted
+ * attribute. Nothing in the current template uses single quotes, but the
+ * template is edited by hand and the escaper is the thing that must not depend
+ * on that staying true. `/` is escaped too, so a payload cannot close a tag
+ * early if a value is ever interpolated inside one.
+ */
 const esc = value => String(value ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;');
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+  .replace(/\//g, '&#47;');
 
 const npr = value => Number(value || 0).toLocaleString('en-NP', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
@@ -312,7 +416,9 @@ ${receipt.seller.address ? `<p class="sub">${esc(receipt.seller.address)}</p>` :
 ${receipt.seller.phone ? `<p class="sub">Tel: ${esc(receipt.seller.phone)}</p>` : ''}
 ${receipt.seller.pan ? `<p class="sub">PAN: ${esc(receipt.seller.pan)}</p>` : ''}
 <p class="doc">${receipt.invoiceNo ? 'TAX INVOICE' : 'RECEIPT'}</p>
-${receipt.reprint ? `<p class="reprint">REPRINT (${receipt.printCount})</p>` : ''}
+${receipt.voided ? `<p class="reprint">*** VOID ***${receipt.voidReason ? `<br>${esc(receipt.voidReason)}` : ''}</p>` : ''}
+${receipt.tampered ? `<p class="reprint">*** DOES NOT MATCH ISSUED INVOICE ***<br>Issued for ${npr(receipt.invoicedTotal)}</p>` : ''}
+${receipt.reprint ? `<p class="reprint">REPRINT (${receipt.reprintNumber})</p>` : ''}
 <hr>
 <table class="meta">
 ${receipt.invoiceNo ? `<tr><td>Invoice</td><td class="r">${esc(receipt.invoiceNo)}</td></tr>` : ''}

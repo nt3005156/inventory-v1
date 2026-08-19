@@ -399,7 +399,72 @@ const reservationCounterSchema=new Schema({
 reservationCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'reservation_counter_scope'});
 export const ReservationCounter=model('ReservationCounter',reservationCounterSchema);
 
-export const Order=model('Order',new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},paymentSettledAt:Date,paymentReference:{type:String,trim:true,maxlength:80,index:true},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'}},{timestamps:true}));
+const orderSchema=new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},paymentSettledAt:Date,paymentReference:{type:String,trim:true,maxlength:80,index:true},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'},
+  // Phase 13: a tax invoice, once issued, is a legal document. `invoicedTotal`
+  // is the figure the numbered invoice was issued against, so a reprint can
+  // prove it still matches the order it claims to describe.
+  invoicedTotal:{type:Number,default:null},
+  invoicedBy:{...oid,ref:'User',default:null},
+  // Set when an already-invoiced order is voided. The invoice number is never
+  // released or reused; the reprint is stamped VOID instead.
+  invoiceVoidedAt:{type:Date,default:null},
+  invoiceVoidReason:{type:String,trim:true,maxlength:300}},{timestamps:true});
+
+// Phase 13: the tax invoice identity is append-only.
+//
+// A sequential tax invoice number is the anchor of the VAT audit trail. It was
+// freely rewritable: `Order.updateOne({...},{invoiceNo:'INV-KTM-2026-999999'})`
+// succeeded, and printCount could be rewound to 0 so a reprint would present
+// itself as an original. Both are now refused at the document and query layers.
+const FROZEN_INVOICE_PATHS=['invoiceNo','invoicedAt','invoicedTotal','invoicedBy'];
+function invoiceRewriteError(paths){
+  return Object.assign(new Error(`An issued tax invoice cannot be altered (${paths.join(', ')}); void it and issue a credit note instead`),{status:409});
+}
+orderSchema.post('init',function(){this.$locals.hadInvoice=Boolean(this.get('invoiceNo'));this.$locals.priorPrintCount=Number(this.get('printCount')||0);});
+orderSchema.pre('save',function(next){
+  if(this.isNew||!this.$locals.hadInvoice)return next();
+  const frozen=FROZEN_INVOICE_PATHS.filter(path=>this.isModified(path));
+  if(frozen.length)return next(invoiceRewriteError(frozen));
+  // A print counter that can go backwards lets a reprint pose as an original.
+  if(this.isModified('printCount')&&Number(this.get('printCount')||0)<Number(this.$locals.priorPrintCount||0)){
+    return next(Object.assign(new Error('printCount cannot be decreased; it records how many times a tax invoice was printed'),{status:409}));
+  }
+  next();
+});
+function refuseInvoiceRewrite(next){
+  const update=this.getUpdate()||{};
+  const touched=new Set();
+  for(const [operator,payload] of Object.entries(update)){
+    if(operator.startsWith('$')){
+      if(payload&&typeof payload==='object')for(const path of Object.keys(payload))touched.add(path.split('.')[0]);
+    }else touched.add(operator.split('.')[0]);
+  }
+  const frozen=FROZEN_INVOICE_PATHS.filter(path=>touched.has(path));
+  // Allocation itself is an update on an order with no invoice yet, so the
+  // guard only bites where a number already exists.
+  if(frozen.length){
+    this.setOptions({runInvoiceGuard:frozen});
+  }
+  if(touched.has('printCount')){
+    const dec=update.$inc?.printCount;
+    if(typeof dec==='number'&&dec<0)return next(Object.assign(new Error('printCount cannot be decreased; it records how many times a tax invoice was printed'),{status:409}));
+    const set=update.$set?.printCount??update.printCount;
+    if(typeof set==='number')this.setOptions({runPrintCountGuard:set});
+  }
+  const options=this.getOptions?.()||{};
+  if(!options.runInvoiceGuard&&options.runPrintCountGuard===undefined)return next();
+  if(options.allowInvoiceRewrite===true)return next();
+  this.model.findOne(this.getQuery()).select('invoiceNo printCount').lean().then(existing=>{
+    if(!existing)return next();
+    if(options.runInvoiceGuard&&existing.invoiceNo)return next(invoiceRewriteError(options.runInvoiceGuard));
+    if(options.runPrintCountGuard!==undefined&&existing.invoiceNo&&options.runPrintCountGuard<Number(existing.printCount||0)){
+      return next(Object.assign(new Error('printCount cannot be decreased; it records how many times a tax invoice was printed'),{status:409}));
+    }
+    next();
+  }).catch(next);
+}
+for(const hook of ['updateOne','updateMany','findOneAndUpdate'])orderSchema.pre(hook,refuseInvoiceRewrite);
+export const Order=model('Order',orderSchema);
 Order.schema.index({inventorySourceOrders:1},{name:'order_inventory_source_orders'});
 // Phase 5D — serves the kitchen board and performance report, which always
 // filter by branch + status and window/sort by createdAt. Without the trailing

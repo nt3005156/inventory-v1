@@ -281,7 +281,8 @@ describe('Phase 4E — printable HTML', () => {
     const order = await makeOrder();
     await request(`/api/orders/${order._id}/receipt?format=html`, {token: owner()});
     const second = await request(`/api/orders/${order._id}/receipt?format=html`, {token: owner()});
-    assert.ok(String(second.body).includes('REPRINT (2)'));
+    // Phase 13 numbers reprints by ORDINAL: the first reprint is REPRINT (1).
+    assert.ok(String(second.body).includes('REPRINT (1)'));
   });
 
   it('serves HTML rather than JSON', async () => {

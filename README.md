@@ -689,6 +689,65 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Tax invoice and receipt system (Phase 13 — invoicing)
+
+Phase 4E already built sequential per-branch numbering, preview-does-not-
+allocate, JSON + printable HTML, PAN enforcement and stored-figure rendering.
+None of it was rebuilt. This phase audited that engine and fixed six defects,
+each reproduced against the running API first.
+
+### The rules, as enforced
+
+| Rule | Behaviour |
+|---|---|
+| Number | `INV-<BRANCH>-<YEAR>-000001`, gapless per branch code and year. |
+| Preview | Allocates nothing — no number, no counter row, no print count, no audit row. |
+| Issue | Allocates once. Refused without a PAN, and refused entirely for a cancelled order. |
+| Reprint | Reuses the number and stamps `REPRINT (1)`, `REPRINT (2)` by ordinal. |
+| Immutability | The number, its date, the issuer and the invoiced total cannot be altered. |
+| Void | An invoiced order that is cancelled keeps its number and reprints stamped `VOID`. |
+
+### Six defects fixed
+
+**1. Concurrent first-issues minted DUPLICATE invoice numbers.** The counter's
+unique index was declared on the schema but the model is `autoIndex:false` and
+no migration ever built it, so it did not exist. Four different orders were all
+issued `INV-KTM-2026-000001`, with four counter rows for one branch.
+`ensureSalesInvoiceIndexes()` now builds it (consolidating any duplicate
+counters to the highest value first — a gap is explainable, a reused number is
+not) and `nextInvoiceNumber()` retries on the resulting `E11000`. Duplicate
+numbering is now defended at **two independent layers**: the counter-scope index
+and a unique partial index on `{branch, invoiceNo}`. Removing either alone still
+passes; removing both fails. Pre-existing duplicate numbers are **reported, never
+renumbered** — an issued invoice is already in a customer's hands.
+
+**2. The invoice number was freely rewritable.**
+`Order.updateOne({...}, {invoiceNo: 'INV-KTM-2026-999999'})` succeeded. Now
+refused at the document and query layers, along with `invoicedAt`,
+`invoicedTotal` and `invoicedBy`.
+
+**3. `printCount` could be rewound to 0,** so a reprint presented itself as an
+original and the REPRINT marker simply vanished. The counter can no longer
+decrease once a number is issued.
+
+**4. An order edited after invoicing reprinted the same number with a different
+total** (791 issued, 9999 reprinted). `invoicedTotal` is now pinned at
+allocation and a drifted reprint is stamped `*** DOES NOT MATCH ISSUED INVOICE
+***`. Orders invoiced before this field existed report `invoicedTotal: null` and
+are never flagged as tampered.
+
+**5. Cancelling an invoiced order left the number in place with nothing marking
+it void, and the reprint was refused with a flat 409** — the guest held a
+numbered tax invoice with no counterpart in the system. Cancelling now voids the
+invoice, keeps the number, and reprints stamped `VOID` with the reason.
+
+**6. Issuing or reprinting a tax document wrote no audit row.** Allocation,
+every reprint and every void are now audited with the user, the number and the
+print count.
+
+The HTML escaper also now escapes `'` and `/`, so a value is safe in an
+attribute context as well as in text.
+
 ## Refunds, voiding and financial controls (Phase 12 — financial)
 
 The refund engine shipped in Phase 4D and was hardened in 11F. This phase did
