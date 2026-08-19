@@ -296,3 +296,70 @@
 .dlv-ridernew{border:1px solid #e6e8ec;border-radius:9px;padding:10px;display:flex;flex-direction:column;gap:7px}
 .dlv-ridernew input,.dlv-ridernew select{padding:8px 10px;border:1px solid #d8dce3;border-radius:7px;font-size:14px}
 .dlv-ridernew .dlv-primary{background:#b8322f;color:#fff;border-color:#b8322f}
+
+/* ── POS management workspace (Phase 14) ─────────────────────────────────── */
+.pa{display:flex;flex-direction:column;gap:14px}
+.pa-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.pa-head h1{margin:0 0 4px}
+.pa-sub{margin:0;color:#6b7280;font-size:13px}
+.pa-head select{padding:8px 12px;border:1px solid #d8dce3;border-radius:8px}
+.pa-alert{padding:10px 14px;border-radius:8px;font-size:14px}
+.pa-error{background:#fdecec;color:#a12622;border:1px solid #f5c2c0}
+.pa-ok{background:#eaf7ee;color:#1d6f36;border:1px solid #b9e3c6;cursor:pointer}
+.pa-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.pa-kpi{background:#fff;border:1px solid #e6e8ec;border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:3px}
+.pa-kpi-label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a94a6}
+.pa-kpi-value{font-size:18px;font-weight:700;color:#1f2733}
+.pa-filters{display:flex;gap:8px;flex-wrap:wrap}
+.pa-filters input,.pa-filters select{padding:8px 11px;border:1px solid #d8dce3;border-radius:8px;font-size:14px}
+.pa-filters input[placeholder]{flex:1;min-width:200px}
+.pa-body{display:grid;grid-template-columns:minmax(320px,440px) 1fr;gap:14px;align-items:start}
+@media (max-width:1100px){.pa-body{grid-template-columns:1fr}}
+.pa-list,.pa-detail{background:#fff;border:1px solid #e6e8ec;border-radius:10px;padding:12px}
+.pa-detail{min-height:400px}
+.pa-placeholder,.pa-empty{color:#8a94a6;text-align:center;padding:40px 12px}
+.pa-muted{color:#8a94a6;font-size:14px}
+.pa-dim{display:block;font-size:12px;color:#6b7280}
+.pa-due{color:#a12622;font-weight:600}
+.pa-table{width:100%;border-collapse:collapse;font-size:14px}
+.pa-table th{text-align:left;padding:6px 8px;border-bottom:1px solid #e6e8ec;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a94a6}
+.pa-table td{padding:9px 8px;border-bottom:1px solid #f1f2f5;vertical-align:top}
+.pa-table .r,.pa-table th.r{text-align:right}
+.pa-list tr{cursor:pointer}
+.pa-list tr:hover{background:#f7f8fa}
+.pa-list tr.is-active{background:#fdf3f2}
+.pa-table tr.is-void td{opacity:.55;text-decoration:line-through}
+.pa-chip{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;background:#eef1f6;color:#3f4a5a;text-transform:capitalize;margin-right:4px}
+.pa-chip.is-completed,.pa-chip.is-paid{background:#eaf7ee;color:#1d6f36}
+.pa-chip.is-cancelled,.pa-chip.is-refunded,.pa-chip.is-reversed{background:#fdecec;color:#a12622}
+.pa-chip.is-pending,.pa-chip.is-preparing{background:#fdf4e3;color:#8a6116}
+.pa-dhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+.pa-dhead h2{margin:0 0 2px}
+.pa-detail h3{margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a94a6}
+.pa-mods{display:flex;gap:5px;flex-wrap:wrap;margin-top:3px}
+.pa-mod{background:#eef1f6;color:#3f4a5a;border-radius:999px;padding:1px 8px;font-size:11px}
+.pa-mod.is-removed{background:#fdecec;color:#a12622}
+.pa-note{font-size:12px;color:#6b7280;font-style:italic;margin-top:3px}
+.pa-totals{display:grid;grid-template-columns:1fr auto;gap:4px 16px;margin:12px 0 0;font-size:14px}
+.pa-totals dt{color:#6b7280}
+.pa-totals dd{margin:0;text-align:right;color:#1f2733}
+.pa-totals .pa-grand{font-weight:700;font-size:16px;border-top:1px solid #e6e8ec;padding-top:6px;margin-top:4px}
+.pa-settle{display:flex;gap:16px;flex-wrap:wrap;background:#f8f9fb;border-radius:8px;padding:10px 12px;margin-top:12px;font-size:13px;color:#4b5563}
+.pa-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.pa-actions button,.pa-table button{padding:8px 13px;border:1px solid #d8dce3;background:#fff;border-radius:7px;cursor:pointer;font-size:13px}
+.pa-actions button:hover,.pa-table button:hover{background:#f7f8fa}
+.pa-primary{background:#b8322f!important;color:#fff;border-color:#b8322f!important;font-weight:600}
+.pa-danger{color:#a12622;border-color:#f5c2c0!important}
+.pa-danger.pa-solid{background:#a12622!important;color:#fff;border-color:#a12622!important}
+.pa-receipt{margin-top:16px;padding:12px;background:#f8f9fb;border-radius:8px}
+.pa-receipt h3{margin:0 0 4px}
+.pa-modal{position:fixed;inset:0;background:rgba(15,20,28,.55);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
+.pa-modalbox{background:#fff;border-radius:14px;padding:20px;width:100%;max-width:440px;display:flex;flex-direction:column;gap:12px;max-height:90vh;overflow-y:auto}
+.pa-modalbox h3{margin:0;font-size:17px;text-transform:none;letter-spacing:0;color:#1f2733}
+.pa-modalbox label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:#4b5563}
+.pa-modalbox input,.pa-modalbox select{padding:10px 11px;border:1px solid #d8dce3;border-radius:8px;font-size:15px}
+.pa-warn{margin:0;background:#fdf4e3;color:#8a6116;border-radius:8px;padding:10px 12px;font-size:13px}
+.pa-hint{margin:0;font-size:13px;color:#a12622}
+.pa-modalactions{display:flex;gap:10px;margin-top:4px}
+.pa-modalactions button{flex:1;padding:11px;border:1px solid #d8dce3;background:#fff;border-radius:8px;cursor:pointer;font-size:14px}
+.pa-modalactions button:disabled{opacity:.5;cursor:not-allowed}

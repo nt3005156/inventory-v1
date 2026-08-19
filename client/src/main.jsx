@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -17,6 +17,7 @@ import MonthClose from './MonthClose.jsx';
 import Reservations from './Reservations.jsx';
 import Customers from './Customers.jsx';
 import Deliveries from './Deliveries.jsx';
+import PosAdmin from './PosAdmin.jsx';
 import RiderApp from './RiderApp.jsx';
 import Storefront from './Storefront.jsx';
 import './style.css';
@@ -102,6 +103,7 @@ function App() {
     ['Customers', Users],
     ['Deliveries', Bike],
     ['POS', ChefHat],
+    ['POS Admin', ClipboardList],
     ['KDS', UtensilsCrossed],
     ...(user?.role !== 'staff' ? [['Month Close', CalendarCheck2]] : []),
     ['Analytics', BarChart3]
@@ -177,6 +179,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'Reservations') return <Reservations call={call} branches={branches} user={user}/>;
   if (page === 'Customers') return <Customers call={call} branches={branches} user={user}/>;
   if (page === 'Deliveries') return <Deliveries call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'POS Admin') return <PosAdmin call={call} branches={branches} user={user}/>;
   if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;

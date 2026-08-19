@@ -689,6 +689,49 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## POS management workspace (Phase 14)
+
+Phases 11A–11F built a tested POS engine that was **entirely API-only**:
+refunds, payment reversal, receipt issuing and split payments had no screen at
+all. Phase 14 connects them. No backend capability was rebuilt and no endpoint
+was duplicated — the workspace binds to the existing routes.
+
+`POS Admin` in the sidebar provides today's orders with date, status, payment
+status, type and method filters plus free-text search over order number,
+customer and invoice; a full order detail; and the financial controls.
+
+### Two rules the UI follows
+
+**Stored values only.** Every amount comes from the persisted order and
+payment records. A test changes a menu price *after* a sale and asserts the
+order still shows what was actually charged — a historical order is never
+re-priced against today's menu.
+
+**The backend is the authority.** Buttons are hidden by role for usability,
+but every action is authorised server-side. The tests exercise the API
+directly with a staff token, because hiding a button is not a control.
+
+| Action | Who | Confirmation |
+|---|---|---|
+| Take payment | staff+ | Amount + method, capped at the outstanding balance |
+| Refund | manager+ | Amount + reason, capped at refundable |
+| Reverse payment | **owner** | Reason required, explains it is not a refund |
+| Issue invoice | staff+ | Warns the number is permanent |
+
+### Receipts
+
+Preview and issue are deliberately different actions in the UI, because they
+are different in the backend: **previewing never allocates an invoice
+number**. Issuing allocates `INV-<BRANCH>-<YEAR>-######` once; reprints reuse
+it and are marked `REPRINT`. A test asserts a customer named
+`<script>alert(1)</script>` is escaped in the rendered HTML.
+
+### Loyalty — deferred, not implemented
+
+Loyalty **balances** are displayed by the CRM (Phase 9) and points accrue from
+spend. There is **no redemption workflow** in the backend, so none was invented
+here. Burning points at the till remains a separate bounded task.
+
 ## POS split payments (11F)
 
 Multiple tenders, partial payment, running balance, overpayment refusal and
