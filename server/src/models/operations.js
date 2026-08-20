@@ -959,4 +959,40 @@ export const DELIVERY_TRANSITIONS=Object.freeze({
   failed:[],
   cancelled:[]
 });
-export const Notification=model('Notification',new Schema({branch:{...oid,ref:'Branch'},user:{...oid,ref:'User'},type:String,title:String,body:String,read:{type:Boolean,default:false},referenceId:oid},{timestamps:true}));
+// Phase 16A — the existing Notification model IS the alert model, so it is
+// extended rather than duplicated by a parallel alert collection.
+//
+// `read` is retained for the existing mark-read routes and UI. `status` adds
+// the actionable lifecycle an operational alert needs: open -> acknowledged ->
+// resolved. A duplicate alert for the same unresolved condition is prevented by
+// the partial unique index below rather than only by an application check.
+const notificationSchema=new Schema({
+  branch:{...oid,ref:'Branch'},
+  restaurant:{...oid,ref:'Restaurant',index:true},
+  user:{...oid,ref:'User'},
+  type:String,
+  title:String,
+  body:String,
+  read:{type:Boolean,default:false},
+  referenceId:oid,
+  ingredient:{...oid,ref:'Ingredient'},
+  severity:{type:String,enum:['info','warning','critical'],default:'info'},
+  status:{type:String,enum:['open','acknowledged','resolved'],default:'open',index:true},
+  acknowledgedAt:Date,
+  acknowledgedBy:{...oid,ref:'User'},
+  resolvedAt:Date,
+  resolvedBy:{...oid,ref:'User'},
+  resolutionNote:{type:String,trim:true,maxlength:300},
+  context:{type:Schema.Types.Mixed}
+},{timestamps:true});
+notificationSchema.pre('validate',function(){
+  // Acknowledgement and resolution must carry their evidence, or the lifecycle
+  // is decorative.
+  if(this.status==='acknowledged'&&(!this.acknowledgedAt||!this.acknowledgedBy)){
+    this.invalidate('status','An acknowledged alert requires acknowledgedAt and acknowledgedBy');
+  }
+  if(this.status==='resolved'&&!this.resolvedAt){
+    this.invalidate('status','A resolved alert requires resolvedAt');
+  }
+});
+export const Notification=model('Notification',notificationSchema);

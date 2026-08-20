@@ -689,6 +689,82 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Reorder alert hardening (Phase 16A)
+
+Phase 17's reorder engine, the alert list, the PO workflow and the Socket.IO
+infrastructure were reused unchanged. This phase fixed one real defect and
+added the operational scaffolding around them.
+
+### Defect: a restaurant-wide plan summed stock across branches
+
+Reproduced against the running API. Branch A held 18000 against a reorder level
+of 19000 while branch B held 20000. The branch-scoped plan correctly reported
+one line; the **owner-wide plan reported zero**, because quantities were summed
+into a single number before comparison, and the sweep therefore raised nothing
+while a branch was genuinely short. Any alert it did raise carried
+`branch: null` — nobody's alert. Stock, usage and on-order are now keyed by
+branch+ingredient, and every line names its branch.
+
+### Scheduled sweep
+
+`REORDER_SCHEDULER_ENABLED=true` starts an interval sweep
+(`REORDER_SCHEDULER_INTERVAL_MINUTES`, default 60). It runs once per restaurant
+as that restaurant's own owner, so it cannot cross tenants; a restaurant with no
+active owner is **skipped and reported** rather than swept with borrowed
+privileges. A tick never overlaps itself, every error is caught and logged, the
+timer is `unref()`ed so it cannot delay shutdown, and a module-level singleton
+means importing the module twice cannot start two timers. The manual
+`POST /purchasing/reorder-alerts/run` endpoint is unchanged.
+
+**Horizontal scaling limitation, stated plainly:** this is in-process. With
+multiple API containers every container ticks. Alert *correctness* survives that
+because the unique partial index `alert_open_condition` collapses concurrent
+inserts to one alert per condition, but read load multiplies and telemetry is
+per-process. `setSchedulerLock()` accepts an external lock so a scaled
+deployment can add leader election without touching the module. No Redis or lock
+collection exists in this repository, so none is pretended.
+
+### Alert lifecycle
+
+The existing `Notification` model **was** the alert model, so it was extended
+rather than duplicated: `restaurant`, `ingredient`, `severity`, `status`
+(`open` → `acknowledged` → `resolved`), `acknowledgedAt/By`, `resolvedAt/By` and
+`context`. Duplicate suppression moved from a racy "find one from the last 24h"
+check to a **unique partial index** on `{branch, type, referenceId}` scoped to
+unresolved alerts. Resolving frees the condition so a recurrence alerts again.
+`POST /alerts/:id/acknowledge` and `/resolve` are manager/owner only.
+
+A consequence worth recording: the new index initially made a *goods receipt*
+fail, because the ledger raised its low-stock alert with a plain insert inside
+the stock transaction and E11000 aborted the movement. The ledger now upserts,
+so an alert can never block stock.
+
+### Supplier performance
+
+`GET /suppliers/:id/performance` measures actual lead time from
+`PurchaseOrder.approvedAt` to the first `GoodsReceipt.receivedAt`. It reports
+average, median, min/max, late count and on-time rate. Below three completed
+deliveries it returns `insufficientData: true` with nulls rather than inventing
+a number, and the reorder engine keeps the catalog figure. Where history does
+exist the measured value **overrides** the declared one, so a chronically late
+supplier no longer looks punctual.
+
+### Usage refinement
+
+The flat mean still drives the reorder point. On top of it, a weekday profile is
+published only with 21+ days of history *and* every weekday observed, and a
+trend only with 14+ days. Below those thresholds the fields are `null` rather
+than fake precision.
+
+### Reorder workspace
+
+`Reorder` in the sidebar: recommendations with current quantity, reorder point,
+target, suggested quantity, supplier, SKU, price, lead time (marked when
+measured), estimated value, branch and alert status; filters by branch, supplier
+and stock state; alert acknowledge/resolve; and PO creation **behind an explicit
+confirmation dialog** that states the result is a draft. A generated PO follows
+the unchanged Draft → Pending → Approved → Receive chain.
+
 ## Inventory alert and reorder engine (Phase 17 — replenishment)
 
 Six alert classes already existed (`services/alerts.js`), as did Phase 16's

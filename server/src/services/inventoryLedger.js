@@ -319,13 +319,34 @@ export async function moveStock({
   if(after<=Number(balance.reorderLevel||0)){
     const name=ingredientRecord.name||'Ingredient';
     const alertType=after<=0?'out_of_stock':'low_stock';
-    const [note]=await Notification.create([{
-      branch,
-      type:alertType,
-      title:after<=0?'Out of stock':'Low stock',
-      body:`${name} is ${after<=0?'out of stock':'at reorder level'}`,
-      referenceId:ingredient
-    }],{session});
+    // Phase 16A: alerts are de-duplicated by a unique partial index on
+    // {branch, type, referenceId} for open/acknowledged rows. A plain insert
+    // would therefore throw E11000 whenever a movement re-triggers a condition
+    // that is ALREADY alerted — and because this runs inside the stock
+    // transaction, that aborted the movement itself. Caught in testing: a
+    // goods receipt into a branch that was already flagged low failed outright.
+    //
+    // An upsert is used instead: it raises the alert if none is open, and is a
+    // no-op if one already is. Stock movement can never be blocked by its own
+    // notification.
+    const note=await Notification.findOneAndUpdate(
+      {branch,type:alertType,referenceId:ingredient,status:{$in:['open','acknowledged']}},
+      {
+        $setOnInsert:{
+          branch,
+          type:alertType,
+          title:after<=0?'Out of stock':'Low stock',
+          body:`${name} is ${after<=0?'out of stock':'at reorder level'}`,
+          referenceId:ingredient,
+          ingredient,
+          restaurant,
+          severity:after<=0?'critical':'warning',
+          status:'open',
+          read:false
+        }
+      },
+      {upsert:true,new:true,session}
+    );
     // Phase 17: push it to the branch as it happens. The notification was
     // persisted but only surfaced when somebody refreshed the alert list, so a
     // manager watching the screen learned nothing until they looked. Recorded

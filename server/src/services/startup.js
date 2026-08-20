@@ -17,6 +17,7 @@ import {ensureRecipeIndexes} from './recipes.js';
 import {ensureCustomerIndexes} from './customerMigration.js';
 import {ensureDeliveryIndexes} from './deliveryMigration.js';
 import {ensureSalesInvoiceIndexes} from './salesInvoiceMigration.js';
+import {ensureAlertIndexes} from './alertMigration.js';
 
 const OPERATIONAL_MIGRATIONS = [
   ensureMonthCloseIndexes,
@@ -40,7 +41,10 @@ const OPERATIONAL_MIGRATIONS = [
   ensureDeliveryIndexes,
   // Phase 13: the sales invoice counter's unique index was declared but never
   // built, so concurrent first-issues minted duplicate tax invoice numbers.
-  ensureSalesInvoiceIndexes
+  ensureSalesInvoiceIndexes,
+  // Phase 16A: alert lifecycle backfill + the unique index that makes
+  // duplicate suppression a database guarantee rather than a racy check.
+  ensureAlertIndexes
 ];
 
 const INSECURE_PRODUCTION_SECRETS = new Set([

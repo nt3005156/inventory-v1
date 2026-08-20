@@ -391,3 +391,129 @@ export async function recordNegativeInventoryAlert({ branch, ingredient, attempt
 export async function recordUnusualConsumptionAlertIfNeeded() {
   // placeholder for future scheduled job
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 16A — alert lifecycle
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Persist an actionable alert, refusing a duplicate for the same unresolved
+ * condition.
+ *
+ * The unique partial index on {branch, type, referenceId} scoped to
+ * open/acknowledged is the real guarantee; the pre-check below only avoids a
+ * pointless write in the common case. On a genuine race the index raises
+ * E11000 and the existing alert is returned, which is the correct answer.
+ */
+export async function persistAlert({
+  branch, restaurant, type, title, body, severity = 'warning',
+  ingredient, referenceId, context, session
+}) {
+  if (!ALERT_TYPES.includes(type)) throw httpError(`Unknown alert type: ${type}`, 400);
+  const reference = referenceId || ingredient || null;
+  const filter = {
+    branch, type, referenceId: reference, status: {$in: ['open', 'acknowledged']}
+  };
+  const existing = await Notification.findOne(filter).session(session || null);
+  if (existing) return {alert: existing, created: false};
+
+  try {
+    const [alert] = await Notification.create([{
+      branch, restaurant, type, title, body, severity,
+      ingredient: ingredient || undefined,
+      referenceId: reference || undefined,
+      status: 'open',
+      context
+    }], {session: session || undefined});
+    return {alert, created: true};
+  } catch (error) {
+    if (error?.code === 11000) {
+      const winner = await Notification.findOne(filter).session(session || null);
+      if (winner) return {alert: winner, created: false};
+    }
+    throw error;
+  }
+}
+
+async function scopedAlert({alertId, user}) {
+  if (!mongoose.isValidObjectId(alertId)) throw httpError('Invalid alert', 400);
+  const alert = await Notification.findById(alertId);
+  if (!alert) throw httpError('Alert not found', 404);
+  // Tenancy: an alert without a branch is restaurant-wide and is refused to
+  // anyone outside the restaurant by the branch guard below where present.
+  if (alert.branch) await assertTenantBranchAccess(user, alert.branch);
+  else throw httpError('Alert is not branch scoped', 409);
+  return alert;
+}
+
+/** Acknowledge an alert: somebody has seen it and owns it. */
+export async function acknowledgeAlert({alertId, user, note}) {
+  const alert = await scopedAlert({alertId, user});
+  if (alert.status === 'resolved') throw httpError('A resolved alert cannot be acknowledged', 409);
+  if (alert.status === 'acknowledged') return alert;
+  alert.status = 'acknowledged';
+  alert.acknowledgedAt = new Date();
+  alert.acknowledgedBy = user.id;
+  if (note !== undefined) alert.resolutionNote = String(note ?? '').trim() || undefined;
+  alert.read = true;
+  await alert.save();
+  return alert;
+}
+
+/**
+ * Resolve an alert: the underlying condition has been dealt with.
+ *
+ * Resolution frees the unique index, so the same condition can raise a fresh
+ * alert if it recurs — which is what an operator expects after restocking.
+ */
+export async function resolveAlert({alertId, user, note}) {
+  const alert = await scopedAlert({alertId, user});
+  if (alert.status === 'resolved') return alert;
+  alert.status = 'resolved';
+  alert.resolvedAt = new Date();
+  alert.resolvedBy = user.id;
+  if (note !== undefined) alert.resolutionNote = String(note ?? '').trim() || undefined;
+  alert.read = true;
+  await alert.save();
+  return alert;
+}
+
+
+/**
+ * Persists the computed alert classes (high waste, unusual consumption) so
+ * they can be acknowledged like any other actionable alert.
+ *
+ * They remain computed on read for the live list — that behaviour is
+ * unchanged — but a sweep can now durably record them. Duplicate suppression
+ * is the same unique index every other alert uses.
+ */
+export async function persistComputedAlerts({branchId, user, restaurantId}) {
+  const scope = await resolveAlertScope(user, branchId);
+  const [waste, unusual] = await Promise.all([
+    buildHighWasteAlerts({branchIds: scope.branchIds, restaurantId: restaurantId || scope.restaurantId}).catch(() => []),
+    buildUnusualConsumptionAlerts({branchIds: scope.branchIds, restaurantId: restaurantId || scope.restaurantId}).catch(() => [])
+  ]);
+
+  const persisted = [];
+  for (const alert of [...waste, ...unusual]) {
+    if (!alert.branch || !alert.ingredientId) continue;
+    const outcome = await persistAlert({
+      branch: alert.branch,
+      restaurant: restaurantId || scope.restaurantId,
+      type: alert.type,
+      title: alert.title,
+      body: alert.body,
+      severity: alert.severity,
+      ingredient: alert.ingredientId,
+      referenceId: alert.ingredientId,
+      context: {
+        quantity: alert.quantity,
+        ...(alert.wastePercent !== undefined ? {wastePercent: alert.wastePercent} : {}),
+        ...(alert.averageConsumption !== undefined ? {averageConsumption: alert.averageConsumption} : {})
+      }
+    });
+    if (outcome.created) persisted.push({type: alert.type, ingredient: String(alert.ingredientId)});
+  }
+  return {persisted: persisted.length, alerts: persisted};
+}

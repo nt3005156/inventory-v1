@@ -21,6 +21,8 @@ import {
 import {
   buildReorderPlan, createSuggestedPurchaseOrder, raiseReorderAlerts
 } from '../services/reorderEngine.js';
+import {getSupplierPerformance} from '../services/supplierPerformance.js';
+import {schedulerStatus} from '../services/reorderScheduler.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
@@ -1088,6 +1090,21 @@ r.post('/purchasing/reorder-alerts/run', auth(MGMT), async (req, res) => {
   try {
     res.json(await raiseReorderAlerts({branchId: req.query.branch, user: req.user}));
   } catch (e) { fail(res, e); }
+});
+
+// Supplier delivery performance measured from real approve -> receive history.
+r.get('/suppliers/:id/performance', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await getSupplierPerformance({
+      supplierId: req.params.id, branchId: req.query.branch, user: req.user, limit: req.query.limit
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+// Scheduler telemetry, so an operator can see whether the sweep is actually
+// running rather than assuming it is.
+r.get('/purchasing/reorder-scheduler', auth(MGMT), async (req, res) => {
+  try { res.json(schedulerStatus()); } catch (e) { fail(res, e); }
 });
 
 export default r;

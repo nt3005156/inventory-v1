@@ -89,6 +89,65 @@ export function usageStatistics(dailyTotals = []) {
   };
 }
 
+/** Days of history required before a weekday profile means anything. */
+export const MIN_DAYS_FOR_WEEKDAY = 21;
+/** Days required before a trend is anything but noise. */
+export const MIN_DAYS_FOR_TREND = 14;
+
+/**
+ * Optional refinements on top of the flat mean.
+ *
+ * Both are deliberately conservative. A restaurant with three weeks of history
+ * has seen each weekday only three times, which is the bare minimum before a
+ * "Saturdays are busy" claim is anything but noise — below that the weekday
+ * profile is omitted entirely rather than reported with fake precision. The
+ * flat average is always present and is what the reorder point uses unless a
+ * caller opts into the weekday figure.
+ */
+export function refineUsage(dailyTotals = [], {start, asOf} = {}) {
+  const days = dailyTotals.length;
+  const result = {weekdayProfile: null, weekdayAverage: null, trend: null};
+  if (!days) return result;
+
+  if (days >= MIN_DAYS_FOR_WEEKDAY && start) {
+    const buckets = Array.from({length: 7}, () => []);
+    for (let index = 0; index < days; index += 1) {
+      const date = new Date(new Date(start).getTime() + index * 86400000);
+      buckets[date.getUTCDay()].push(dailyTotals[index]);
+    }
+    // Only publish the profile if every weekday was actually observed.
+    if (buckets.every(bucket => bucket.length > 0)) {
+      const profile = buckets.map(bucket =>
+        Math.round((bucket.reduce((sum, value) => sum + value, 0) / bucket.length) * 1000) / 1000);
+      result.weekdayProfile = profile;
+      const today = asOf ? new Date(asOf).getUTCDay() : new Date().getUTCDay();
+      result.weekdayAverage = profile[today];
+    }
+  }
+
+  if (days >= MIN_DAYS_FOR_TREND) {
+    // Compare the most recent half against the earlier half. Crude on purpose:
+    // a least-squares slope on noisy daily kitchen data would look precise
+    // without being more truthful.
+    const half = Math.floor(days / 2);
+    const earlier = dailyTotals.slice(0, half);
+    const recent = dailyTotals.slice(days - half);
+    const meanOf = rows => rows.reduce((sum, value) => sum + value, 0) / rows.length;
+    const before = meanOf(earlier);
+    const after = meanOf(recent);
+    if (before > 1e-9) {
+      const changePercent = Math.round(((after - before) / before) * 1000) / 10;
+      result.trend = {
+        direction: changePercent > 15 ? 'rising' : changePercent < -15 ? 'falling' : 'steady',
+        changePercent,
+        earlierAverage: Math.round(before * 1000) / 1000,
+        recentAverage: Math.round(after * 1000) / 1000
+      };
+    }
+  }
+  return result;
+}
+
 async function resolveScope({branchId, user}) {
   const identity = await userRestaurantContext(user);
   if (branchId) {
@@ -120,11 +179,13 @@ export async function dailyUsageByIngredient({branchIds, lookbackDays = DEFAULT_
     branch: {$in: branchIds},
     type: {$in: CONSUMPTION_TYPES},
     createdAt: {$gte: start, $lt: end}
-  }).select('ingredient changeQty createdAt').lean();
+  }).select('branch ingredient changeQty createdAt').lean();
 
+  // Keyed by branch+ingredient: usage in one branch must never inflate the
+  // reorder point of another.
   const byIngredient = new Map();
   for (const row of rows) {
-    const key = String(row.ingredient);
+    const key = `${row.branch}:${row.ingredient}`;
     const dayIndex = Math.floor((new Date(row.createdAt).getTime() - start.getTime()) / 86400000);
     if (dayIndex < 0 || dayIndex >= days) continue;
     const buckets = byIngredient.get(key) || new Array(days).fill(0);
@@ -134,7 +195,11 @@ export async function dailyUsageByIngredient({branchIds, lookbackDays = DEFAULT_
 
   const stats = new Map();
   for (const [ingredientId, buckets] of byIngredient) {
-    stats.set(ingredientId, {...usageStatistics(buckets), lookbackDays: days});
+    stats.set(ingredientId, {
+      ...usageStatistics(buckets),
+      ...refineUsage(buckets, {start, asOf: end}),
+      lookbackDays: days
+    });
   }
   return stats;
 }
@@ -164,9 +229,19 @@ export async function buildReorderPlan({
       restaurant: scope.restaurantId,
       branch: {$in: scope.branchIds},
       status: {$in: ['draft', 'pending', 'approved', 'sent', 'partially_received']}
-    }).select('items').lean(),
+    }).select('branch items').lean(),
     dailyUsageByIngredient({branchIds: scope.branchIds, lookbackDays})
   ]);
+
+  // Phase 16A: prefer a lead time MEASURED from real approve->receive history
+  // over the supplier's declared figure. A chronically late supplier otherwise
+  // looks punctual and the reorder point is computed against a fiction.
+  // Suppliers without enough history are absent from the map and keep the
+  // catalog value.
+  const {measuredLeadTimes} = await import('./supplierPerformance.js');
+  const measured = await measuredLeadTimes({
+    restaurantId: scope.restaurantId, branchIds: scope.branchIds
+  }).catch(() => new Map());
 
   const ingredientById = new Map(ingredients.map(row => [String(row._id), row]));
   const suppliersById = new Map(
@@ -182,34 +257,64 @@ export async function buildReorderPlan({
   const onOrder = new Map();
   for (const order of openOrders) {
     for (const item of order.items || []) {
-      const key = String(item.ingredient);
+      const key = `${order.branch}:${item.ingredient}`;
       const outstanding = Math.max(0, Number(item.orderedQty || 0) - Number(item.receivedQty || 0));
       if (outstanding > 0) onOrder.set(key, (onOrder.get(key) || 0) + outstanding);
     }
   }
 
-  const stockByIngredient = new Map();
+  // Phase 16A FIX — stock is held per BRANCH and must be evaluated per branch.
+  //
+  // This previously summed quantities across every branch in scope, so a
+  // restaurant-wide plan compared one combined number against one reorder
+  // level. Reproduced against the running API: branch A on 18000 against a
+  // level of 19000 was masked by branch B's 20000, and an owner-wide sweep
+  // evaluated 0 lines and raised no alert while a branch was genuinely short.
+  // Keyed by branch+ingredient, a branch-scoped plan is unchanged (one branch)
+  // and a restaurant-wide plan now reports each branch on its own merits.
+  const stockByKey = new Map();
+  const keyOf = (branch, ingredient) => `${branch}:${ingredient}`;
   for (const balance of balances) {
-    const key = String(balance.ingredient);
-    const current = stockByIngredient.get(key) || {quantity: 0, staticLevel: 0};
-    current.quantity += Number(balance.quantity || 0);
-    current.staticLevel = Math.max(current.staticLevel, Number(balance.reorderLevel || balance.minLevel || 0));
-    stockByIngredient.set(key, current);
+    const key = keyOf(String(balance.branch), String(balance.ingredient));
+    stockByKey.set(key, {
+      branch: String(balance.branch),
+      ingredient: String(balance.ingredient),
+      quantity: Number(balance.quantity || 0),
+      staticLevel: Number(balance.reorderLevel || balance.minLevel || 0)
+    });
   }
-  for (const ingredient of ingredients) {
-    const key = String(ingredient._id);
-    if (!stockByIngredient.has(key)) stockByIngredient.set(key, {quantity: 0, staticLevel: 0});
+  // An ingredient with no balance row in a branch is out of stock there, not
+  // absent from the plan.
+  for (const branchId of scope.branchIds) {
+    for (const ingredient of ingredients) {
+      const key = keyOf(String(branchId), String(ingredient._id));
+      if (!stockByKey.has(key)) {
+        stockByKey.set(key, {
+          branch: String(branchId), ingredient: String(ingredient._id),
+          quantity: 0, staticLevel: 0
+        });
+      }
+    }
   }
 
+  const branchNameById = new Map(
+    (await Branch.find({_id: {$in: scope.branchIds}}).select('name code').lean())
+      .map(row => [String(row._id), row])
+  );
+
   const lines = [];
-  for (const [ingredientId, stock] of stockByIngredient) {
+  for (const [, stock] of stockByKey) {
+    const ingredientId = stock.ingredient;
     const ingredient = ingredientById.get(ingredientId);
     if (!ingredient) continue;
 
     const ranked = rankCatalogOptions(catalogByIngredient.get(ingredientId) || [], {suppliersById});
     const preferred = ranked.preferred;
-    const stats = usage.get(ingredientId) || {average: 0, stdDev: 0, days: 0, total: 0, peak: 0, lookbackDays};
-    const leadTimeDays = Number(preferred?.leadDays ?? 0);
+    const stats = usage.get(keyOf(stock.branch, ingredientId))
+      || {average: 0, stdDev: 0, days: 0, total: 0, peak: 0, lookbackDays};
+    const declaredLeadDays = Number(preferred?.leadDays ?? 0);
+    const measuredLead = preferred?.supplier ? measured.get(String(preferred.supplier)) : null;
+    const leadTimeDays = measuredLead ? Number(measuredLead.leadDays) : declaredLeadDays;
 
     const safetyStock = safetyStockFor({
       stdDevDailyUsage: stats.stdDev, leadTimeDays, serviceLevel: level
@@ -223,7 +328,7 @@ export async function buildReorderPlan({
     const reorderPoint = round3(Math.max(computedPoint, staticLevel));
 
     const onHand = round3(stock.quantity);
-    const pending = round3(onOrder.get(ingredientId) || 0);
+    const pending = round3(onOrder.get(keyOf(stock.branch, ingredientId)) || 0);
     const available = round3(onHand + pending);
     const belowPoint = reorderPoint > 0 && available <= reorderPoint;
     if (!belowPoint && !includeAll) continue;
@@ -238,6 +343,9 @@ export async function buildReorderPlan({
     }
 
     lines.push({
+      branch: stock.branch,
+      branchName: branchNameById.get(stock.branch)?.name || '',
+      branchCode: branchNameById.get(stock.branch)?.code || '',
       ingredient: ingredient._id,
       ingredientName: ingredient.name,
       ingredientCode: ingredient.code || '',
@@ -251,6 +359,10 @@ export async function buildReorderPlan({
       usagePeak: stats.peak,
       lookbackDays: stats.lookbackDays ?? lookbackDays,
       leadTimeDays,
+      declaredLeadDays,
+      leadTimeSource: measuredLead ? 'measured' : 'catalog_declared',
+      leadTimeSamples: measuredLead?.samples ?? 0,
+      supplierOnTimeRate: measuredLead?.onTimeRate ?? null,
       safetyStock,
       computedReorderPoint: computedPoint,
       configuredReorderLevel: round3(staticLevel),
@@ -262,6 +374,9 @@ export async function buildReorderPlan({
       suggestedQty,
       supplier: preferred?.supplier || null,
       supplierName: preferred?.supplierName || null,
+      supplierSku: preferred?.supplierSku || '',
+      purchaseUnit: preferred?.purchaseUnit || null,
+      minOrderQty: preferred?.minOrderQty ?? null,
       unitCost: preferred ? preferred.effectiveUnitCost : null,
       expectedCost: preferred ? money(suggestedQty * preferred.effectiveUnitCost) : null,
       urgency: onHand <= 0 ? 'critical' : available <= reorderPoint ? 'reorder' : 'ok',
@@ -310,6 +425,7 @@ export async function buildReorderPlan({
       ? {_id: scope.branch._id, name: scope.branch.name, code: scope.branch.code}
       : null,
     scope: scope.branch ? 'branch' : 'restaurant',
+    restaurantId: scope.restaurantId,
     generatedAt: new Date(),
     currency: 'NPR',
     formula: 'reorderPoint = averageDailyUsage x leadTimeDays + safetyStock',
@@ -384,14 +500,30 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
   for (const line of plan.lines) {
     if (line.urgency === 'ok') continue;
     const type = line.currentStock <= 0 ? 'out_of_stock' : 'low_stock';
-    const since = new Date(Date.now() - 86400000);
+    // Phase 16A: the alert belongs to the branch that is actually short, not
+    // to whatever branch happened to be requested. A restaurant-wide sweep
+    // previously wrote `branch: null`, which is nobody's alert.
+    const alertBranch = line.branch || plan.branch?._id;
     const existing = await Notification.findOne({
-      branch: plan.branch?._id, type, referenceId: line.ingredient, createdAt: {$gte: since}
+      branch: alertBranch,
+      type,
+      referenceId: line.ingredient,
+      $or: [{status: {$in: ['open', 'acknowledged']}}, {status: {$exists: false}, createdAt: {$gte: new Date(Date.now() - 86400000)}}]
     }).lean();
     if (existing) continue;
 
     const [note] = await Notification.create([{
-      branch: plan.branch?._id,
+      branch: alertBranch,
+      restaurant: plan.restaurantId,
+      ingredient: line.ingredient,
+      severity: type === 'out_of_stock' ? 'critical' : 'warning',
+      status: 'open',
+      context: {
+        currentStock: line.currentStock,
+        reorderPoint: line.reorderPoint,
+        suggestedQty: line.suggestedQty,
+        supplierName: line.supplierName
+      },
       type,
       title: type === 'out_of_stock' ? 'Out of stock' : 'Below reorder point',
       body: `${line.ingredientName} — ${line.currentStock} ${line.unit} on hand against a reorder point of ${line.reorderPoint}`
@@ -399,7 +531,7 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
       referenceId: line.ingredient
     }]);
 
-    publishInventoryAlert(plan.branch?._id, {
+    publishInventoryAlert(alertBranch, {
       alertId: String(note._id),
       type,
       severity: type === 'out_of_stock' ? 'critical' : 'warning',
@@ -411,7 +543,7 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
       supplierName: line.supplierName,
       expectedCost: line.expectedCost
     });
-    raised.push({ingredient: line.ingredient, type});
+    raised.push({ingredient: line.ingredient, type, branch: String(alertBranch)});
   }
 
   return {raised: raised.length, alerts: raised, evaluated: plan.lines.length};
