@@ -689,6 +689,74 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Procurement and supplier ERP (Phase 16 — purchasing)
+
+Purchase orders with approval and receiving, goods receipts, purchase returns,
+supplier invoices, supplier payments, the supplier catalog (per-item lead days,
+price history, purchase-unit conversion) and a running-balance statement all
+already existed and were **not** rebuilt. Auditing them against the running API
+found five gaps.
+
+### A posted return did not reduce the supplier balance
+
+The brief states **Invoice − Payments − Returns = Outstanding**. The statement
+only ever queried invoices and payments, so goods sent back were still owed
+for. Probe: invoice 1130 → balance 1130 → post a 50-unit return → **balance
+still 1130**. Returns now emit a `purchase_return` credit into the statement
+event stream, appear as their own line in the running balance, and are exposed
+as `returned` plus an explicit `outstandingFormula`. Only `posted` returns
+count, and a return dated after the statement cut-off does not back-date into
+an earlier period.
+
+Two existing tests asserted the old figures and were corrected, not weakened:
+the purchasing E2E now expects `1994.35` instead of `2000`, and the Phase 1
+lifecycle expects `-113` instead of `0` — a supplier that has been paid in full
+and then had goods returned genuinely owes a credit back.
+
+### Supplier master data
+
+`contacts[]`, `addresses[]` (billing/delivery), `pan` (9 digits, required when
+`vatRegistered`), `paymentTermsDays`, `creditLimit`, `leadTimeDays` and
+`status` (`active` / `on_hold` / `blacklisted` / `inactive`). `status` and the
+legacy boolean `active` are kept in lockstep by a schema hook, so old
+`active:false` queries stay correct rather than a blacklisted supplier still
+reading as active. The balance endpoint now reports `creditLimit`,
+`creditAvailable` and `overCreditLimit`.
+
+### Purchase order lifecycle
+
+`received` was terminal, so a delivered order could never be marked
+commercially complete. The graph now ends `... → Received → Closed`, with
+`closed_short → closed` as well. Closing is refused while an invoice against
+the order is still outstanding, and stamps `closedBy` / `closedAt` /
+`closeNote`.
+
+### Reorder suggestions, preferred supplier, price comparison
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /purchasing/reorder-suggestions` | What to order, how much, from whom |
+| `GET /purchasing/price-comparison/:ingredientId` | Every supplier ranked |
+| `GET /purchasing/purchase-history/:ingredientId` | What was actually received and at what price |
+
+"Preferred" is **derived, not a flag someone must remember to set**: the
+cheapest *effective cost per base unit* from an orderable supplier wins, with
+the shorter lead time breaking ties. Headline prices are not comparable — one
+supplier quotes per kg VAT-exclusive, another per 500 g VAT-inclusive — so
+quotes are normalised to net-of-VAT per base unit first. A blacklisted supplier
+is never preferred however cheap (defended at two independent layers).
+
+Suggestions subtract stock already on an open purchase order, so a buyer is not
+told to order the same thing twice, and round up to the supplier's minimum
+order quantity **converted into base units**. An ingredient with no orderable
+supplier is reported as `actionable: false` rather than hidden.
+
+### Reports
+
+`purchase-by-supplier`, `purchase-by-branch`, `ingredient-purchase-prices`
+(with movement and trend) and `unpaid-invoices` (aged, with overdue totals).
+All are management-only and tenant-scoped.
+
 ## Lot / batch / expiry inventory (Phase 15 — batches)
 
 Batch-level stock already existed and was not rebuilt: `InventoryBatch` carries

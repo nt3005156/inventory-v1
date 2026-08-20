@@ -278,9 +278,19 @@ describe('Phase 1 purchasing end-to-end lifecycle', () => {
     ), 200);
     assert.equal(statement.invoiced, 904);
     assert.equal(statement.paid, 904);
-    assert.equal(statement.balance, 0);
+    // Phase 16: this lifecycle returns 100 units worth 113 to the supplier and
+    // then pays the invoice in full, so the supplier now owes that credit back.
+    // The balance previously read 0, which silently wrote the return off.
+    assert.equal(statement.returned, 113);
+    assert.equal(statement.balance, -113);
+    assert.deepEqual(statement.outstandingFormula, {
+      invoiced: 904, payments: 904, returns: 113, outstanding: -113
+    });
     assert.equal(statement.reconciliation.balanced, true);
-    assert.deepEqual(statement.lines.map(line => line.type), ['invoice', 'payment']);
+    assert.deepEqual(
+      statement.lines.map(line => line.type).sort(),
+      ['invoice', 'payment', 'purchase_return']
+    );
 
     const report = expectStatus(await request(
       `/api/reports/purchasing?branch=${world.branchA._id}&from=${ORDER_DATE}&to=${TODAY}`,

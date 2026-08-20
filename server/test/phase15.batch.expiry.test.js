@@ -71,10 +71,14 @@ const manager = () => tokenFor(world.manager);
 
 let keySeed = 0;
 const KEY = () => `p15b-${Date.now()}-${++keySeed}`;
+// Expiry is evaluated against the KATHMANDU calendar day, so the fixture must
+// build dates the same way. Deriving them from UTC made the suite fail between
+// 18:15 and 24:00 UTC, when Kathmandu has already rolled into the next day —
+// a flaw in this helper, not in the expiry logic.
 const day = n => {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
+  const ktm = new Date(Date.now() + 5.75 * 60 * 60 * 1000);
+  ktm.setUTCDate(ktm.getUTCDate() + n);
+  return ktm.toISOString().slice(0, 10);
 };
 
 async function inTransaction(fn) {

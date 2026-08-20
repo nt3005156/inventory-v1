@@ -57,6 +57,27 @@ const supplierFields = {
   address: z.string().trim().max(240).optional(),
   paymentTerms: z.string().trim().max(120).optional(),
   active: z.boolean().optional(),
+  // Phase 16 — supplier master data.
+  contacts: z.array(z.object({
+    name: z.string().trim().max(120).optional(),
+    role: z.string().trim().max(60).optional(),
+    phone: z.string().trim().max(40).optional(),
+    email: z.string().trim().max(160).optional(),
+    primary: z.boolean().optional()
+  }).strict()).max(20).optional(),
+  addresses: z.array(z.object({
+    label: z.string().trim().max(60).optional(),
+    line1: z.string().trim().max(200).optional(),
+    city: z.string().trim().max(80).optional(),
+    kind: z.enum(['billing', 'delivery', 'other']).optional()
+  }).strict()).max(20).optional(),
+  pan: z.string().trim().max(20).optional(),
+  vatRegistered: z.boolean().optional(),
+  paymentTermsDays: z.number().int().min(0).max(365).optional(),
+  creditLimit: z.number().min(0).optional(),
+  leadTimeDays: z.number().int().min(0).max(365).optional(),
+  status: z.enum(['active', 'on_hold', 'blacklisted', 'inactive']).optional(),
+  statusReason: z.string().trim().max(300).optional(),
   reason
 };
 const supplierCreateSchema = z.object(supplierFields).strict();

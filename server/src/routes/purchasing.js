@@ -14,6 +14,10 @@ import {
 } from '../services/returns.js';
 import {buildSupplierStatement} from '../services/statements.js';
 import {buildPurchasingReport} from '../services/purchasingReport.js';
+import {
+  buildReorderSuggestions, compareIngredientPrices, getIngredientPurchaseHistory,
+  ingredientPriceReport, listUnpaidInvoices, purchaseSummary
+} from '../services/procurement.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
@@ -251,7 +255,7 @@ r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, r
 });
 
 const poStatusSchema = z.object({
-  status: z.enum(['pending', 'approved', 'rejected', 'sent', 'cancelled']),
+  status: z.enum(['pending', 'approved', 'rejected', 'sent', 'closed', 'cancelled']),
   notes: z.string().trim().max(1000).optional(),
   expectedVersion: z.number().int().nonnegative().optional()
 }).superRefine((value, ctx) => {
@@ -575,8 +579,15 @@ r.get('/suppliers/:id/balance', auth(['owner', 'manager']), async (req, res) => 
       asOf: statement.period.asOf,
       invoiced: statement.invoiced,
       paid: statement.paid,
+      returned: statement.returned,
+      outstandingFormula: statement.outstandingFormula,
       balance: statement.balance,
-      aging: statement.aging
+      aging: statement.aging,
+      creditLimit: statement.supplier?.creditLimit ?? 0,
+      // Surfaced so a buyer sees it before raising the next order, not after.
+      creditAvailable: Math.round((Number(statement.supplier?.creditLimit || 0) - Number(statement.balance || 0)) * 100) / 100,
+      overCreditLimit: Number(statement.supplier?.creditLimit || 0) > 0
+        && Number(statement.balance || 0) > Number(statement.supplier?.creditLimit || 0)
     });
   } catch (e) {
     fail(res, e);
@@ -960,6 +971,68 @@ r.delete('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
   } catch (e) {
     fail(res, e);
   }
+});
+
+// ── Phase 16: procurement intelligence ───────────────────────────────────────
+// Read-only planning and reporting. Management only: these expose supplier
+// pricing and what the restaurant owes, which is not line-staff information.
+const MGMT = ['owner', 'manager'];
+
+r.get('/purchasing/reorder-suggestions', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await buildReorderSuggestions({
+      branchId: req.query.branch, user: req.user, includeAll: String(req.query.includeAll) === 'true'
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/purchasing/price-comparison/:ingredientId', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await compareIngredientPrices({ingredientId: req.params.ingredientId, user: req.user}));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/purchasing/purchase-history/:ingredientId', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await getIngredientPurchaseHistory({
+      ingredientId: req.params.ingredientId, supplierId: req.query.supplier,
+      branchId: req.query.branch, user: req.user, limit: req.query.limit
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/purchase-by-supplier', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await purchaseSummary({
+      groupBy: 'supplier', branchId: req.query.branch, user: req.user,
+      from: req.query.from, to: req.query.to
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/purchase-by-branch', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await purchaseSummary({
+      groupBy: 'branch', branchId: req.query.branch, user: req.user,
+      from: req.query.from, to: req.query.to
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/ingredient-purchase-prices', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await ingredientPriceReport({
+      branchId: req.query.branch, user: req.user, limit: req.query.limit
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/unpaid-invoices', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await listUnpaidInvoices({
+      branchId: req.query.branch, supplierId: req.query.supplier, user: req.user
+    }));
+  } catch (e) { fail(res, e); }
 });
 
 export default r;

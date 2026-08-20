@@ -23,13 +23,21 @@ export const PO_TRANSITIONS = {
   rejected: ['pending', 'cancelled'],
   sent: ['cancelled'],
   partially_received: [],
-  received: [],
-  closed_short: [],
+  // Phase 16: 'received' was terminal, so a fully delivered order could never
+  // be marked commercially complete. The brief's graph ends
+  // ... -> Received -> Closed. Closing is a separate, deliberate act: goods in
+  // is not the same fact as invoiced, reconciled and done with.
+  received: ['closed'],
+  closed_short: ['closed'],
+  closed: [],
   cancelled: []
 };
 
+/** Statuses from which a purchase order may be commercially closed. */
+export const CLOSABLE_STATUSES = ['received', 'closed_short'];
+
 export const RECEIVABLE_STATUSES = ['approved', 'sent', 'partially_received'];
-export const REPORTABLE_PO_STATUSES = ['approved', 'sent', 'partially_received', 'received', 'closed_short'];
+export const REPORTABLE_PO_STATUSES = ['approved', 'sent', 'partially_received', 'received', 'closed_short', 'closed'];
 
 export function canReceivePo(status) {
   return RECEIVABLE_STATUSES.includes(status);
@@ -408,6 +416,23 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
     const received = (po.items || []).some(item => Number(item.receivedQty || 0) > 0);
     if (received) throw httpError('Cannot cancel a purchase order that has receipts', 409);
   }
+  // Phase 16: closing is a commercial act, not a receiving one. It is refused
+  // while the supplier's invoice is still unpaid, so an order cannot be filed
+  // away with money still owed against it.
+  if (status === 'closed') {
+    const {SupplierInvoice} = await import('../models/operations.js');
+    const openInvoice = await SupplierInvoice.findOne({
+      restaurant: context.restaurantId,
+      purchaseOrder: po._id,
+      status: {$in: ['unpaid', 'partially_paid', 'partial']}
+    }).select('invoiceNo total paidAmount').session(session || null).lean();
+    if (openInvoice) {
+      throw httpError(
+        `Invoice ${openInvoice.invoiceNo} is still outstanding on this order; settle or void it before closing`,
+        409
+      );
+    }
+  }
 
   const before = approvalAuditView(po);
   const now = new Date();
@@ -438,6 +463,10 @@ export async function transitionPurchaseOrder({poId, status, notes, expectedVers
     po.rejectedBy = context.userId;
     po.rejectedAt = now;
     po.rejectionReason = note;
+  } else if (status === 'closed') {
+    po.closedBy = context.userId;
+    po.closedAt = now;
+    po.closeNote = note || undefined;
   }
   try {
     await po.save({session});

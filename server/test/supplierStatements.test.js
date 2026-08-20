@@ -148,6 +148,8 @@ describe('supplier statement balances and aging', () => {
       periodPayments: 50,
       periodReversals: 0,
       periodVoids: 0,
+      // Phase 16: purchase returns now credit the supplier balance.
+      periodReturns: 0,
       periodDebits: 226,
       periodCredits: 50,
       closingBalance: 289

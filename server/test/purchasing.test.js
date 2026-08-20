@@ -774,15 +774,23 @@ describe('purchasing E2E workflow', () => {
     assert.equal(stmt.status, 200, stmt.body?.message);
     assert.equal(stmt.body.invoiced, 2260);
     assert.equal(stmt.body.paid, 260);
-    assert.equal(stmt.body.balance, 2000);
-    assert.equal(stmt.body.lines.length, 2);
-    assert.equal(stmt.body.lines[0].type, 'invoice');
-    assert.equal(stmt.body.lines[0].ref, 'INV-E2E');
-    assert.equal(stmt.body.lines[0].debit, 2260);
-    assert.equal(stmt.body.lines[0].balance, 2260);
-    assert.equal(stmt.body.lines[1].type, 'payment');
-    assert.equal(stmt.body.lines[1].credit, 260);
-    assert.equal(stmt.body.lines[1].balance, 2000);
+    // Phase 16: this flow returns 100 units worth 5.65 to the supplier, and a
+    // return is a credit. The balance previously ignored it and read 2000,
+    // overstating what was owed by the value of goods already sent back.
+    assert.equal(stmt.body.returned, 5.65);
+    assert.equal(stmt.body.balance, 1994.35);
+    assert.deepEqual(stmt.body.outstandingFormula, {
+      invoiced: 2260, payments: 260, returns: 5.65, outstanding: 1994.35
+    });
+    // Three lines now: the return is its own credit on the statement rather
+    // than an invisible adjustment.
+    assert.equal(stmt.body.lines.length, 3);
+    const byType = Object.fromEntries(stmt.body.lines.map(line => [line.type, line]));
+    assert.equal(byType.invoice.ref, 'INV-E2E');
+    assert.equal(byType.invoice.debit, 2260);
+    assert.equal(byType.payment.credit, 260);
+    assert.equal(byType.purchase_return.credit, 5.65);
+    assert.equal(stmt.body.lines.at(-1).balance, 1994.35, 'the running balance closes at the outstanding amount');
 
     const report = await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.owner)});
     assert.equal(report.status, 200, report.body?.message);

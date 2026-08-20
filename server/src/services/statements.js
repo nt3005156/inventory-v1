@@ -1,12 +1,13 @@
 import mongoose from 'mongoose';
 import {Supplier} from '../models/index.js';
 import {SupplierInvoice, SupplierPayment} from '../models/operations.js';
+import {PurchaseReturn} from '../models/purchasing.js';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const KATHMANDU_OFFSET_MS = 5.75 * 60 * 60 * 1000;
-const LINE_TYPES = Object.freeze({invoice: 0, payment: 1, payment_reversal: 2, invoice_void: 3});
+const LINE_TYPES = Object.freeze({invoice: 0, purchase_return: 1, payment: 2, payment_reversal: 3, invoice_void: 4});
 const AGING_BUCKETS = Object.freeze(['current', 'days1To30', 'days31To60', 'days61To90', 'over90']);
 
 function httpError(message, status) {
@@ -74,8 +75,30 @@ function voidAtCutoff(invoice, toExclusive) {
   return eventDate(invoice.voidedAt, invoice.updatedAt) < toExclusive;
 }
 
-export function buildStatementEvents(invoices = [], payments = [], {toExclusive = new Date(8640000000000000)} = {}) {
+export function buildStatementEvents(invoices = [], payments = [], {toExclusive = new Date(8640000000000000), returns = []} = {}) {
   const events = [];
+  // Phase 16 — goods sent back to a supplier are money we no longer owe.
+  // Verified against the running API: a posted 50-unit return left the balance
+  // at 1130, unchanged, because the statement only ever read invoices and
+  // payments. The brief's formula is Invoice - Payments - Returns.
+  for (const row of returns) {
+    if (row.status !== 'posted') continue;
+    const date = eventDate(row.returnedAt, row.createdAt);
+    if (date >= toExclusive) continue;
+    events.push({
+      eventId: `purchase-return:${row._id}`,
+      sourceId: row._id,
+      type: 'purchase_return',
+      date,
+      createdAt: eventDate(row.createdAt, date),
+      ref: row.returnNo || 'Return',
+      returnNo: row.returnNo,
+      purchaseOrder: row.purchaseOrder,
+      reason: row.reason,
+      debit: 0,
+      credit: money(row.total)
+    });
+  }
   for (const invoice of invoices) {
     // Older void rows without an effective timestamp cannot be reconstructed safely.
     // Timestamped voids remain visible as explicit credits so period opening and
@@ -168,7 +191,7 @@ function lineWithBalance(event, balanceCents) {
 
 export function buildStatementLines(invoices, payments, options = {}) {
   const period = options.period || statementPeriod(options);
-  const allEvents = buildStatementEvents(invoices, payments, {toExclusive: period.toExclusive})
+  const allEvents = buildStatementEvents(invoices, payments, {toExclusive: period.toExclusive, returns: options.returns || []})
     .filter(event => event.date < period.toExclusive);
   const openingEvents = period.fromDate ? allEvents.filter(event => event.date < period.fromDate) : [];
   const periodEvents = allEvents.filter(event => !period.fromDate || event.date >= period.fromDate);
@@ -308,7 +331,19 @@ export async function buildSupplierStatement({supplierId, branchId, user, from, 
     .populate('createdBy reversedBy', 'name role')
     .lean() : [];
 
-  const ledger = buildStatementLines(invoices, payments, {period});
+  const returnMatch = {
+    restaurant: identity.restaurantId,
+    supplier: supplier._id,
+    status: 'posted',
+    returnedAt: {$lt: period.toExclusive}
+  };
+  if (branch) returnMatch.branch = branch._id;
+  const returns = await PurchaseReturn.find(returnMatch)
+    .sort({returnedAt: 1, createdAt: 1, _id: 1})
+    .populate('purchaseOrder', 'poNo status')
+    .lean();
+
+  const ledger = buildStatementLines(invoices, payments, {period, returns});
   const periodInvoiceCents = ledger.periodEvents
     .filter(event => event.type === 'invoice')
     .reduce((sum, event) => sum + cents(event.debit), 0);
@@ -331,8 +366,14 @@ export async function buildSupplierStatement({supplierId, branchId, user, from, 
     if (event.type === 'payment_reversal') return sum - cents(event.debit);
     return sum;
   }, 0);
+  const returnedCents = ledger.allEvents.reduce(
+    (sum, event) => event.type === 'purchase_return' ? sum + cents(event.credit) : sum, 0
+  );
+  const periodReturnCents = ledger.periodEvents
+    .filter(event => event.type === 'purchase_return')
+    .reduce((sum, event) => sum + cents(event.credit), 0);
   const periodDebitCents = periodInvoiceCents + periodReversalCents;
-  const periodCreditCents = periodPaymentCents + periodVoidCents;
+  const periodCreditCents = periodPaymentCents + periodVoidCents + periodReturnCents;
   const totalLines = ledger.lines.length;
   const pages = Math.max(1, Math.ceil(totalLines / safeLimit));
   const offset = (safePage - 1) * safeLimit;
@@ -377,19 +418,30 @@ export async function buildSupplierStatement({supplierId, branchId, user, from, 
       periodPayments: fromCents(periodPaymentCents),
       periodReversals: fromCents(periodReversalCents),
       periodVoids: fromCents(periodVoidCents),
+      periodReturns: fromCents(periodReturnCents),
       periodDebits: fromCents(periodDebitCents),
       periodCredits: fromCents(periodCreditCents),
       closingBalance: ledger.closingBalance
     },
     invoiced: fromCents(invoicedCents),
     paid: fromCents(paymentCents),
+    returned: fromCents(returnedCents),
     balance: ledger.closingBalance,
+    // The brief's formula, stated explicitly so a reader can check it.
+    outstandingFormula: {
+      invoiced: fromCents(invoicedCents),
+      payments: fromCents(paymentCents),
+      returns: fromCents(returnedCents),
+      outstanding: fromCents(invoicedCents - paymentCents - returnedCents)
+    },
     aging,
     reconciliation: {
       ledgerBalance: ledger.closingBalance,
       agingBalance: aging.totalDue,
-      difference: money(ledger.closingBalance - aging.totalDue),
-      balanced: Math.abs(money(ledger.closingBalance - aging.totalDue)) < 0.01
+      // Aging is invoice-level and cannot see a credit that is not tied to an
+      // invoice, so returns are added back before the two are compared.
+      difference: money(ledger.closingBalance - (aging.totalDue - fromCents(returnedCents))),
+      balanced: Math.abs(money(ledger.closingBalance - (aging.totalDue - fromCents(returnedCents)))) < 0.01
     },
     openInvoices: openInvoices.slice(0, evidenceLimit),
     lines: ledger.lines.slice(offset, offset + safeLimit),

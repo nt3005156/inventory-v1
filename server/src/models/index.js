@@ -39,6 +39,36 @@ const supplierSchema=new Schema({
   contact:{type:String,trim:true,maxlength:120},
   address:{type:String,trim:true,maxlength:240},
   paymentTerms:{type:String,trim:true,maxlength:120},
+  // Phase 16 — supplier master data. `contact`/`address` were single free-text
+  // strings, so a supplier with a sales rep and an accounts contact, or a
+  // billing and a delivery address, had nowhere to put them.
+  contacts:[{
+    name:{type:String,trim:true,maxlength:120},
+    role:{type:String,trim:true,maxlength:60},
+    phone:{type:String,trim:true,maxlength:40},
+    email:{type:String,trim:true,lowercase:true,maxlength:160},
+    primary:{type:Boolean,default:false}
+  }],
+  addresses:[{
+    label:{type:String,trim:true,maxlength:60},
+    line1:{type:String,trim:true,maxlength:200},
+    city:{type:String,trim:true,maxlength:80},
+    kind:{type:String,enum:['billing','delivery','other'],default:'other'}
+  }],
+  // Nepal tax registration. PAN is 9 digits; a VAT-registered supplier must
+  // carry one before its invoices can be claimed.
+  pan:{type:String,trim:true,maxlength:20},
+  vatRegistered:{type:Boolean,default:false},
+  // Credit control. `paymentTermsDays` is the machine-readable form of the
+  // free-text paymentTerms, used to age invoices and derive due dates.
+  paymentTermsDays:{type:Number,default:0,min:0,max:365},
+  creditLimit:{type:Number,default:0,min:0},
+  // Lead time for reorder suggestions when the catalog has no per-item value.
+  leadTimeDays:{type:Number,default:0,min:0,max:365},
+  // `status` supersedes the boolean `active`, which is kept in step below so
+  // every existing query that filters on it keeps working.
+  status:{type:String,enum:['active','on_hold','blacklisted','inactive'],default:'active',index:true},
+  statusReason:{type:String,trim:true,maxlength:300},
   active:{type:Boolean,default:true},
   ingredients:[{type:Schema.Types.ObjectId,ref:'Ingredient'}],
   createdBy:{type:Schema.Types.ObjectId,ref:'User'},
@@ -47,6 +77,24 @@ const supplierSchema=new Schema({
 supplierSchema.pre('validate',function(){
   this.name=String(this.name||'').trim().replace(/\s+/g,' ');
   this.nameNormalized=this.name.toUpperCase();
+  // `status` and `active` are two views of one fact. Keeping them in lockstep
+  // means legacy `active:false` queries and the richer status both stay true,
+  // rather than a supplier being blacklisted yet still 'active' to old code.
+  if(this.isModified('status')&&!this.isModified('active')){
+    this.active=this.status==='active';
+  }else if(this.isModified('active')&&!this.isModified('status')){
+    this.status=this.active?'active':'inactive';
+  }
+  if(this.pan!=null&&String(this.pan).trim()!==''){
+    const pan=String(this.pan).trim();
+    if(!/^\d{9}$/.test(pan))this.invalidate('pan','Supplier PAN must be exactly 9 digits');
+  }
+  // A VAT-registered supplier without a PAN cannot issue a claimable invoice.
+  if(this.vatRegistered&&!String(this.pan||'').trim()){
+    this.invalidate('pan','A VAT-registered supplier requires a PAN');
+  }
+  const primaries=(this.contacts||[]).filter(row=>row.primary).length;
+  if(primaries>1)this.invalidate('contacts','Only one contact can be primary');
 });
 supplierSchema.index(
   {restaurant:1,nameNormalized:1},

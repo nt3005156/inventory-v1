@@ -86,6 +86,15 @@ export async function createSupplier({input, user, session}) {
       contact: clean(input.contact),
       address: clean(input.address),
       paymentTerms: clean(input.paymentTerms),
+      contacts: input.contacts || [],
+      addresses: input.addresses || [],
+      pan: clean(input.pan),
+      vatRegistered: input.vatRegistered === true,
+      paymentTermsDays: Number(input.paymentTermsDays || 0),
+      creditLimit: Number(input.creditLimit || 0),
+      leadTimeDays: Number(input.leadTimeDays || 0),
+      ...(input.status ? {status: input.status} : {}),
+      statusReason: clean(input.statusReason),
       active: input.active !== false,
       createdBy: context.userId,
       updatedBy: context.userId
@@ -121,6 +130,16 @@ export async function updateSupplier({supplierId, patch, expectedVersion, user, 
   if (patch.contact !== undefined) row.contact = clean(patch.contact);
   if (patch.address !== undefined) row.address = clean(patch.address);
   if (patch.paymentTerms !== undefined) row.paymentTerms = clean(patch.paymentTerms);
+  if (patch.contacts !== undefined) row.contacts = patch.contacts;
+  if (patch.addresses !== undefined) row.addresses = patch.addresses;
+  if (patch.pan !== undefined) row.pan = clean(patch.pan);
+  if (patch.vatRegistered !== undefined) row.vatRegistered = Boolean(patch.vatRegistered);
+  if (patch.paymentTermsDays !== undefined) row.paymentTermsDays = Number(patch.paymentTermsDays);
+  if (patch.creditLimit !== undefined) row.creditLimit = Number(patch.creditLimit);
+  if (patch.leadTimeDays !== undefined) row.leadTimeDays = Number(patch.leadTimeDays);
+  if (patch.statusReason !== undefined) row.statusReason = clean(patch.statusReason);
+  // Set status before active so the schema hook mirrors the richer value.
+  if (patch.status !== undefined) row.status = patch.status;
   if (patch.active !== undefined) row.active = Boolean(patch.active);
   row.updatedBy = context.userId;
   try {
