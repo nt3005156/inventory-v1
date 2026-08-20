@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -9,6 +9,7 @@ import Tables from './Tables.jsx';
 import Analytics from './Analytics.jsx';
 import Inventory from './Inventory.jsx';
 import Reorder from './Reorder.jsx';
+import SupplierPerformance from './SupplierPerformance.jsx';
 import Dashboard from './Dashboard.jsx';
 import Ingredients from './Ingredients.jsx';
 import Recipes from './Recipes.jsx';
@@ -98,6 +99,7 @@ function App() {
     ['Stock Ops', Package],
     ['Purchases', ShoppingCart],
     ['Reorder', PackageSearch],
+    ['Supplier Performance', Gauge],
     ['Expenses', Receipt],
     ['Supplier Catalog', ShoppingCart],
     ['Tables', Armchair],
@@ -186,6 +188,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Reorder') return <Reorder call={call} branches={branches} user={user} token={token}/>;
+  if (page === 'Supplier Performance') return <SupplierPerformance call={call} branches={branches} user={user}/>;
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;

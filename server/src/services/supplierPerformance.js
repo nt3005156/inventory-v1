@@ -68,13 +68,27 @@ export function summariseDeliveries(samples = [], {minSamples = MIN_SAMPLES_FOR_
   const judged = complete.filter(row => Number.isFinite(row.promisedLeadDays));
   const late = judged.filter(row => row.actualLeadDays > row.promisedLeadDays);
 
+  // Fully-received figures are reported alongside, never instead of, the
+  // first-receipt ones: existing API consumers read averageLeadDays and must
+  // keep seeing first-receipt semantics.
+  const fullSamples = complete.filter(row => Number.isFinite(row.fullLeadDays));
+  const fullLead = fullSamples.map(row => row.fullLeadDays);
+  const partialCount = complete.filter(row => row.partialFirstReceipt).length;
+
   return {
     samples: complete.length,
     insufficientData: false,
+    // ── first-receipt semantics (unchanged, the default) ──
+    leadTimeSemantics: 'first_receipt',
     averageLeadDays: round1(leadDays.reduce((sum, value) => sum + value, 0) / leadDays.length),
     medianLeadDays: round1(medianOf(leadDays)),
     minLeadDays: round1(Math.min(...leadDays)),
     maxLeadDays: round1(Math.max(...leadDays)),
+    // ── fully-received semantics (additive) ──
+    fullyReceivedSamples: fullSamples.length,
+    averageFullLeadDays: fullLead.length ? round1(fullLead.reduce((sum, value) => sum + value, 0) / fullLead.length) : null,
+    medianFullLeadDays: fullLead.length ? round1(medianOf(fullLead)) : null,
+    partialFirstReceipts: partialCount,
     judgedDeliveries: judged.length,
     lateCount: late.length,
     onTimeRate: judged.length ? round1(((judged.length - late.length) / judged.length) * 100) : null,
@@ -96,7 +110,7 @@ export async function collectDeliverySamples({restaurantId, supplierId, branchId
     approvedAt: {$ne: null},
     status: {$in: ['partially_received', 'received', 'closed_short', 'closed']}
   })
-    .select('poNo approvedAt expectedDeliveryDate items branch')
+    .select('poNo approvedAt expectedDeliveryDate items branch status')
     .sort({approvedAt: -1})
     .limit(Math.min(500, Math.max(1, Number(limit) || 200)))
     .lean();
@@ -107,10 +121,15 @@ export async function collectDeliverySamples({restaurantId, supplierId, branchId
     purchaseOrder: {$in: orders.map(order => order._id)}
   }).select('purchaseOrder receivedAt receiptNo').sort({receivedAt: 1}).lean();
 
+  // FIRST receipt and LAST receipt are different questions and the brief asks
+  // for both. First answers "when did anything arrive"; last answers "when was
+  // the order actually complete". Receipts are already sorted ascending.
   const firstReceiptByOrder = new Map();
+  const lastReceiptByOrder = new Map();
   for (const receipt of receipts) {
     const key = String(receipt.purchaseOrder);
     if (!firstReceiptByOrder.has(key)) firstReceiptByOrder.set(key, receipt);
+    lastReceiptByOrder.set(key, receipt);
   }
 
   const samples = [];
@@ -136,14 +155,32 @@ export async function collectDeliverySamples({restaurantId, supplierId, branchId
       if (declared.length) promisedLeadDays = Math.max(...declared);
     }
 
+    // A line is outstanding when less was received than ordered. An order with
+    // nothing outstanding is fully received; anything else is a partial first
+    // receipt, which is exactly the distinction the two metrics turn on.
+    const fullyReceived = (order.items || []).every(
+      item => Number(item.receivedQty || 0) >= Number(item.orderedQty || 0)
+    );
+    const lastReceipt = lastReceiptByOrder.get(String(order._id));
+    const completedAt = fullyReceived ? new Date(lastReceipt.receivedAt).getTime() : null;
+    const fullLeadDays = completedAt === null ? null : (completedAt - approved) / 86400000;
+
     samples.push({
       purchaseOrder: order._id,
       poNo: order.poNo,
       branch: order.branch,
+      status: order.status,
       approvedAt: order.approvedAt,
       receivedAt: receipt.receivedAt,
       receiptNo: receipt.receiptNo,
       actualLeadDays: Math.round(actualLeadDays * 10) / 10,
+      // Null while an order is still short-delivered: reporting a completion
+      // time for something that has not completed would be a fabrication.
+      fullyReceived,
+      fullyReceivedAt: fullyReceived ? lastReceipt.receivedAt : null,
+      fullLeadDays: fullLeadDays === null || fullLeadDays < 0 ? null : Math.round(fullLeadDays * 10) / 10,
+      partialFirstReceipt: !fullyReceived,
+      receiptCount: receipts.filter(row => String(row.purchaseOrder) === String(order._id)).length,
       promisedLeadDays: promisedLeadDays === null ? null : Math.round(promisedLeadDays * 10) / 10,
       late: promisedLeadDays !== null && actualLeadDays > promisedLeadDays
     });
@@ -175,8 +212,15 @@ export async function getSupplierPerformance({supplierId, branchId, user, limit 
   });
   const metrics = summariseDeliveries(samples);
 
+  const totalPos = await PurchaseOrder.countDocuments({
+    restaurant: identity.restaurantId, supplier: supplier._id,
+    ...(branchIds ? {branch: {$in: branchIds}} : {})
+  });
+
   return {
     supplier: {_id: supplier._id, name: supplier.name, status: supplier.status || 'active'},
+    totalPurchaseOrders: totalPos,
+    receivedPurchaseOrders: samples.length,
     declaredLeadDays: Number(supplier.leadTimeDays || 0),
     ...metrics,
     // Stated explicitly so a caller cannot mistake a fallback for a measurement.

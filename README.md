@@ -689,6 +689,104 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Reorder scheduler, locking and migration (Phase 16B)
+
+Phase 16A shipped an in-process scheduler and said plainly that multiple API
+containers would each tick. This phase closes that, audits the migration, and
+puts the supplier-performance data on screen.
+
+### Distributed scheduler lock
+
+**Why MongoDB and not Redis.** `verifyTransactionCapableDatabase()` already
+refuses to boot against anything but a replica set, so the deployment has a
+linearizable primary and atomic `findOneAndUpdate`. That is everything a
+lease lock needs. Redis would add an operational dependency the architecture
+does not otherwise have, so it is deliberately not used. Probed before writing
+any code: two racing upserts on the same `_id` produced exactly one winner and
+error 11000 for the loser.
+
+| Property | How |
+|---|---|
+| Atomic acquisition | One `findOneAndUpdate` with `upsert`; the loser gets 11000, which is read as "someone else holds it", not as an error. |
+| Owner token | `pid:uuid` per acquisition, stored on the document. |
+| Automatic expiry | The lock is a **lease** with `expiresAt`. A crashed process blocks the scheduler for at most the TTL, with no manual cleanup. |
+| Ownership-verified release | `deleteOne({_id, owner})`. A stalled instance whose lease was taken over cannot delete the new holder's lock. |
+| TTL index | A **backstop only**. Mongo's TTL monitor runs about once a minute, far too coarse for correctness; expiry is enforced by the `expiresAt <= now` term in the acquisition filter. |
+
+Configured by `REORDER_SCHEDULER_DISTRIBUTED_LOCK` (default **on** when the
+scheduler is enabled) and `REORDER_SCHEDULER_LOCK_TTL_SECONDS` (default 300,
+clamped 30–3600). Contention is counted in `schedulerStatus().lockContentions`.
+The manual `POST /purchasing/reorder-alerts/run` **never** consults the lease —
+a human pressing the button is not the scheduler — and no ordinary API request
+waits on it.
+
+### Alert lifecycle migration (runbook)
+
+The migration is idempotent, deterministic, and **never deletes** an alert:
+duplicates are marked `resolved`, keeping the newest open. Verified by test that
+a second run reports zero changes.
+
+```bash
+# 1. Back up first. This edits alert status in place.
+mongodump --uri "$MONGODB_URI" --out ./backup-$(date +%F)
+
+# 2. Dry run — writes nothing
+node scripts/migrate-alert-lifecycle.js
+
+# 3. Review the output: totalAlerts, missingStatus, alreadyValid,
+#    wouldMarkResolved / wouldMarkOpen, and the duplicate samples showing
+#    which row is kept for each condition.
+
+# 4. Execute
+node scripts/migrate-alert-lifecycle.js --apply --
+
+# 5. Verify
+node scripts/migrate-alert-lifecycle.js --verify
+#    Expect missingStatus: 0, duplicateGroups: 0, uniqueIndexPresent: true
+
+# 6. Re-run the dry run; it must now report changesRequired: false
+node scripts/migrate-alert-lifecycle.js
+```
+
+The same logic also runs automatically at startup via
+`ensureOperationalIndexes()`. The script exists so it can be previewed and
+audited against production before a deploy does it unattended.
+
+### Lead time: first receipt vs fully received
+
+Both are reported; **neither replaces the other**.
+
+* `averageLeadDays` / `medianLeadDays` — approval to the **first** goods
+  receipt. This is the existing semantic and remains the default that
+  `leadTimeSemantics: 'first_receipt'` labels. It answers *when did anything
+  arrive*, which is what a reorder point needs: partial stock on the shelf ends
+  the stockout.
+* `averageFullLeadDays` / `medianFullLeadDays` — approval to the receipt that
+  **completed** the order. `null` while an order is still short delivered, never
+  approximated from the latest partial receipt.
+* `partialFirstReceipts` counts orders whose first delivery was short.
+
+The reorder engine continues to use first-receipt lead time. On-time rate is
+`null` (shown as **N/A**) when no delivery carried a promised date, with
+`onTimeBasis` explaining why rather than implying 100%.
+
+### Supplier performance UI
+
+`Supplier Performance` in the sidebar shows PO counts, late deliveries,
+on-time rate, partial first receipts, and two visually separated panels:
+**catalog lead time (declared)** against **actual lead time (measured)**. An
+estimate is never presented as a fact — with insufficient history the measured
+panel says so and states that the engine is falling back to the catalog value.
+
+### Frontend tests
+
+The repository had no frontend harness. Rather than adopt a second test culture,
+the existing `node:test` runner is reused with one new dependency (`jsdom`) and
+a small JSX loader built on `rolldown`, which Vite already ships. `npm test -w web`
+covers the reorder workspace: loading, API error, empty state, low/out-of-stock
+rendering, measured-vs-declared lead time, permission gating, and the
+confirm-before-create rule. Backend contracts are not duplicated there.
+
 ## Reorder alert hardening (Phase 16A)
 
 Phase 17's reorder engine, the alert list, the PO workflow and the Socket.IO

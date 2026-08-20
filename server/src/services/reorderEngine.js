@@ -512,7 +512,15 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
     }).lean();
     if (existing) continue;
 
-    const [note] = await Notification.create([{
+    // Two sweeps (or a sweep and the ledger's own alerting) can reach this
+    // line concurrently. The unique partial index is what guarantees ONE alert
+    // per condition, and the loser gets E11000. Verified under real
+    // concurrency: 2 of 5 racing pairs produced it. Absorbing it here is the
+    // correct outcome - the alert exists, raised by the winner - rather than
+    // letting a 500 escape from a background sweep.
+    let note;
+    try {
+      [note] = await Notification.create([{
       branch: alertBranch,
       restaurant: plan.restaurantId,
       ingredient: line.ingredient,
@@ -528,8 +536,12 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
       title: type === 'out_of_stock' ? 'Out of stock' : 'Below reorder point',
       body: `${line.ingredientName} — ${line.currentStock} ${line.unit} on hand against a reorder point of ${line.reorderPoint}`
         + (line.supplierName ? `; suggest ${line.suggestedQty} ${line.unit} from ${line.supplierName}` : '; no orderable supplier'),
-      referenceId: line.ingredient
-    }]);
+        referenceId: line.ingredient
+      }]);
+    } catch (error) {
+      if (error?.code === 11000) continue;
+      throw error;
+    }
 
     publishInventoryAlert(alertBranch, {
       alertId: String(note._id),

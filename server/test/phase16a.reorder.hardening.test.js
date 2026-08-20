@@ -417,8 +417,13 @@ describe('16A — scheduler', () => {
     assert.equal(status.ticks, 1);
     assert.ok(status.lastRunAt);
     assert.equal(status.inFlight, false);
-    assert.equal(status.scope, 'in-process', 'the limitation is reported, not hidden');
-    assert.equal(status.distributed, false);
+    // Phase 16B installs a MongoDB lease lock by default, so the scope is now
+    // reported as distributed rather than in-process. The assertion is
+    // strengthened rather than dropped: whichever mode is active must be
+    // reported truthfully.
+    assert.equal(status.scope, 'distributed-lock');
+    assert.equal(status.distributed, true);
+    assert.equal(status.lockKind, 'mongodb');
   });
 
   it('honours an external distributed lock when one is supplied', async () => {

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import {Restaurant} from '../models/operations.js';
 import {User} from '../models/index.js';
 import {raiseReorderAlerts} from './reorderEngine.js';
+import {ensureSchedulerLockIndexes, mongoSchedulerLock} from './schedulerLock.js';
 
 /**
  * Phase 16A — scheduled reorder sweep.
@@ -61,6 +62,14 @@ const truthy = value => ['1', 'true', 'yes', 'on'].includes(String(value ?? '').
 /** Reads scheduler configuration from the environment. */
 export function resolveSchedulerConfig(env = process.env) {
   const enabled = truthy(env.REORDER_SCHEDULER_ENABLED);
+  // Phase 16B: the distributed lock is ON by default whenever the scheduler is
+  // enabled, because the repository already mandates a replica set. It can be
+  // turned off for a single-instance deployment that wants to skip the extra
+  // round trip, but that choice is now explicit rather than the silent default.
+  const distributedLock = env.REORDER_SCHEDULER_DISTRIBUTED_LOCK === undefined
+    ? true
+    : truthy(env.REORDER_SCHEDULER_DISTRIBUTED_LOCK);
+  const lockTtlRaw = Number(env.REORDER_SCHEDULER_LOCK_TTL_SECONDS ?? 300);
   const raw = Number(env.REORDER_SCHEDULER_INTERVAL_MINUTES ?? DEFAULT_INTERVAL_MINUTES);
   const intervalMinutes = Number.isFinite(raw)
     ? Math.min(MAX_INTERVAL_MINUTES, Math.max(MIN_INTERVAL_MINUTES, Math.trunc(raw)))
@@ -71,9 +80,11 @@ export function resolveSchedulerConfig(env = process.env) {
     intervalMinutes,
     intervalMs: intervalMinutes * 60000,
     lookbackDays: Number.isFinite(lookbackDaysRaw) ? Math.min(365, Math.max(1, Math.trunc(lookbackDaysRaw))) : 30,
+    distributedLock,
+    lockTtlSeconds: Number.isFinite(lockTtlRaw) ? Math.min(3600, Math.max(30, Math.trunc(lockTtlRaw))) : 300,
     // Honest about what this is.
     distributed: Boolean(lockProvider),
-    scope: 'in-process'
+    scope: lockProvider ? 'distributed-lock' : 'in-process'
   };
 }
 
@@ -149,6 +160,7 @@ export function schedulerStatus() {
     intervalMinutes: state.config.intervalMinutes,
     lookbackDays: state.config.lookbackDays,
     distributed: Boolean(lockProvider),
+    lockKind: lockProvider?.kind || null,
     scope: lockProvider ? 'distributed-lock' : 'in-process',
     ticks: state.ticks,
     inFlight: state.inFlight,
@@ -156,7 +168,8 @@ export function schedulerStatus() {
     lastDurationMs: state.lastDurationMs,
     lastRaised: state.lastRaised,
     lastError: state.lastError,
-    skippedOverlaps: state.skippedOverlaps
+    skippedOverlaps: state.skippedOverlaps,
+    lockContentions: state.lockContentions
   };
 }
 
@@ -170,11 +183,20 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
   // Singleton guard: several modules may initialise, only one timer may exist.
   if (state) return {started: false, reason: 'Scheduler already running', config: state.config};
 
+  // Install the MongoDB lease lock unless a provider was injected by a test or
+  // a deployment explicitly opted out.
+  if (!lockProvider && config.distributedLock) {
+    setSchedulerLock(mongoSchedulerLock({ttlSeconds: config.lockTtlSeconds}));
+    ensureSchedulerLockIndexes().catch(error =>
+      logger.warn?.('[reorder-scheduler] could not build the lock TTL index', error?.message));
+  }
+
   const local = {
     config,
     ticks: 0,
     inFlight: false,
     skippedOverlaps: 0,
+    lockContentions: 0,
     lastRunAt: null,
     lastDurationMs: null,
     lastRaised: null,
@@ -193,7 +215,12 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
     try {
       if (lockProvider) {
         release = await lockProvider.acquire();
-        if (!release) return; // Another instance holds the lock this tick.
+        if (!release) {
+          // Another instance holds the lease. Not an error: exactly one
+          // instance doing the work is the whole point.
+          local.lockContentions += 1;
+          return;
+        }
       }
       local.ticks += 1;
       const outcome = await runScheduledSweep({lookbackDays: config.lookbackDays});

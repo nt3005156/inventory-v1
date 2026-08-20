@@ -53,18 +53,33 @@ async function ensureCollection(name) {
  * A row already marked read is treated as resolved, which is what "read"
  * meant operationally.
  */
-export async function backfillAlertLifecycle() {
-  if (!mongoose.connection.db) return {updated: 0};
+export async function backfillAlertLifecycle({dryRun = false} = {}) {
+  if (!mongoose.connection.db) return {updated: 0, dryRun};
   const collection = mongoose.connection.db.collection(Notification.collection.collectionName);
-  const resolved = await collection.updateMany(
-    {status: {$exists: false}, read: true},
-    {$set: {status: 'resolved', severity: 'info'}}
-  );
-  const open = await collection.updateMany(
-    {status: {$exists: false}},
-    {$set: {status: 'open', severity: 'info'}}
-  );
-  return {updated: (resolved.modifiedCount || 0) + (open.modifiedCount || 0)};
+  const resolvedFilter = {status: {$exists: false}, read: true};
+  const openFilter = {status: {$exists: false}};
+
+  if (dryRun) {
+    // Count the SAME filters the write would use, in the same order, so the
+    // preview cannot drift from the execution.
+    const wouldResolve = await collection.countDocuments(resolvedFilter);
+    const wouldOpen = await collection.countDocuments(openFilter) - wouldResolve;
+    return {
+      dryRun: true,
+      updated: wouldResolve + Math.max(0, wouldOpen),
+      wouldMarkResolved: wouldResolve,
+      wouldMarkOpen: Math.max(0, wouldOpen)
+    };
+  }
+
+  const resolved = await collection.updateMany(resolvedFilter, {$set: {status: 'resolved', severity: 'info'}});
+  const open = await collection.updateMany(openFilter, {$set: {status: 'open', severity: 'info'}});
+  return {
+    dryRun: false,
+    updated: (resolved.modifiedCount || 0) + (open.modifiedCount || 0),
+    markedResolved: resolved.modifiedCount || 0,
+    markedOpen: open.modifiedCount || 0
+  };
 }
 
 /**
@@ -75,8 +90,8 @@ export async function backfillAlertLifecycle() {
  * needs. The survivor keeps its history; the rest are marked resolved rather
  * than deleted, so the trail of what was raised is preserved.
  */
-export async function retireDuplicateAlerts() {
-  if (!mongoose.connection.db) return {retired: 0};
+export async function retireDuplicateAlerts({dryRun = false} = {}) {
+  if (!mongoose.connection.db) return {retired: 0, dryRun};
   const collection = mongoose.connection.db.collection(Notification.collection.collectionName);
   const groups = await collection.aggregate([
     {$match: {status: {$in: ['open', 'acknowledged']}, referenceId: {$type: 'objectId'}, branch: {$type: 'objectId'}}},
@@ -86,20 +101,63 @@ export async function retireDuplicateAlerts() {
   ]).toArray();
 
   let retired = 0;
+  const samples = [];
   for (const group of groups) {
-    const [, ...duplicates] = group.ids;
+    const [keep, ...duplicates] = group.ids;
     if (!duplicates.length) continue;
+    if (samples.length < 20) {
+      samples.push({
+        branch: String(group._id.branch),
+        type: group._id.type,
+        referenceId: String(group._id.referenceId),
+        duplicates: duplicates.length,
+        keeping: String(keep)
+      });
+    }
+    if (dryRun) {
+      retired += duplicates.length;
+      continue;
+    }
     await collection.updateMany(
       {_id: {$in: duplicates}},
       {$set: {status: 'resolved', resolvedAt: new Date(), resolutionNote: 'Superseded by a newer alert for the same condition'}}
     );
     retired += duplicates.length;
   }
-  return {retired};
+  return {retired, dryRun, samples};
 }
 
-export async function ensureAlertIndexes() {
+/**
+ * Reports what the migration would do, writing nothing.
+ *
+ * Deliberately reuses the same helpers in the same order as the real run, so
+ * the preview cannot describe behaviour the execution does not have.
+ */
+export async function planAlertMigration() {
   if (!mongoose.connection.db) return null;
+  const collection = mongoose.connection.db.collection(Notification.collection.collectionName);
+  const [backfill, duplicates, total, missingStatus, alreadyValid] = await Promise.all([
+    backfillAlertLifecycle({dryRun: true}),
+    retireDuplicateAlerts({dryRun: true}),
+    collection.countDocuments({}),
+    collection.countDocuments({status: {$exists: false}}),
+    collection.countDocuments({status: {$in: ['open', 'acknowledged', 'resolved']}})
+  ]);
+  return {
+    dryRun: true,
+    totalAlerts: total,
+    missingStatus,
+    alreadyValid,
+    backfill,
+    duplicates,
+    indexes: ALERT_INDEXES.map(index => index.options.name),
+    changesRequired: backfill.updated > 0 || duplicates.retired > 0
+  };
+}
+
+export async function ensureAlertIndexes({dryRun = false} = {}) {
+  if (!mongoose.connection.db) return null;
+  if (dryRun) return planAlertMigration();
   await ensureCollection(Notification.collection.collectionName);
   const backfilled = await backfillAlertLifecycle();
   const deduped = await retireDuplicateAlerts();

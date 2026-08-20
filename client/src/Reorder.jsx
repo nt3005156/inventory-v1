@@ -39,7 +39,11 @@ export default function Reorder({call, branches = [], user, token}) {
   const isManager = ['owner', 'manager'].includes(user?.role);
 
   const load = useCallback(async () => {
-    if (!branchId) return;
+    // Do not fetch purchasing data for a role that cannot see the workspace.
+    // The backend already answers 403 — this is the authoritative control — but
+    // firing the request anyway wastes a round trip and puts a guaranteed
+    // failure in the operator's console on every render.
+    if (!branchId || !isManager) return;
     setLoading(true);
     setError('');
     try {
@@ -56,14 +60,14 @@ export default function Reorder({call, branches = [], user, token}) {
     } finally {
       setLoading(false);
     }
-  }, [branchId, call]);
+  }, [branchId, call, isManager]);
 
   loadRef.current = load;
   useEffect(() => { load(); }, [load]);
 
   // Live alerts: the same inventory:alert event the Inventory screen uses.
   useEffect(() => {
-    if (!branchId || !token) return undefined;
+    if (!branchId || !token || !isManager) return undefined;
     const socket = connectBranchSocket(token, branchId);
     const onAlert = event => {
       if (String(event?.branch || '') !== String(branchId)) return;
@@ -77,7 +81,7 @@ export default function Reorder({call, branches = [], user, token}) {
       socket.emit('leave:branch', branchId);
       socket.disconnect();
     };
-  }, [branchId, token]);
+  }, [branchId, token, isManager]);
 
   const suppliers = useMemo(() => {
     const seen = new Map();
