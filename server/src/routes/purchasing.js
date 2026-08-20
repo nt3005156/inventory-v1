@@ -18,6 +18,9 @@ import {
   buildReorderSuggestions, compareIngredientPrices, getIngredientPurchaseHistory,
   ingredientPriceReport, listUnpaidInvoices, purchaseSummary
 } from '../services/procurement.js';
+import {
+  buildReorderPlan, createSuggestedPurchaseOrder, raiseReorderAlerts
+} from '../services/reorderEngine.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
 import {listLiveInventory} from '../services/inventory.js';
@@ -1032,6 +1035,58 @@ r.get('/reports/unpaid-invoices', auth(MGMT), async (req, res) => {
     res.json(await listUnpaidInvoices({
       branchId: req.query.branch, supplierId: req.query.supplier, user: req.user
     }));
+  } catch (e) { fail(res, e); }
+});
+
+// ── Phase 17: reorder point engine ───────────────────────────────────────────
+// reorderPoint = averageDailyUsage x leadTimeDays + safetyStock.
+const reorderPlanQuery = q => ({
+  lookbackDays: q.lookbackDays === undefined ? undefined : Number(q.lookbackDays),
+  serviceLevel: q.serviceLevel === undefined ? undefined : Number(q.serviceLevel)
+});
+
+r.get('/purchasing/reorder-plan', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await buildReorderPlan({
+      branchId: req.query.branch, user: req.user,
+      includeAll: String(req.query.includeAll) === 'true',
+      ...reorderPlanQuery(req.query)
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+// Opens a DRAFT purchase order from a suggestion. Deliberately a draft: the
+// brief says a manager approves, so a computed number never commits money.
+const suggestedPoSchema = z.object({
+  branch: z.string(),
+  supplier: z.string(),
+  lookbackDays: z.number().int().min(1).max(365).optional(),
+  serviceLevel: z.number().int().min(90).max(99).optional()
+}).strict();
+
+r.post('/purchasing/suggested-orders', auth(MGMT), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const body = suggestedPoSchema.parse(req.body);
+    let result;
+    await session.withTransaction(async () => {
+      result = await createSuggestedPurchaseOrder({
+        branchId: body.branch, supplierId: body.supplier, user: req.user,
+        lookbackDays: body.lookbackDays, serviceLevel: body.serviceLevel,
+        idempotencyKey: req.headers['idempotency-key'], session
+      });
+    });
+    const po = result.purchaseOrder;
+    publishPurchaseOrder(po.branch?._id || po.branch, {
+      reason: 'reorder_suggestion', poId: String(po._id), status: po.status
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  } catch (e) { fail(res, e); } finally { session.endSession(); }
+});
+
+r.post('/purchasing/reorder-alerts/run', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await raiseReorderAlerts({branchId: req.query.branch, user: req.user}));
   } catch (e) { fail(res, e); }
 });
 

@@ -318,13 +318,30 @@ export async function moveStock({
 
   if(after<=Number(balance.reorderLevel||0)){
     const name=ingredientRecord.name||'Ingredient';
-    await Notification.create([{
+    const alertType=after<=0?'out_of_stock':'low_stock';
+    const [note]=await Notification.create([{
       branch,
-      type:after<=0?'out_of_stock':'low_stock',
+      type:alertType,
       title:after<=0?'Out of stock':'Low stock',
       body:`${name} is ${after<=0?'out of stock':'at reorder level'}`,
       referenceId:ingredient
     }],{session});
+    // Phase 17: push it to the branch as it happens. The notification was
+    // persisted but only surfaced when somebody refreshed the alert list, so a
+    // manager watching the screen learned nothing until they looked. Recorded
+    // on the session and emitted only after the transaction commits — an alert
+    // for a movement that later rolled back would be a lie.
+    tx.$locals.pendingAlert={
+      branch,
+      alertId:String(note._id),
+      type:alertType,
+      severity:after<=0?'critical':'warning',
+      ingredient:String(ingredient),
+      ingredientName:name,
+      currentStock:after,
+      reorderLevel:Number(balance.reorderLevel||0),
+      unit:movementUnit
+    };
   }
   return tx;
 }

@@ -689,6 +689,68 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Inventory alert and reorder engine (Phase 17 — replenishment)
+
+Six alert classes already existed (`services/alerts.js`), as did Phase 16's
+reorder suggestions. Neither was rebuilt. Auditing them against the running API
+found four gaps.
+
+### Alerts
+
+| Alert | Status |
+|---|---|
+| low stock / out of stock | already existed; now **pushed in realtime** |
+| expiring / expired | already existed (Phase 15 tiers) |
+| unusual consumption | already existed |
+| negative stock attempt | already existed |
+| **high waste** | **new** |
+
+**High waste** is a ratio, not an absolute: waste as a share of everything
+consumed over a rolling 7-day window, flagged above 10%. 2 kg of rice wasted in
+a branch that used 500 kg is noise; the same 2 kg where 6 kg was used is a
+problem. Quantities under 1 unit are ignored so a single spill on a quiet day
+does not read as a 100% waste rate.
+
+### Realtime
+
+Alerts were persisted as Notifications and only surfaced when somebody
+refreshed. Verified against the running API: dropping stock below the reorder
+level wrote a `low_stock` row but the connected client saw only a generic
+`inventory:update` carrying nothing about the alert. There is now an
+`inventory:alert` Socket.IO event, scoped to the branch room, emitted **after
+the transaction commits** — an alert for a movement that later rolled back
+would be a lie. The Inventory screen shows it as a banner without a refresh.
+
+### Reorder point
+
+Phase 16 restored stock to a static level someone had typed in, which ignores
+how fast an ingredient actually moves. The engine now computes:
+
+```
+reorderPoint = averageDailyUsage × leadTimeDays + safetyStock
+safetyStock  = z × stdDevDailyUsage × √leadTimeDays
+```
+
+* `averageDailyUsage` is measured from the consumption ledger over a 30-day
+  lookback. **Days with no consumption count as zero** — averaging only the days
+  something moved would make a weekly spice look like a daily staple.
+* `leadTimeDays` comes from the preferred supplier's catalog entry.
+* The √ is not decoration: variance accumulates linearly over independent days,
+  so the deviation grows with the square root of the lead time. Multiplying by
+  the lead time would massively overstock.
+* A configured minimum is a **floor, never a ceiling** — an operator who insists
+  on holding 5 kg is not overridden by a formula that says 2 kg.
+
+`GET /purchasing/reorder-plan` reports every term, so a manager can check the
+arithmetic rather than trust it.
+
+### Suggested purchase orders
+
+The plan groups actionable lines into one suggested order per supplier.
+`POST /purchasing/suggested-orders` turns one into a **draft** purchase order —
+deliberately a draft, so a computed number never commits money without a human.
+It then flows through the existing approval chain unchanged.
+
 ## Procurement and supplier ERP (Phase 16 — purchasing)
 
 Purchase orders with approval and receiving, goods receipts, purchase returns,

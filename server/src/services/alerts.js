@@ -47,8 +47,86 @@ export const ALERT_TYPES = Object.freeze([
   'expiry_approaching',
   'expired',
   'unusual_consumption',
-  'negative_inventory'
+  'negative_inventory',
+  // Phase 17: the one alert class the brief names that did not exist. Waste
+  // was recorded and reportable, but nothing ever flagged that it had become
+  // excessive relative to what the branch actually consumes.
+  'high_waste'
 ]);
+
+/** Share of consumption lost to waste before it is worth flagging. */
+export const HIGH_WASTE_THRESHOLD = 0.1;
+
+/** Minimum wasted quantity before the ratio means anything. */
+const HIGH_WASTE_MIN_QTY = 1;
+
+/**
+ * High waste: waste as a proportion of everything consumed over a window.
+ *
+ * A ratio, not an absolute, because 2kg of rice wasted in a branch that used
+ * 500kg is noise, while the same 2kg in a branch that used 6kg is a problem.
+ * Very small absolute quantities are ignored so a single spill on a quiet day
+ * does not read as a 100% waste rate.
+ */
+async function buildHighWasteAlerts({branchIds, restaurantId, days = 7, threshold = HIGH_WASTE_THRESHOLD}) {
+  const window = Math.min(90, Math.max(1, Number(days) || 7));
+  const since = new Date(Date.now() - window * 86400000);
+
+  const rows = await InventoryTransaction.find({
+    restaurant: restaurantId,
+    branch: {$in: branchIds},
+    type: {$in: ['WASTE', 'RECIPE_DEDUCTION', 'SALE']},
+    createdAt: {$gte: since}
+  }).select('branch ingredient type changeQty').lean();
+  if (!rows.length) return [];
+
+  const totals = new Map();
+  for (const row of rows) {
+    const key = `${row.branch}:${row.ingredient}`;
+    const current = totals.get(key) || {waste: 0, consumed: 0};
+    const qty = Math.abs(Number(row.changeQty || 0));
+    if (row.type === 'WASTE') current.waste += qty;
+    current.consumed += qty;
+    totals.set(key, current);
+  }
+
+  const alerts = [];
+  for (const [key, value] of totals) {
+    if (value.consumed <= 1e-9) continue;
+    if (value.waste < HIGH_WASTE_MIN_QTY) continue;
+    const ratio = value.waste / value.consumed;
+    if (ratio < threshold) continue;
+
+    const [branchId, ingredientId] = key.split(':');
+    const [ingredient, branch] = await Promise.all([
+      Ingredient.findById(ingredientId).select('name code unit').lean().catch(() => null),
+      Branch.findById(branchId).select('name code').lean().catch(() => null)
+    ]);
+    alerts.push({
+      _id: new mongoose.Types.ObjectId(),
+      type: 'high_waste',
+      title: 'High waste',
+      body: `${ingredient?.name || 'Ingredient'} — ${(ratio * 100).toFixed(1)}% of the last ${window}d consumption was wasted `
+        + `(${value.waste.toLocaleString('en-NP')} of ${value.consumed.toLocaleString('en-NP')} ${ingredient?.unit || 'g'})`,
+      read: false,
+      branch: branchId,
+      branchName: branch?.name || '',
+      ingredientId,
+      ingredientName: ingredient?.name || '',
+      quantity: Number(value.waste.toFixed(3)),
+      consumedQuantity: Number(value.consumed.toFixed(3)),
+      wasteRatio: Number(ratio.toFixed(4)),
+      wastePercent: Number((ratio * 100).toFixed(2)),
+      threshold,
+      days: window,
+      createdAt: new Date(),
+      source: 'computed',
+      synthetic: true,
+      severity: ratio >= threshold * 2 ? 'critical' : 'warning'
+    });
+  }
+  return alerts.sort((left, right) => right.wasteRatio - left.wasteRatio);
+}
 
 // Build synthetic expiry alerts from batches (quantity per batch + expiry)
 async function buildExpiryAlerts({ branchIds, restaurantId, expiringDays = 30 }) {
@@ -248,10 +326,18 @@ export async function listAlerts({ branchId, user, unread = true, type, expiring
     } catch {}
   }
 
+  // Computed high waste
+  let highWaste = [];
+  if (!type || type === 'high_waste') {
+    try {
+      highWaste = await buildHighWasteAlerts({ branchIds: scope.branchIds, restaurantId: scope.restaurantId });
+    } catch {}
+  }
+
   // Negative inventory attempts that are stored are already in stored.
   // If we want to also include synthetic negative from recent failures, stored already covers.
 
-  const combined = [...stored, ...expiryAlerts, ...unusual];
+  const combined = [...stored, ...expiryAlerts, ...unusual, ...highWaste];
 
   // Optional type filter for synthetic (if type provided, filter again)
   const filtered = type ? combined.filter(a => a.type === type) : combined;

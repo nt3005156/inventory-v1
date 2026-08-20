@@ -242,6 +242,24 @@ export function publishInventoryEvent(branchId, extra = {}) {
   });
 }
 
+/**
+ * Phase 17 — push an inventory alert to the branch in realtime.
+ *
+ * Alerts were persisted as Notifications and only ever seen when someone
+ * refreshed the alert list. Verified against the running API: driving stock
+ * below the reorder level wrote a `low_stock` notification but emitted only a
+ * generic `inventory:update`, carrying nothing about the alert itself, so a
+ * manager watching the screen learned nothing.
+ */
+export function publishInventoryAlert(branchId, alert = {}) {
+  if (!branchId) return false;
+  return emitKitchenEvent(branchId, 'inventory:alert', {
+    ...alert,
+    branch: String(branchId),
+    at: new Date().toISOString()
+  });
+}
+
 export async function publishKitchenOrder(order, event, extra = {}) {
   try {
     if (!order?._id) return;

@@ -68,6 +68,7 @@ export default function Inventory({call, branches = [], user, token}) {
   const [selectedValuationIngredient, setSelectedValuationIngredient] = useState('');
   const [expirySummary, setExpirySummary] = useState(null);
   const [expiryAlerts, setExpiryAlerts] = useState(null);
+  const [liveAlert, setLiveAlert] = useState(null);
   const [expiringDays, setExpiringDays] = useState(30);
   const [fefoStrategy, setFefoStrategy] = useState('fefo');
   const [alerts, setAlerts] = useState([]);
@@ -191,10 +192,27 @@ export default function Inventory({call, branches = [], user, token}) {
       });
     });
     socket.on('inventory:update', refresh);
+    // Phase 17: a stock alert now arrives as it happens rather than waiting for
+    // the next refresh. It is surfaced immediately AND the list is reloaded so
+    // the banner and the underlying figures agree.
+    const onAlert = event => {
+      if (String(event?.branch || '') !== String(branchId)) return;
+      setLiveAlert({
+        type: event.type,
+        severity: event.severity,
+        ingredientName: event.ingredientName,
+        currentStock: event.currentStock,
+        reorderLevel: event.reorderLevel,
+        at: event.at
+      });
+      loadRef.current?.();
+    };
+    socket.on('inventory:alert', onAlert);
     return () => {
       active = false;
       socket.emit('leave:branch', branchId);
       socket.off('inventory:update', refresh);
+      socket.off('inventory:alert', onAlert);
       socket.disconnect();
     };
   }, [authToken, branchId]);
@@ -253,6 +271,23 @@ export default function Inventory({call, branches = [], user, token}) {
       </div>
       {error && <p className="danger" role="alert">{error}</p>}
       {success && <p className="inventory-success">{success}</p>}
+      {liveAlert && (
+        <div style={{
+          margin: '10px 0', padding: '10px', borderRadius: '8px',
+          border: '1px solid ' + (liveAlert.severity === 'critical' ? '#dc2626' : '#d97706'),
+          background: liveAlert.severity === 'critical' ? '#fef2f2' : '#fffbeb',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px'
+        }}>
+          <span>
+            <b style={{textTransform: 'uppercase', letterSpacing: '.4px', fontSize: '11px'}}>
+              {String(liveAlert.type).replaceAll('_', ' ')}
+            </b>
+            {' — '}{liveAlert.ingredientName} is at {liveAlert.currentStock}
+            {liveAlert.reorderLevel ? ` against a reorder level of ${liveAlert.reorderLevel}` : ''}
+          </span>
+          <button onClick={() => setLiveAlert(null)}>Dismiss</button>
+        </div>
+      )}
       {!!alerts.length && (
         <div style={{margin:'10px 0', padding:'10px', border:'1px solid #fecaca', borderRadius:'8px', background:'#fef2f2'}}>
           <b style={{color:'#991b1b'}}>Inventory Alerts — {alerts.length}</b>
