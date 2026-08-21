@@ -32,7 +32,7 @@ import {
   MIN_SAMPLES_FOR_LEAD_TIME, medianOf, summariseDeliveries
 } from '../src/services/supplierPerformance.js';
 import {
-  resolveSchedulerConfig, runScheduledSweep, schedulerStatus, setSchedulerLock,
+  resolveSchedulerConfig, runScheduledSweep, schedulerStatus, setSchedulerLock, sweepOwnership,
   startReorderScheduler, stopReorderScheduler, triggerSchedulerTick
 } from '../src/services/reorderScheduler.js';
 import {moveStock} from '../src/services/inventoryLedger.js';
@@ -359,7 +359,7 @@ describe('16A — scheduler', () => {
     // The rival is short too, and must be swept under its own ownership.
     await Notification.deleteMany({});
 
-    const result = await runScheduledSweep({lookbackDays: 30});
+    const result = await runScheduledSweep({lookbackDays: 30, ownership: sweepOwnership.manual('phase 16A sweep test')});
     assert.ok(result.restaurants >= 2, 'both restaurants exist');
     assert.ok(result.swept >= 1);
     assert.deepEqual(result.errors, [], JSON.stringify(result.errors));
@@ -377,7 +377,7 @@ describe('16A — scheduler', () => {
 
   it('skips a restaurant with no active owner rather than borrowing privileges', async () => {
     await User.updateMany({restaurantId: rival.restaurant._id, role: 'owner'}, {$set: {active: false}});
-    const result = await runScheduledSweep({});
+    const result = await runScheduledSweep({ownership: sweepOwnership.manual('phase 16A owner-skip test')});
     const skipped = result.skipped.find(row => row.restaurant === String(rival.restaurant._id));
     assert.ok(skipped, 'it must be reported, not silently ignored');
     assert.match(skipped.reason, /No active owner/);

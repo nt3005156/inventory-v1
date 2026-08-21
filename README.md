@@ -689,6 +689,74 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Sweep ownership and lease integrity (Phase 16D)
+
+Final hardening pass for the reorder/scheduler module.
+
+### Scheduled vs manual sweeps
+
+These are two deliberately different operations, and the code now forces a
+caller to say which one it is running.
+
+|  | Scheduled | Manual |
+|---|---|---|
+| Trigger | background interval timer | `POST /purchasing/reorder-alerts/run` |
+| Scope | every restaurant | one branch, as the requesting user |
+| Distributed lease | **required** | **not used, by design** |
+| Lease loss | aborts the sweep | n/a |
+| Entry point | `runScheduledSweep({ownership: sweepOwnership.scheduled({shouldContinue})})` | `raiseReorderAlerts()` via the route |
+
+`runScheduledSweep()` previously defaulted `shouldContinue` to permissive, so a
+future caller could run a full multi-tenant sweep with **no lease behind it**
+simply by forgetting — the failure mode being silent duplicate sweeps across
+containers. An audit found only one production caller (the scheduler tick) and
+no way for the manual route to reach it, so nothing live was bypassing the
+lease. The latent hole is now closed: **ownership is a required argument** and
+the function throws without it. Bypassing the lease has to be deliberate and
+visible, and tests declare `sweepOwnership.manual('<why>')`.
+
+**Why the manual endpoint may run unleased.** It is a foreground request an
+operator is waiting on; queueing it behind a background lease would be wrong.
+It is safe to repeat because alert writes are idempotent — the unique partial
+index on `{branch, type, referenceId}` scoped to unresolved alerts means a
+second run raises nothing. Tested: running it twice yields `raised: 1` then
+`raised: 0`, and a manual run concurrent with a scheduled tick still leaves one
+alert. It never mutates scheduler lock state, and it enforces authentication,
+RBAC, and branch/restaurant isolation exactly as before.
+
+### Lease loss during work
+
+Previously the lease was only checked *between* tenants, so a restaurant with
+hundreds of short ingredients could keep writing long after the lease had gone.
+It is now also checked **before each alert write**, which is the unit of
+meaningful work. Guarantees:
+
+* the sweep never continues indefinitely after lease loss;
+* ownership is never claimed after expiry (renewal matches on `{_id, owner}`);
+* partial progress is safe — alerts already written stand;
+* the next sweep resumes and does **not** duplicate them;
+* another scheduler can acquire the lease once it lapses or is released.
+
+Abort is defended at two layers (mid-tenant propagation and the between-tenant
+check). Removing either alone still stops the sweep; removing both fails the
+test — verified by mutation.
+
+### MongoDB failover
+
+**Primary-election/step-down behaviour has not been exercised in the automated
+test environment.** The harness is a single-node replica set, so no election can
+be triggered. What is tested is the observable consequence: a renewal that fails
+with `not primary` (10107) aborts the sweep and releases cleanly. Genuine
+failover remains an **operational verification item**.
+
+### Production migration
+
+**NOT EXECUTED.** The runbook (BACKUP → DRY RUN → REVIEW → EXECUTE → VERIFY →
+SECOND VERIFICATION) is below under Phase 16B, and the sequence is verified in
+tests against a deliberately messy dataset: the dry run writes nothing, apply
+backfills and retires duplicates, acknowledged alerts survive untouched, nothing
+is deleted, and a second run reports zero changes.
+
 ## Scheduler lease renewal (Phase 16C)
 
 Phase 16B's lock had a `renew()` method that the scheduler never called. Two

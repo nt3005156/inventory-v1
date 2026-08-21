@@ -89,6 +89,59 @@ export function resolveSchedulerConfig(env = process.env) {
 }
 
 /**
+ * Phase 16D — explicit sweep ownership.
+ *
+ * `runScheduledSweep()` previously accepted a permissive default: calling it
+ * with no arguments ran a full multi-tenant sweep with no lease behind it.
+ * Only the scheduler tick happened to hold one, so a future caller could
+ * bypass the distributed lock purely by forgetting about it — the failure mode
+ * being silent duplicate sweeps across containers.
+ *
+ * Ownership is now a REQUIRED, declared argument. The function cannot be
+ * invoked without stating which of the two legitimate modes it is running in,
+ * so bypassing the lease has to be a deliberate, visible act rather than an
+ * omission. Testability is unaffected: tests declare `sweepOwnership.manual()`.
+ *
+ *   SCHEDULED — background, multi-instance, MUST hold the distributed lease.
+ *               Carries `shouldContinue()`, which is polled during the sweep
+ *               so lease loss stops the work.
+ *   MANUAL    — a human pressing the button for one branch. Runs WITHOUT the
+ *               lease by design: it is a foreground request the operator is
+ *               waiting on, it must not queue behind a background lease, and
+ *               it is safe to repeat because alert writes are idempotent
+ *               (unique partial index on {branch, type, referenceId} scoped to
+ *               unresolved alerts).
+ */
+export const SWEEP_MODES = Object.freeze({SCHEDULED: 'scheduled', MANUAL: 'manual'});
+
+export const sweepOwnership = Object.freeze({
+  /** A lease-backed background sweep. `shouldContinue` reports lease health. */
+  scheduled({shouldContinue, leaseOwner = null}) {
+    if (typeof shouldContinue !== 'function') {
+      throw Object.assign(
+        new Error('A scheduled sweep requires shouldContinue() so lease loss can stop it'),
+        {status: 500}
+      );
+    }
+    return {mode: SWEEP_MODES.SCHEDULED, shouldContinue, leaseOwner};
+  },
+  /**
+   * An explicitly manual, unleased sweep. `reason` is required so anything
+   * running outside the lease is self-documenting at the call site.
+   */
+  manual(reason = '') {
+    const note = String(reason || '').trim();
+    if (note.length < 3) {
+      throw Object.assign(
+        new Error('A manual sweep must state why it is running without the scheduler lease'),
+        {status: 500}
+      );
+    }
+    return {mode: SWEEP_MODES.MANUAL, shouldContinue: () => true, reason: note};
+  }
+});
+
+/**
  * Runs the sweep once for every restaurant, as that restaurant's owner.
  *
  * The sweep is tenant-scoped by design: it reuses `raiseReorderAlerts`, which
@@ -96,10 +149,21 @@ export function resolveSchedulerConfig(env = process.env) {
  * restaurants. A restaurant with no active owner is skipped and reported
  * rather than swept with borrowed privileges.
  */
-export async function runScheduledSweep({lookbackDays = 30, shouldContinue = null} = {}) {
+export async function runScheduledSweep({lookbackDays = 30, ownership} = {}) {
+  if (!ownership || !Object.values(SWEEP_MODES).includes(ownership.mode)) {
+    // Deliberately a throw, not a default. A sweep with no declared ownership
+    // is the exact bug this guard exists to make impossible.
+    throw Object.assign(
+      new Error('runScheduledSweep requires an explicit ownership context; use sweepOwnership.scheduled() or sweepOwnership.manual()'),
+      {status: 500}
+    );
+  }
+  const shouldContinue = ownership.shouldContinue;
   const started = Date.now();
   const result = {
     startedAt: new Date(started),
+    mode: ownership.mode,
+    leaseProtected: ownership.mode === SWEEP_MODES.SCHEDULED,
     restaurants: 0,
     swept: 0,
     skipped: [],
@@ -140,7 +204,17 @@ export async function runScheduledSweep({lookbackDays = 30, shouldContinue = nul
         continue;
       }
       const actor = {id: String(owner._id), role: 'owner', restaurantId: String(restaurant._id)};
-      const outcome = await raiseReorderAlerts({user: actor, lookbackDays});
+      // Phase 16D: the lease is now checked DURING a tenant's work too, not
+      // only between tenants. A restaurant with hundreds of low ingredients
+      // could otherwise keep writing alerts for a long time after the lease
+      // had gone.
+      const outcome = await raiseReorderAlerts({user: actor, lookbackDays, shouldContinue});
+      if (outcome?.aborted) {
+        result.aborted = true;
+        result.abortReason = 'Sweep stopped mid-tenant: the scheduler lease was no longer held';
+        result.raised += Number(outcome?.raised || 0);
+        break;
+      }
       // Also durably record the computed classes (high waste, unusual
       // consumption) so they can be acknowledged rather than only appearing
       // in a live list.
@@ -296,9 +370,12 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
       local.ticks += 1;
       const outcome = await runScheduledSweep({
         lookbackDays: config.lookbackDays,
-        // The sweep checks this between restaurants and stops early rather
-        // than continuing to write under a lease we no longer hold.
-        shouldContinue: () => leaseLost === null
+        // Declared ownership: this is the lease-protected background sweep,
+        // and shouldContinue() is how lease loss reaches the work.
+        ownership: sweepOwnership.scheduled({
+          shouldContinue: () => leaseLost === null,
+          leaseOwner: release?.owner || null
+        })
       });
       local.lastRunAt = outcome.finishedAt || new Date();
       local.lastDurationMs = outcome.durationMs;

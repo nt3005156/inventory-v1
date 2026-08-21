@@ -261,4 +261,56 @@ describe('Supplier Performance UI', () => {
     await selectSupplier();
     assert.match(text(), /Insufficient permission/);
   });
+
+  it('requests and displays only the selected branch metrics', async () => {
+    // Branch isolation is enforced by the backend (covered there); what the
+    // COMPONENT must guarantee is that it asks for the branch the user chose
+    // and renders that answer, never a cached figure from another branch.
+    const requested = [];
+    const byBranch = {
+      b1: {...measured, averageLeadDays: 5, medianLeadDays: 5, samples: 9, lateCount: 3, onTimeRate: 66.7},
+      b2: {...measured, averageLeadDays: 12, medianLeadDays: 12, samples: 4, lateCount: 0, onTimeRate: 100}
+    };
+    await render({
+      user: {role: 'manager'},
+      branches: [
+        {_id: 'b1', name: 'Kathmandu Branch', code: 'KTM'},
+        {_id: 'b2', name: 'Lalitpur Branch', code: 'LTP'}
+      ],
+      call: makeCall({
+        '/suppliers/s1/performance': path => {
+          requested.push(path);
+          const match = /branch=([^&]+)/.exec(path);
+          return match ? byBranch[match[1]] : {...measured, averageLeadDays: 99};
+        },
+        '/suppliers': SUPPLIERS,
+        '/': () => null
+      })
+    });
+    await selectSupplier();
+
+    // Branch A.
+    const [, branchSelect] = container.querySelectorAll('select');
+    const setValue = (element, value) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype, 'value'
+      ).set;
+      setter.call(element, value);
+      element.dispatchEvent(new window.Event('change', {bubbles: true}));
+    };
+
+    await act(async () => { setValue(branchSelect, 'b1'); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.ok(requested.some(path => path.includes('branch=b1')), 'branch A was requested');
+    assert.match(text(), /5d average/, "branch A's measured figure");
+    assert.match(text(), /66.7%/);
+
+    // Switching branch must re-query and REPLACE the figures.
+    await act(async () => { setValue(branchSelect, 'b2'); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.ok(requested.some(path => path.includes('branch=b2')), 'branch B was requested');
+    assert.match(text(), /12d average/, "branch B's own figure is shown");
+    assert.ok(!text().includes('5d average'), "branch A's metrics must not linger on screen");
+    assert.match(text(), /100%/);
+  });
 });

@@ -492,12 +492,23 @@ export async function createSuggestedPurchaseOrder({
  *
  * Idempotent per ingredient per day: re-running does not spam the same alert.
  */
-export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT_LOOKBACK_DAYS}) {
+export async function raiseReorderAlerts({
+  branchId, user, lookbackDays = DEFAULT_LOOKBACK_DAYS, shouldContinue = null
+}) {
   const plan = await buildReorderPlan({branchId, user, lookbackDays});
   const {publishInventoryAlert} = await import('./realtime.js');
   const raised = [];
 
+  let aborted = false;
   for (const line of plan.lines) {
+    // Phase 16D: checked before each alert write, which is the unit of
+    // meaningful work here. Stopping between writes is safe: every alert
+    // already persisted stands, and the next sweep resumes from wherever this
+    // one stopped because alert creation is idempotent per condition.
+    if (typeof shouldContinue === 'function' && !shouldContinue()) {
+      aborted = true;
+      break;
+    }
     if (line.urgency === 'ok') continue;
     const type = line.currentStock <= 0 ? 'out_of_stock' : 'low_stock';
     // Phase 16A: the alert belongs to the branch that is actually short, not
@@ -558,5 +569,5 @@ export async function raiseReorderAlerts({branchId, user, lookbackDays = DEFAULT
     raised.push({ingredient: line.ingredient, type, branch: String(alertBranch)});
   }
 
-  return {raised: raised.length, alerts: raised, evaluated: plan.lines.length};
+  return {raised: raised.length, alerts: raised, evaluated: plan.lines.length, aborted};
 }

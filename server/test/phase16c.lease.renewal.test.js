@@ -28,7 +28,7 @@ import {
   acquireSchedulerLock, ensureSchedulerLockIndexes, inspectSchedulerLock, mongoSchedulerLock
 } from '../src/services/schedulerLock.js';
 import {
-  runScheduledSweep, schedulerStatus, setSchedulerLock,
+  runScheduledSweep, schedulerStatus, setSchedulerLock, sweepOwnership,
   startReorderScheduler, stopReorderScheduler, triggerSchedulerTick
 } from '../src/services/reorderScheduler.js';
 import {clearDb, request, seedWorld, startTestApp, stopTestApp, tokenFor} from './helpers.js';
@@ -378,7 +378,7 @@ describe('16C — losing the lease mid-sweep', () => {
       await triggerSchedulerTick();
       // Re-run the sweep directly to inspect its result shape under the same
       // lost-lease condition the scheduler just experienced.
-      outcome = await runScheduledSweep({shouldContinue: () => false});
+      outcome = await runScheduledSweep({ownership: sweepOwnership.scheduled({shouldContinue: () => false})});
     } finally {
       User.findOne = originalFindOne;
     }
@@ -394,7 +394,7 @@ describe('16C — losing the lease mid-sweep', () => {
     const second = await Restaurant.create({name: 'Second Co', currency: 'NPR', vatRate: 13});
     await Branch.create({restaurant: second._id, name: 'Second Branch', code: 'SEC', address: 'X'});
 
-    const result = await runScheduledSweep({shouldContinue: () => false});
+    const result = await runScheduledSweep({ownership: sweepOwnership.scheduled({shouldContinue: () => false})});
     assert.equal(result.aborted, true, 'the sweep must report that it stopped early');
     assert.equal(result.swept, 0, 'and must not have written under a lost lease');
     assert.match(result.abortReason || '', /lease/i);
@@ -402,7 +402,7 @@ describe('16C — losing the lease mid-sweep', () => {
 
   it('a normal sweep is never marked aborted', async () => {
     await makeShortage();
-    const result = await runScheduledSweep({shouldContinue: () => true});
+    const result = await runScheduledSweep({ownership: sweepOwnership.scheduled({shouldContinue: () => true})});
     assert.equal(result.aborted, false);
     assert.ok(result.swept >= 1);
   });
@@ -569,7 +569,7 @@ describe('16C — database failure during renewal', () => {
   it('a sweep with no database connection reports rather than throws', async () => {
     const readyState = mongoose.connection.readyState;
     assert.equal(readyState, 1, 'control: the harness is connected');
-    const result = await runScheduledSweep({});
+    const result = await runScheduledSweep({ownership: sweepOwnership.manual('phase 16C connection check')});
     assert.equal(result.aborted, false);
     assert.ok(Array.isArray(result.errors));
   });
