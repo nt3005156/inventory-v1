@@ -96,7 +96,7 @@ export function resolveSchedulerConfig(env = process.env) {
  * restaurants. A restaurant with no active owner is skipped and reported
  * rather than swept with borrowed privileges.
  */
-export async function runScheduledSweep({lookbackDays = 30} = {}) {
+export async function runScheduledSweep({lookbackDays = 30, shouldContinue = null} = {}) {
   const started = Date.now();
   const result = {
     startedAt: new Date(started),
@@ -104,7 +104,10 @@ export async function runScheduledSweep({lookbackDays = 30} = {}) {
     swept: 0,
     skipped: [],
     raised: 0,
-    errors: []
+    errors: [],
+    // Set when the sweep stopped early because the caller withdrew permission
+    // to continue (in practice: the scheduler lease was lost).
+    aborted: false
   };
 
   if (mongoose.connection.readyState !== 1) {
@@ -117,6 +120,15 @@ export async function runScheduledSweep({lookbackDays = 30} = {}) {
   result.restaurants = restaurants.length;
 
   for (const restaurant of restaurants) {
+    // Checked between tenants, which is the natural safe boundary: a
+    // restaurant is either swept fully or not at all. Continuing to write
+    // under a lease we no longer own is exactly what the lock exists to
+    // prevent.
+    if (typeof shouldContinue === 'function' && !shouldContinue()) {
+      result.aborted = true;
+      result.abortReason = 'Sweep stopped early: the scheduler lease was no longer held';
+      break;
+    }
     try {
       // Act as a real owner of that restaurant. Fabricating a superuser would
       // bypass the tenancy guards the sweep depends on for its scoping.
@@ -169,7 +181,10 @@ export function schedulerStatus() {
     lastRaised: state.lastRaised,
     lastError: state.lastError,
     skippedOverlaps: state.skippedOverlaps,
-    lockContentions: state.lockContentions
+    lockContentions: state.lockContentions,
+    leaseRenewals: state.leaseRenewals,
+    leaseLosses: state.leaseLosses,
+    lastAborted: state.lastAborted
   };
 }
 
@@ -197,6 +212,9 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
     inFlight: false,
     skippedOverlaps: 0,
     lockContentions: 0,
+    leaseRenewals: 0,
+    leaseLosses: 0,
+    lastAborted: false,
     lastRunAt: null,
     lastDurationMs: null,
     lastRaised: null,
@@ -212,6 +230,12 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
     }
     local.inFlight = true;
     let release = null;
+    let renewal = null;
+    // Phase 16C: set when the lease is lost mid-sweep. The sweep is abandoned
+    // rather than allowed to keep writing while another instance believes it
+    // owns the work.
+    let leaseLost = null;
+
     try {
       if (lockProvider) {
         release = await lockProvider.acquire();
@@ -221,14 +245,69 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
           local.lockContentions += 1;
           return;
         }
+
+        // ── LEASE RENEWAL ────────────────────────────────────────────────
+        // A sweep over many restaurants can outlive the lease. Without
+        // renewal the lock silently expires, a second instance acquires it,
+        // and two schedulers run at once. The renewal interval is derived
+        // from the lease rather than hard-coded, so it can never be longer
+        // than the thing it is protecting: one third of the TTL, giving two
+        // chances to renew before expiry, clamped to a sane floor.
+        if (typeof release.renew === 'function') {
+          // Derive from the LEASE THE PROVIDER ACTUALLY GRANTED where it
+          // reports one, falling back to the configured TTL. A provider with a
+          // shorter lease than the config (a test, or a deployment that tunes
+          // the lock directly) must be renewed on its own schedule, not on a
+          // longer one that would let its lease lapse.
+          const providerTtl = Number(lockProvider.ttlSeconds);
+          const ttlSeconds = Number.isFinite(providerTtl) && providerTtl > 0
+            ? providerTtl
+            : Math.max(1, Number(config.lockTtlSeconds) || 300);
+          // One third of the lease: two chances to renew before expiry.
+          // Floored at 100ms so a very short lease is still renewable.
+          const renewEveryMs = Math.max(100, Math.floor((ttlSeconds * 1000) / 3));
+          renewal = setInterval(async () => {
+            try {
+              // renew() matches on {_id, owner}, so it can only ever extend
+              // OUR lease. If ownership has moved on it returns false.
+              const held = await release.renew(ttlSeconds);
+              if (held) {
+                local.leaseRenewals += 1;
+                return;
+              }
+              leaseLost = 'The scheduler lease was taken over by another instance';
+            } catch (error) {
+              // A renewal that errors (database blip, failover) is treated as
+              // lease loss. Assuming we still hold it would be the unsafe
+              // reading.
+              leaseLost = `Lease renewal failed: ${error?.message || 'unknown error'}`;
+            }
+            if (leaseLost) {
+              local.leaseLosses += 1;
+              clearInterval(renewal);
+              renewal = null;
+              logger.warn?.('[reorder-scheduler] lease lost mid-sweep', leaseLost);
+            }
+          }, renewEveryMs);
+          renewal.unref?.();
+        }
       }
+
       local.ticks += 1;
-      const outcome = await runScheduledSweep({lookbackDays: config.lookbackDays});
+      const outcome = await runScheduledSweep({
+        lookbackDays: config.lookbackDays,
+        // The sweep checks this between restaurants and stops early rather
+        // than continuing to write under a lease we no longer hold.
+        shouldContinue: () => leaseLost === null
+      });
       local.lastRunAt = outcome.finishedAt || new Date();
       local.lastDurationMs = outcome.durationMs;
       local.lastRaised = outcome.raised;
-      local.lastError = outcome.errors.length ? outcome.errors[0].message : null;
-      if (outcome.errors.length) {
+      local.lastError = leaseLost || (outcome.errors.length ? outcome.errors[0].message : null);
+      local.lastAborted = outcome.aborted || false;
+      if (leaseLost) {
+        logger.warn?.('[reorder-scheduler] sweep abandoned after losing the lease', leaseLost);
+      } else if (outcome.errors.length) {
         logger.warn?.('[reorder-scheduler] sweep completed with errors', {errors: outcome.errors.length});
       }
     } catch (error) {
@@ -236,8 +315,17 @@ export function startReorderScheduler({env = process.env, logger = console} = {}
       local.lastError = error?.message || 'Scheduled sweep failed';
       logger.error?.('[reorder-scheduler] sweep failed', local.lastError);
     } finally {
+      // Renewal must stop on EVERY exit path — success, failure, or lease
+      // loss — or a timer would outlive its sweep and keep extending a lease
+      // nobody is using.
+      if (renewal) {
+        clearInterval(renewal);
+        renewal = null;
+      }
       local.inFlight = false;
       if (typeof release === 'function') {
+        // Release is ownership-verified, so releasing after a lease takeover
+        // is a safe no-op rather than freeing the new holder's lock.
         try { await release(); } catch { /* releasing a lock must not throw upward */ }
       }
     }

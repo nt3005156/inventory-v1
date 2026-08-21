@@ -689,6 +689,68 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Scheduler lease renewal (Phase 16C)
+
+Phase 16B's lock had a `renew()` method that the scheduler never called. Two
+problems followed, both found by reading the code rather than by guessing:
+
+1. **`renew()` was architecturally unreachable.** `mongoSchedulerLock().acquire()`
+   returned a *bare release function* and discarded the handle, so the scheduler
+   had no way to renew even if it wanted to. `acquire()` now returns a callable
+   that is also an object carrying `renew`/`owner`; callers written against the
+   old `typeof release === 'function'` contract are unaffected.
+2. **A long sweep outlived its lease.** With a 300s lease and no renewal, a
+   sweep over enough restaurants would let the lock expire, a second instance
+   would acquire it, and two schedulers would run at once.
+
+### How renewal works
+
+```
+acquire → renew → renew → sweep completes → release      (normal)
+acquire → renew refused/errors → abort sweep → release   (lease lost)
+```
+
+* **Interval is derived, never fixed.** One third of the lease
+  (`ttl/3`, floored at 100 ms), taken from the lease the provider actually
+  granted where it reports one, otherwise from `REORDER_SCHEDULER_LOCK_TTL_SECONDS`.
+  Two renewals are therefore attempted before expiry, and a short lease can
+  never end up with an interval longer than itself.
+* **Renewal is ownership-verified.** `updateOne({_id, owner})` — a superseded
+  holder cannot extend the lease that replaced it.
+* **Lease loss is never ignored.** A refused renewal *or* a renewal that throws
+  (a stepped-down primary, a connection reset) both mark the lease lost. The
+  sweep then stops between tenants — the natural safe boundary, since a
+  restaurant is either swept fully or not at all — and reports
+  `aborted: true`. It does not keep writing while another instance believes it
+  owns the work.
+* **The timer stops on every exit path**: success, failure, or lease loss. A
+  renewal timer that outlived its sweep would keep extending a lease nobody is
+  using.
+* `schedulerStatus()` reports `leaseRenewals`, `leaseLosses` and `lastAborted`.
+
+### Failover: what is NOT covered
+
+The test harness runs a **single-node replica set**, so a real primary election
+cannot be triggered and **actual MongoDB failover is not tested**. What *is*
+tested is the observable consequence a failover has on this code — the renewal
+write fails (including a simulated `not primary`, code 10107) — and that path
+aborts the sweep and releases cleanly. Behaviour during a genuine election
+remains unverified here.
+
+### Promised-date semantics
+
+| Order has… | Lead-time metrics | On-time rate |
+|---|---|---|
+| a promised/expected date | contributes | contributes |
+| no promised date | **contributes** | **excluded** |
+| no delivery at all | excluded | excluded |
+
+When *no* delivery carried a promise, `onTimeRate` is `null` and the UI shows
+**N/A** with `onTimeBasis` explaining why — never 0% or 100%. Promised dates
+are never fabricated: an order created without an expected delivery date keeps
+`expectedDeliveryDate` unset, and the report will not synthesise one from the
+catalog to make the rate computable.
+
 ## Reorder scheduler, locking and migration (Phase 16B)
 
 Phase 16A shipped an in-process scheduler and said plainly that multiple API

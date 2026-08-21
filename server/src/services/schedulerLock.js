@@ -143,7 +143,18 @@ export function mongoSchedulerLock({name = 'reorder-sweep', ttlSeconds = DEFAULT
     async acquire() {
       const handle = await acquireSchedulerLock({name, ttlSeconds});
       if (!handle) return null;
-      return () => handle.release();
+      // Phase 16C: the adapter previously returned a BARE release function,
+      // which discarded the handle and made renew() unreachable from the
+      // scheduler — the lease could therefore lapse under a long sweep. It now
+      // returns a callable that is ALSO an object carrying renew/owner, so
+      // callers written against the old `typeof release === 'function'`
+      // contract keep working unchanged.
+      const release = () => handle.release();
+      release.renew = seconds => handle.renew(seconds);
+      release.release = () => handle.release();
+      release.owner = handle.owner;
+      release.expiresAt = handle.expiresAt;
+      return release;
     }
   };
 }

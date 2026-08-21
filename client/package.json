@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite --host 0.0.0.0",
-    "test": "node --import ./test/register-loader.mjs --test --test-concurrency=1 test/reorder.ui.test.jsx"
+    "test": "node --import ./test/register-loader.mjs --test --test-concurrency=1 test/*.test.jsx"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
