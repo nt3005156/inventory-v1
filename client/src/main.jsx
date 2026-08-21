@@ -10,6 +10,7 @@ import Analytics from './Analytics.jsx';
 import Inventory from './Inventory.jsx';
 import Reorder from './Reorder.jsx';
 import SupplierPerformance from './SupplierPerformance.jsx';
+import AnalyticsReports from './AnalyticsReports.jsx';
 import Dashboard from './Dashboard.jsx';
 import Ingredients from './Ingredients.jsx';
 import Recipes from './Recipes.jsx';
@@ -100,6 +101,7 @@ function App() {
     ['Purchases', ShoppingCart],
     ['Reorder', PackageSearch],
     ['Supplier Performance', Gauge],
+    ['Reports', BarChart3],
     ['Expenses', Receipt],
     ['Supplier Catalog', ShoppingCart],
     ['Tables', Armchair],
@@ -189,6 +191,7 @@ function Page({page, data, call, user, token}) {
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Reorder') return <Reorder call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Supplier Performance') return <SupplierPerformance call={call} branches={branches} user={user}/>;
+  if (page === 'Reports') return <AnalyticsReports call={call} branches={branches} user={user}/>;
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;

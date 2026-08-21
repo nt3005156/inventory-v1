@@ -43,6 +43,15 @@ export async function buildDashboard({branchId, user}) {
     inventoryValue,
     lowStock,
     vat: pnl.sales.vat,
-    purchases: pnl.purchases
+    purchases: pnl.purchases,
+    // Phase 18: the brief's dashboard list asked for these explicitly and the
+    // figures already existed inside the P&L — they were simply not surfaced,
+    // so a dashboard caller could not see gross revenue, discounts, refunds or
+    // gross profit without a second request.
+    sales: pnl.sales.orders,
+    grossRevenue: pnl.grossRevenue,
+    discounts: pnl.sales.discounts,
+    refunds: pnl.refunds,
+    grossProfit: pnl.grossProfit
   };
 }

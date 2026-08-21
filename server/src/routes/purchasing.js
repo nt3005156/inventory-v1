@@ -22,6 +22,9 @@ import {
   buildReorderPlan, createSuggestedPurchaseOrder, raiseReorderAlerts
 } from '../services/reorderEngine.js';
 import {getSupplierPerformance} from '../services/supplierPerformance.js';
+import {
+  buildCustomerReport, buildInventoryReport, buildSalesReport
+} from '../services/analytics.js';
 import {schedulerStatus} from '../services/reorderScheduler.js';
 import {buildPnl} from '../services/pnl.js';
 import {buildDashboard} from '../services/dashboard.js';
@@ -1105,6 +1108,36 @@ r.get('/suppliers/:id/performance', auth(MGMT), async (req, res) => {
 // running rather than assuming it is.
 r.get('/purchasing/reorder-scheduler', auth(MGMT), async (req, res) => {
   try { res.json(schedulerStatus()); } catch (e) { fail(res, e); }
+});
+
+// ── Phase 18: analytics ──────────────────────────────────────────────────────
+// Read-only. Management only: these expose revenue, margin and customer data.
+// Every one is tenant- and branch-scoped through analyticsScope(), which reuses
+// the same guards purchasing uses.
+r.get('/reports/sales', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await buildSalesReport({
+      branchId: req.query.branch, user: req.user,
+      from: req.query.from, to: req.query.to, granularity: req.query.granularity
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/inventory', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await buildInventoryReport({
+      branchId: req.query.branch, user: req.user, from: req.query.from, to: req.query.to
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/reports/customers', auth(MGMT), async (req, res) => {
+  try {
+    res.json(await buildCustomerReport({
+      branchId: req.query.branch, user: req.user,
+      from: req.query.from, to: req.query.to, limit: req.query.limit
+    }));
+  } catch (e) { fail(res, e); }
 });
 
 export default r;

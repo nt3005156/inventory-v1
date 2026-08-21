@@ -689,6 +689,58 @@ already run inside `withTransaction` with idempotency keys, verified by the
 existing rollback tests. No indexes were added: every collection already
 carries tenant-prefixed compound indexes matching its real query patterns.
 
+## Reporting and business intelligence (Phase 18)
+
+### The brief's P&L premise was wrong — recorded rather than quietly worked around
+
+The brief states `/api/reports/pnl` runs on "legacy Purchase/Sale/Expense data"
+and must be moved onto the modern purchasing/ledger architecture. **It does
+not.** Verified against the running API before any code was written: a legacy
+`Sale` of 99,999 and a legacy `Purchase` of 77,777 were planted, and P&L
+reported `revenue: 0` and `purchases: 0`. It already reads `Order`,
+`InventoryTransaction` and `buildPurchasingReport()`. The legacy `Purchase` and
+`Sale` models still exist in `models/index.js` but **nothing imports them**. A
+regression test now plants those rows permanently, so reintroducing a legacy
+read fails the suite.
+
+What P&L *was* missing — and this is fixed — is flat `vat`, `discounts` and
+`inventoryValue` at the top level. A caller reading `body.vat` got `undefined`,
+and P&L had no inventory figure at all while the dashboard did, so the two
+disagreed about what stock the business was holding. Fixed additively; the
+nested `sales` block is untouched for existing callers.
+
+### Report families
+
+| Report | Endpoint | Notes |
+|---|---|---|
+| Dashboard | `GET /dashboard` | now also carries `sales`, `grossRevenue`, `discounts`, `refunds`, `grossProfit` |
+| P&L | `GET /reports/pnl` | plus flat `vat`, `discounts`, `inventoryValue` |
+| Sales | `GET /reports/sales` | daily / weekly / monthly, by branch, item, category, order type, payment method |
+| Inventory | `GET /reports/inventory` | stock value, movement, waste, adjustments, count variance, expiry |
+| Customers | `GET /reports/customers` | repeat rate, AOV, top customers |
+| Purchasing | existing family | **audited and integrated**, not rebuilt |
+| Kitchen | `GET /kitchen/performance` | **audited**: prep time, delayed orders and station performance already existed |
+
+### Semantics worth stating
+
+* **Reporting days are Kathmandu days.** A 23:00 UTC sale belongs to the next
+  local day; bucketing on UTC would put evening takings in the wrong day.
+* **Net vs gross.** `grossRevenue` is what was rung up; `netRevenue` subtracts
+  refunds. Cancelled, draft and held orders are never revenue.
+* **Payment split comes from the `Payment` rows, not the order.** An order
+  settled across cash and Khalti is reported as two tenders. Reversed tenders
+  are excluded — money that was never really taken.
+* **Count variance uses approved counts only.** A submitted or stale count is
+  not evidence.
+* **"Repeat customer" means more than one order within the reporting period**,
+  stated in the payload as `repeatBasis` so the metric cannot be misread as
+  lifetime behaviour.
+* **Analytics never writes.** A test asserts balances, ledger rows and order
+  counts are unchanged after running every report.
+
+The reports workspace is a **new** `Reports` screen. The pre-existing
+`Analytics` screen (menu engineering) is untouched and still reachable.
+
 ## Sweep ownership and lease integrity (Phase 16D)
 
 Final hardening pass for the reorder/scheduler module.

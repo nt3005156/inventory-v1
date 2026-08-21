@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import {Expense} from '../models/index.js';
-import {InventoryTransaction, Order} from '../models/operations.js';
+import {InventoryBalance, InventoryTransaction, Order} from '../models/operations.js';
 import {expenseQuery, expenseScope, resolveExpenseContext} from './expenses.js';
 import {buildPurchasingReport} from './purchasingReport.js';
 import {money} from './statements.js';
@@ -42,7 +42,7 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     ...dates
   };
 
-  const [salesAgg, expenseRows, wasteRows] = await Promise.all([
+  const [salesAgg, expenseRows, wasteRows, stockRows] = await Promise.all([
     Order.aggregate([
       {$match: orderMatch},
       {$group: {
@@ -70,7 +70,13 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
       to,
       toExclusive
     })),
-    InventoryTransaction.find(wasteMatch)
+    InventoryTransaction.find(wasteMatch),
+    // Phase 18: closing inventory value. The dashboard already reported it and
+    // P&L did not, so the two disagreed about what the business was holding.
+    // Read from balances (quantity x weighted average), the same basis the
+    // valuation service and the inventory report use.
+    InventoryBalance.find({branch: {$in: scope.branchIds.map(id => new mongoose.Types.ObjectId(id))}})
+      .select('quantity averageCost').lean()
   ]);
 
   const raw = salesAgg[0] || {revenue: 0, grossRevenue: 0, refunds: 0, orders: 0, discounts: 0, vat: 0, cogs: 0};
@@ -86,6 +92,9 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
   const wasteAmount = money(wasteRows.reduce((s, t) => s + Number(t.totalCost || 0), 0));
   const purchases = purchasing.ledger.netStockValue;
   const netProfit = money(grossProfit - expenseAmount - wasteAmount);
+  const inventoryValue = money(stockRows.reduce(
+    (sum, row) => sum + Number(row.quantity || 0) * Number(row.averageCost || 0), 0
+  ));
 
   return {
     source: 'live',
@@ -97,9 +106,15 @@ export async function buildPnl({branchId, user, from, to, toExclusive}) {
     revenue,
     grossRevenue,
     refunds,
+    // Phase 18: `vat` and `discounts` were only reachable under `sales`, so a
+    // caller reading the top level silently got undefined. They are surfaced
+    // flat as well; the nested `sales` block is unchanged for existing callers.
+    vat,
+    discounts,
     cogs,
     grossProfit,
     purchases,
+    inventoryValue,
     waste: wasteAmount,
     expenses: expenseAmount,
     netProfit,
