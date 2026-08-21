@@ -88,7 +88,16 @@ export function reportingPeriod({from, to} = {}) {
   const parse = (value, label) => {
     if (!value) return null;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) throw httpError(`${label} must use YYYY-MM-DD`, 400);
-    return new Date(`${value}T00:00:00.000+05:45`);
+    const date = new Date(`${value}T00:00:00.000+05:45`);
+    // Phase 19: the shape regex passed but the DATE was never checked.
+    // `from=2025-13-99` produced an Invalid Date that flowed into the query
+    // and surfaced as a 500; `from=2025-02-31` silently rolled forward to
+    // 3 March, so a report labelled February quietly covered March. Both are
+    // caught here, at the one place every report parses a date.
+    if (Number.isNaN(date.getTime())) throw httpError(`${label} is not a real date`, 400);
+    const roundTrip = new Date(date.getTime() + KATHMANDU_OFFSET_MS).toISOString().slice(0, 10);
+    if (roundTrip !== String(value)) throw httpError(`${label} is not a real date`, 400);
+    return date;
   };
   const fromDate = parse(from, 'from');
   const toDate = parse(to, 'to');

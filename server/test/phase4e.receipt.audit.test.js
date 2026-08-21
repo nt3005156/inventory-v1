@@ -337,13 +337,50 @@ describe('AUDIT 7 — output formats', () => {
     assert.ok(!/url\(/i.test(html), 'no url() asset reference');
   });
 
-  it('ships no PDF dependency', async () => {
+  it('ships no headless-browser or shell-out renderer', async () => {
+    // Originally this banned `pdfkit` too. Phase 19 adds a real PDF export
+    // engine, so that clause was retired DELIBERATELY rather than to make a
+    // test pass — and the protection it actually existed for is kept and
+    // tightened below.
+    //
+    // What was ever dangerous here is not "a PDF library": it is a renderer
+    // that ships a browser or shells out to a binary. Those download ~300MB at
+    // install, need system libraries the container does not have, and execute
+    // attacker-influenced HTML in a process with filesystem access.
+    // `pdfkit` is a pure-JS drawing library — no browser, no `child_process`,
+    // no HTML parsing — and it is not what this rule was guarding against.
     const {createRequire} = await import('node:module');
     const require = createRequire(import.meta.url);
     const pkg = require('../package.json');
     const deps = Object.keys({...pkg.dependencies, ...pkg.devDependencies}).join(' ');
-    for (const banned of ['pdfkit', 'puppeteer', 'playwright', 'html-pdf', 'wkhtmltopdf']) {
-      assert.ok(!deps.includes(banned), `unexpected PDF dependency: ${banned}`);
+    for (const banned of ['puppeteer', 'playwright', 'html-pdf', 'wkhtmltopdf', 'phantomjs', 'chrome-aws-lambda']) {
+      assert.ok(!deps.includes(banned), `unexpected headless-browser PDF dependency: ${banned}`);
+    }
+  });
+
+  it('keeps the thermal receipt path free of any PDF renderer', async () => {
+    // The stronger, more specific guarantee that replaces the blanket ban:
+    // the 80mm receipt must stay pure HTML. If a till's receipt ever started
+    // going through a PDF pipeline it would be slower, heavier and able to
+    // fail in a way a thermal printer cannot report.
+    const {readFile} = await import('node:fs/promises');
+    for (const file of ['../src/services/receipts.js', '../src/routes/billing.js']) {
+      const source = await readFile(new URL(file, import.meta.url), 'utf8');
+      assert.doesNotMatch(source, /pdfkit|puppeteer|playwright/i,
+        `${file} must not pull in a PDF renderer`);
+    }
+  });
+
+  it('confines PDF rendering to the export engine', async () => {
+    // pdfkit is allowed in exactly two files. Anywhere else and PDF generation
+    // has leaked into an operational path that has no business blocking on it.
+    const {readdir, readFile} = await import('node:fs/promises');
+    const allowed = new Set(['exportEngine.js', 'exportDocuments.js']);
+    const directory = new URL('../src/services/', import.meta.url);
+    for (const name of await readdir(directory)) {
+      if (!name.endsWith('.js') || allowed.has(name)) continue;
+      const source = await readFile(new URL(name, directory), 'utf8');
+      assert.doesNotMatch(source, /from 'pdfkit'/, `${name} must not import pdfkit`);
     }
   });
 });
