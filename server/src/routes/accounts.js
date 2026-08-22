@@ -7,7 +7,7 @@
  */
 import {Router} from 'express';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {RIDER_VEHICLES} from '../models/index.js';
 import {
   CREATABLE_ROLES,
@@ -46,7 +46,7 @@ const createSchema = z.object({
 }).strict();
 
 /** Managers may read the roster; only owners may change it. */
-r.get('/accounts', auth(['owner', 'manager']), async (req, res) => {
+r.get('/accounts', requirePermission('users.manage'), async (req, res) => {
   try {
     res.json(await listStaffAccounts({
       user: req.user,
@@ -59,7 +59,7 @@ r.get('/accounts', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.post('/accounts', auth(['owner']), async (req, res) => {
+r.post('/accounts', requirePermission('users.create'), async (req, res) => {
   try {
     const body = createSchema.parse(req.body || {});
     res.status(201).json(await createStaffAccount({user: req.user, input: body}));
@@ -68,7 +68,7 @@ r.post('/accounts', auth(['owner']), async (req, res) => {
   }
 });
 
-r.post('/accounts/:id/password', auth(['owner']), async (req, res) => {
+r.post('/accounts/:id/password', requirePermission('users.password'), async (req, res) => {
   try {
     const body = z.object({password: z.string().min(1).max(200)}).strict().parse(req.body || {});
     res.json(await resetAccountPassword({
@@ -79,7 +79,7 @@ r.post('/accounts/:id/password', auth(['owner']), async (req, res) => {
   }
 });
 
-r.patch('/accounts/:id/active', auth(['owner']), async (req, res) => {
+r.patch('/accounts/:id/active', requirePermission('users.deactivate'), async (req, res) => {
   try {
     const body = z.object({
       active: z.boolean(),

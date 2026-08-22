@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {assertCapability} from './capabilities.js';
 import mongoose from 'mongoose';
 import {Audit, Ingredient, Supplier} from '../models/index.js';
 import {PurchaseOrder} from '../models/operations.js';
@@ -145,10 +146,10 @@ function beforeReceiptView(po, prepared) {
   };
 }
 
-async function receiptContext({poId, user, session}) {
+async function receiptContext({poId, user, principal, session}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   const identity = await userRestaurantContext(user, {session});
-  if (!['owner', 'manager'].includes(identity.role)) throw httpError('Only owners and managers can receive purchase orders', 403);
+  assertCapability(user, principal, 'purchase.receive', 'Only owners and managers can receive purchase orders');
   const po = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).session(session || null);
   if (!po) throw httpError('Purchase order not found', 404);
   const context = await purchaseBranchContext({user, branchId: po.branch, session});
@@ -175,22 +176,22 @@ async function findReceiptReplay({po, context, idempotencyKey, requestHash, sess
   return {purchaseOrder, receipt: prior, duplicate: true};
 }
 
-export async function replayGoodsReceipt({poId, items, notes, user, idempotencyKey, session}) {
+export async function replayGoodsReceipt({poId, items, notes, user, principal, idempotencyKey, session}) {
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
-  const {po, context} = await receiptContext({poId, user, session});
+  const {po, context} = await receiptContext({poId, user, principal, session});
   const requestHash = receiptRequestFingerprint({poId, items, notes});
   const replay = await findReceiptReplay({po, context, idempotencyKey: key, requestHash, session});
   if (!replay) throw httpError('Receiving request could not be replayed; retry with a new key', 409);
   return replay;
 }
 
-export async function receivePurchaseOrder({poId, items, notes, expectedVersion, user, session, idempotencyKey}) {
+export async function receivePurchaseOrder({poId, items, notes, expectedVersion, user, principal, session, idempotencyKey}) {
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
   if (key.length > 120) throw httpError('Idempotency-Key must be 120 characters or fewer', 400);
 
-  const {po, context} = await receiptContext({poId, user, session});
+  const {po, context} = await receiptContext({poId, user, principal, session});
   const requestHash = receiptRequestFingerprint({poId, items, notes});
   const replay = await findReceiptReplay({po, context, idempotencyKey: key, requestHash, session});
   if (replay) return replay;

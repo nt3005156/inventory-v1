@@ -95,24 +95,37 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
       if (!token) return next(new Error('Authentication required'));
       const payload = jwt.verify(token, process.env.JWT_SECRET);
       if (!SOCKET_ROLES.includes(payload.role)) return next(new Error('Insufficient permission'));
-      socket.user = payload;
+
+      /**
+       * Phase 17: the handshake now resolves the principal against STORAGE,
+       * exactly as the HTTP guard does. Previously it trusted the JWT, so a
+       * deactivated or demoted user — or one whose sessions had been revoked
+       * — could still open a websocket and sit in a branch room until the
+       * token expired. The role used from here on is the stored one.
+       */
+      const {resolvePrincipal} = await import('./accessControl.js');
+      const principal = await resolvePrincipal(payload);
+      socket.user = {...payload, role: principal.baseRole, branch: principal.branch};
+      socket.data = {...(socket.data || {}), principalRole: principal.baseRole};
 
       // A requested initial branch is fully tenant-checked during the handshake.
       // Clients still join explicitly and reload after the join acknowledgement so
       // mutations that happen during connection setup cannot be missed.
       // A rider is not a branch participant: they join only their own private
       // room, and any branch they ask for is ignored rather than honoured.
-      if (payload.role === 'rider') {
+      if (principal.baseRole === 'rider') {
         await socket.join(riderRoom(payload.id));
         socket.data = {...(socket.data || {}), rider: true};
         return next();
       }
 
       const requested = socket.handshake.auth?.branch;
-      if (requested) await purchaseBranchContext({user: payload, branchId: requested, allowInactive: true});
+      if (requested) await purchaseBranchContext({user: socket.user, branchId: requested, allowInactive: true});
       next();
     } catch (error) {
-      const message = error?.status === 403
+      const message = error?.status === 401
+        ? (error.message || 'Authentication required')
+        : error?.status === 403
         ? (error.message || 'Branch access denied')
         : error?.status === 400
           ? (error.message || 'Invalid branch')
@@ -279,4 +292,133 @@ export async function closeRealtime() {
   if (!io) return;
   await new Promise(resolve => io.close(resolve));
   io = null;
+}
+
+/**
+ * Phase 17 — push-based socket authorisation refresh.
+ *
+ * `evictStaleBranchSockets()` above is LAZY: it revalidates a branch room only
+ * when something is emitted to it, so a downgraded user kept their room until
+ * the next event happened to be published. These two functions close that
+ * window at the moment of the change, driven by the write that caused it.
+ *
+ * Everything here re-derives authority from STORAGE. Nothing trusts the role
+ * in `socket.user`, which came from a JWT that may predate the change.
+ */
+
+/** Every live socket belonging to one user. */
+async function socketsForUser(userId) {
+  if (!io || !userId) return [];
+  const id = String(userId);
+  try {
+    const all = await io.fetchSockets();
+    return all.filter(socket => String(socket.user?.id || '') === id);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Re-authorise a user's live sockets after a role, permission or branch change.
+ *
+ * Each socket is re-checked against the database. A socket that may no longer
+ * be in its branch room is removed from it and told why; a socket whose
+ * management standing changed gains or loses the purchasing-management room.
+ * The socket stays CONNECTED — the person is still employed — but it now holds
+ * exactly the rooms their current access allows.
+ */
+export async function refreshUserSockets(userId, reason = 'role_changed') {
+  const sockets = await socketsForUser(userId);
+  if (!sockets.length) return 0;
+
+  const {resolvePrincipal} = await import('./accessControl.js');
+  let changed = 0;
+
+  for (const socket of sockets) {
+    let principal = null;
+    try {
+      principal = await resolvePrincipal({id: userId, role: socket.user?.role, sv: socket.user?.sv});
+    } catch {
+      // The session is no longer valid at all (deactivated, demoted, role
+      // withdrawn, sessions revoked). Nothing to refresh — end it.
+      socket.emit('session:revoked', {reason});
+      socket.disconnect(true);
+      changed += 1;
+      continue;
+    }
+
+    // A principal whose base role changed to rider must lose every branch room:
+    // branch rooms carry kitchen tickets and stock movements.
+    if (principal.baseRole === 'rider') {
+      for (const room of [...socket.rooms]) {
+        if (String(room).startsWith('branch:')) socket.leave(room);
+      }
+      socket.data = {...(socket.data || {}), branchId: null, role: 'rider', rider: true};
+      socket.join(riderRoom(userId));
+      socket.emit('branch:revoked', {reason: 'Role changed', branch: null});
+      changed += 1;
+      continue;
+    }
+
+    const current = socket.data?.branchId;
+    if (!current) continue;
+
+    let allowed = false;
+    try {
+      await purchaseBranchContext({user: {id: userId, role: principal.baseRole}, branchId: current, allowInactive: true});
+      allowed = true;
+    } catch {
+      allowed = false;
+    }
+
+    if (!allowed) {
+      socket.leave(branchRoom(current));
+      socket.leave(purchasingManagementRoom(current));
+      socket.data.branchId = null;
+      socket.data.role = null;
+      socket.emit('branch:revoked', {branch: String(current), reason: 'Branch access revoked'});
+      changed += 1;
+      continue;
+    }
+
+    // Still entitled to the branch, but management standing may have moved.
+    const isManagement = MANAGEMENT_ROLES.has(principal.baseRole);
+    const room = purchasingManagementRoom(current);
+    const inRoom = socket.rooms.has(room);
+    if (isManagement && !inRoom) {
+      await socket.join(room);
+      changed += 1;
+    } else if (!isManagement && inRoom) {
+      socket.leave(room);
+      changed += 1;
+    }
+    socket.data.role = principal.baseRole;
+    // Tell the client its permissions moved so it can re-render its nav. The
+    // client is not trusted with this; it is a courtesy, and every event and
+    // endpoint remains independently guarded.
+    socket.emit('permissions:changed', {reason});
+  }
+  return changed;
+}
+
+/**
+ * Hard-disconnect every socket for a user — deactivation, or an explicit
+ * session revocation. Their token is already dead for HTTP; leaving a live
+ * websocket streaming branch traffic would be exactly the hole this closes.
+ */
+export function disconnectUserSockets(userId, reason = 'revoked') {
+  if (!io || !userId) return 0;
+  const id = String(userId);
+  let count = 0;
+  // Synchronous local iteration: this runs inside a revocation path that must
+  // not await a cluster round-trip before reporting success.
+  for (const socket of io.sockets.sockets.values()) {
+    if (String(socket.user?.id || '') !== id) continue;
+    try {
+      socket.emit('session:revoked', {reason});
+      socket.disconnect(true);
+      count += 1;
+    } catch { /* already gone */ }
+  }
+  return count;
 }

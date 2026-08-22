@@ -11,7 +11,7 @@
  */
 import {Router} from 'express';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {
   addCustomerAddress,
@@ -92,7 +92,7 @@ const updateSchema = createSchema.partial().strict();
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 /** Aggregate figures for the CRM header. Declared before /:id. */
-r.get('/customers/summary', auth(['owner', 'manager']), async (req, res) => {
+r.get('/customers/summary', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await customerSummary({user: req.user, branchId: req.query.branch}));
   } catch (e) {
@@ -101,7 +101,7 @@ r.get('/customers/summary', auth(['owner', 'manager']), async (req, res) => {
 });
 
 /** Search by phone, name, email or customer id. */
-r.get('/customers/search', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/customers/search', requirePermission('customers.view'), async (req, res) => {
   try {
     res.json(await searchCustomers({
       user: req.user,
@@ -117,7 +117,7 @@ r.get('/customers/search', auth(['owner', 'manager', 'staff']), async (req, res)
   }
 });
 
-r.get('/customers/:id/history', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/customers/:id/history', requirePermission('customers.view'), async (req, res) => {
   try {
     res.json(await getCustomerHistory({
       user: req.user, customerId: req.params.id, limit: req.query.limit
@@ -127,7 +127,7 @@ r.get('/customers/:id/history', auth(['owner', 'manager', 'staff']), async (req,
   }
 });
 
-r.get('/customers/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/customers/:id', requirePermission('customers.view'), async (req, res) => {
   try {
     res.json(await getCustomer({user: req.user, customerId: req.params.id}));
   } catch (e) {
@@ -137,7 +137,7 @@ r.get('/customers/:id', auth(['owner', 'manager', 'staff']), async (req, res) =>
 
 // ── Writes ───────────────────────────────────────────────────────────────────
 
-r.post('/customers/:id/recalculate', auth(['owner', 'manager']), async (req, res) => {
+r.post('/customers/:id/recalculate', requirePermission('customers.merge'), async (req, res) => {
   try {
     // Prove tenancy before touching the record.
     await getCustomer({user: req.user, customerId: req.params.id});
@@ -147,7 +147,7 @@ r.post('/customers/:id/recalculate', auth(['owner', 'manager']), async (req, res
   }
 });
 
-r.post('/customers/:id/loyalty', auth(['owner', 'manager']), async (req, res) => {
+r.post('/customers/:id/loyalty', requirePermission('customers.loyalty'), async (req, res) => {
   try {
     const body = z.object({
       delta: z.number().int(),
@@ -161,7 +161,7 @@ r.post('/customers/:id/loyalty', auth(['owner', 'manager']), async (req, res) =>
   }
 });
 
-r.post('/customers/merge', auth(['owner', 'manager']), async (req, res) => {
+r.post('/customers/merge', requirePermission('customers.merge'), async (req, res) => {
   try {
     const body = z.object({source: z.string(), target: z.string()}).strict().parse(req.body || {});
     res.json(await mergeCustomers({
@@ -172,7 +172,7 @@ r.post('/customers/merge', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/customers/:id/active', auth(['owner']), async (req, res) => {
+r.patch('/customers/:id/active', requirePermission('customers.delete'), async (req, res) => {
   try {
     const body = z.object({
       active: z.boolean(),
@@ -186,7 +186,7 @@ r.patch('/customers/:id/active', auth(['owner']), async (req, res) => {
   }
 });
 
-r.post('/customers/:id/addresses', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.post('/customers/:id/addresses', requirePermission('customers.manage'), async (req, res) => {
   try {
     const body = addressCreateSchema.parse(req.body || {});
     res.status(201).json(await addCustomerAddress({
@@ -197,7 +197,7 @@ r.post('/customers/:id/addresses', auth(['owner', 'manager', 'staff']), async (r
   }
 });
 
-r.patch('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.patch('/customers/:id/addresses/:addressId', requirePermission('customers.manage'), async (req, res) => {
   try {
     const body = addressUpdateSchema.parse(req.body || {});
     res.json(await updateCustomerAddress({
@@ -208,7 +208,7 @@ r.patch('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff'
   }
 });
 
-r.delete('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.delete('/customers/:id/addresses/:addressId', requirePermission('customers.manage'), async (req, res) => {
   try {
     res.json(await removeCustomerAddress({
       user: req.user, customerId: req.params.id, addressId: req.params.addressId
@@ -218,7 +218,7 @@ r.delete('/customers/:id/addresses/:addressId', auth(['owner', 'manager', 'staff
   }
 });
 
-r.patch('/customers/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.patch('/customers/:id', requirePermission('customers.manage'), async (req, res) => {
   try {
     const body = updateSchema.parse(req.body || {});
     res.json(await updateCustomer({user: req.user, customerId: req.params.id, input: body}));
@@ -232,13 +232,13 @@ r.patch('/customers/:id', auth(['owner', 'manager', 'staff']), async (req, res) 
  * destroying a profile would orphan financial history. 405 says so explicitly
  * rather than 404, which would look like a routing mistake.
  */
-r.delete('/customers/:id', auth(['owner']), (_req, res) => {
+r.delete('/customers/:id', requirePermission('customers.delete'), (_req, res) => {
   res.status(405).json({
     message: 'Customers are deactivated, not deleted, because orders reference them. Use PATCH /customers/:id/active.'
   });
 });
 
-r.post('/customers', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.post('/customers', requirePermission('customers.manage'), async (req, res) => {
   try {
     // Authorization BEFORE validation. If the caller has no right to the named
     // branch, they must be denied outright — answering 400 would tell them

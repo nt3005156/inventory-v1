@@ -28,7 +28,14 @@ let baseUrl;
 
 export function tokenFor(user, extras = {}) {
   return jwt.sign(
-    {id: user._id, name: user.name, role: user.role, restaurantId: user.restaurantId || null, branch: user.branch || null, ...extras},
+    {
+      id: user._id, name: user.name, role: user.role,
+      restaurantId: user.restaurantId || null, branch: user.branch || null,
+      // Phase 17: mirror production's session-version claim so tests exercise
+      // the same revocation path the real signToken() produces.
+      sv: Number(user.sessionVersion || 0),
+      ...extras
+    },
     process.env.JWT_SECRET,
     {expiresIn: '2h'}
   );

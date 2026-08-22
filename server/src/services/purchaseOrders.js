@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {assertCapability} from './capabilities.js';
 import mongoose from 'mongoose';
 import {Audit, Supplier} from '../models/index.js';
 import {Branch, PurchaseOrder, PurchaseOrderCounter} from '../models/operations.js';
@@ -253,9 +254,10 @@ async function replayByKey({restaurantId, requestKey, requestHash, session}) {
   return populatedPurchaseOrder(PurchaseOrder.findById(existing._id).session(session || null));
 }
 
-export async function createPurchaseOrder({input, user, requestKey, session}) {
+
+export async function createPurchaseOrder({input, user, principal, requestKey, session}) {
   const context = await purchaseBranchContext({user, branchId: input.branch, session});
-  if (!['owner', 'manager'].includes(context.role)) throw httpError('Insufficient permission', 403);
+  assertCapability(user, principal, 'purchase.create');
   const key = clean(requestKey) || undefined;
   if (key && key.length > 120) throw httpError('Idempotency key is too long', 400);
   const fingerprint = requestFingerprint(input);
@@ -315,12 +317,12 @@ export async function replayPurchaseOrderCreate({input, user, requestKey}) {
   return {purchaseOrder: po, duplicate: true};
 }
 
-export async function updatePurchaseOrder({poId, input, expectedVersion, user, session}) {
+export async function updatePurchaseOrder({poId, input, expectedVersion, user, principal, session}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   const current = await PurchaseOrder.findById(poId).session(session || null).lean();
   if (!current) throw httpError('Purchase order not found', 404);
   const context = await purchaseBranchContext({user, branchId: current.branch, session, allowInactive: true});
-  if (!['owner', 'manager'].includes(context.role)) throw httpError('Insufficient permission', 403);
+  assertCapability(user, principal, 'purchase.create');
   if (!editableStatuses.includes(current.status)) throw httpError('Only draft or rejected purchase orders can be edited', 409);
   if (!Number.isInteger(Number(expectedVersion)) || Number(expectedVersion) !== Number(current.__v || 0)) {
     throw httpError('Purchase order changed since it was loaded; refresh and try again', 409);
@@ -392,13 +394,13 @@ function approvalAuditView(po) {
   };
 }
 
-export async function transitionPurchaseOrder({poId, status, notes, expectedVersion, user, session}) {
+export async function transitionPurchaseOrder({poId, status, notes, expectedVersion, user, principal, session}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   if (!status) throw httpError('Status is required', 400);
   const po = await PurchaseOrder.findById(poId).session(session || null);
   if (!po) throw httpError('Purchase order not found', 404);
   const context = await purchaseBranchContext({user, branchId: po.branch, session, allowInactive: true});
-  if (!['owner', 'manager'].includes(context.role)) throw httpError('Insufficient permission', 403);
+  assertCapability(user, principal, 'purchase.approve');
   if (expectedVersion !== undefined && Number(expectedVersion) !== po.__v) {
     throw httpError('Purchase order changed since it was loaded; refresh and try again', 409);
   }
@@ -510,12 +512,12 @@ async function findShortCloseReplay({poId, reason, idempotencyKey, identity, ses
   return populatedPurchaseOrder(PurchaseOrder.findById(prior._id).session(session || null));
 }
 
-export async function replayShortClosePurchaseOrder({poId, reason, user, idempotencyKey, session}) {
+export async function replayShortClosePurchaseOrder({poId, reason, user, principal, idempotencyKey, session}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
   const identity = await userRestaurantContext(user, {session});
-  if (!['owner', 'manager'].includes(identity.role)) throw httpError('Only owners and managers can close a partial purchase order', 403);
+  assertCapability(user, principal, 'purchase.approve', 'Only owners and managers can close a partial purchase order');
   const target = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).select('branch').session(session || null);
   if (!target) throw httpError('Purchase order not found', 404);
   await purchaseBranchContext({user, branchId: target.branch, session, allowInactive: true});
@@ -524,13 +526,13 @@ export async function replayShortClosePurchaseOrder({poId, reason, user, idempot
   return replay;
 }
 
-export async function closeShortPurchaseOrder({poId, reason, expectedVersion, user, session, idempotencyKey}) {
+export async function closeShortPurchaseOrder({poId, reason, expectedVersion, user, principal, session, idempotencyKey}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
   if (key.length > 120) throw httpError('Idempotency-Key must be 120 characters or fewer', 400);
   const identity = await userRestaurantContext(user, {session});
-  if (!['owner', 'manager'].includes(identity.role)) throw httpError('Only owners and managers can close a partial purchase order', 403);
+  assertCapability(user, principal, 'purchase.approve', 'Only owners and managers can close a partial purchase order');
   const po = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).session(session || null);
   if (!po) throw httpError('Purchase order not found', 404);
   const context = await purchaseBranchContext({user, branchId: po.branch, session, allowInactive: true});

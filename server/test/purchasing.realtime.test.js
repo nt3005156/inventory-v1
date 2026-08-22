@@ -136,9 +136,13 @@ describe('socket purchasing events', () => {
       connectSocket(tokenFor(world.manager), world.branchB._id),
       /Branch access denied/
     );
+    // Phase 17: the handshake now resolves the principal against storage, so a
+    // forged role-escalation token is refused with the specific reason rather
+    // than a generic 'Authentication required'. Still rejected, and the
+    // message is strictly more informative to an operator reading logs.
     await assert.rejects(
       connectSocket(tokenFor(world.staffA, {role: 'owner'}), world.branchA._id),
-      /Authentication required/
+      /User permissions changed; sign in again/
     );
   });
 

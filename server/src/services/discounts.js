@@ -22,8 +22,39 @@ export const normalizeCode = value => clean(value).toUpperCase();
  * taken as NPR off. Either way the result is clamped to the base so a discount
  * can never exceed what is being discounted or turn a line negative.
  */
-/** Roles that may exceed the staff discount ceiling. */
+/**
+ * Roles that may exceed the staff discount ceiling.
+ *
+ * RETAINED as the fallback only. Phase 17 moved the decision to the
+ * `orders.discountoverride` permission so a custom Supervisor role can be
+ * given override authority without being made a manager. This list is still
+ * consulted when no resolved principal is available — a service-to-service
+ * caller, or a test that passes a bare `{role}` object — so the historical
+ * behaviour is preserved rather than silently dropped.
+ */
 export const DISCOUNT_SUPERVISOR_ROLES = Object.freeze(['owner', 'manager']);
+
+/** The permission that authorises exceeding the staff ceiling. */
+export const DISCOUNT_OVERRIDE_PERMISSION = 'orders.discountoverride';
+
+/**
+ * Is this caller allowed past the staff ceiling?
+ *
+ * Prefers the resolved principal (`req.principal`), which carries live
+ * database-backed permissions. Falls back to the legacy role list when the
+ * caller supplied only a role, so behaviour is unchanged for every existing
+ * call path that has not been threaded through the guard.
+ */
+export function canOverrideDiscountCeiling(principal, user) {
+  if (principal) {
+    if (principal.baseRole === 'owner') return true;
+    if (principal.permissions?.has?.(DISCOUNT_OVERRIDE_PERMISSION)) return true;
+    // A resolved CUSTOM role is authoritative: it holds exactly what it was
+    // granted, so absence of the permission is a genuine 'no', not a gap.
+    if (principal.custom) return false;
+  }
+  return DISCOUNT_SUPERVISOR_ROLES.includes(String(user?.role || ''));
+}
 
 /**
  * 11D: authorise a manual discount against the restaurant's ceilings.
@@ -37,10 +68,12 @@ export const DISCOUNT_SUPERVISOR_ROLES = Object.freeze(['owner', 'manager']);
  * A reason is mandatory. An unexplained discount is indistinguishable from
  * theft after the fact, which defeats the point of auditing it.
  */
-export function assertDiscountAuthorized({kind, value, amount, base, user, restaurant, scope = 'order'}) {
+export function assertDiscountAuthorized({
+  kind, value, amount, base, user, principal, restaurant, scope = 'order'
+}) {
   const reason = clean(restaurant?.__reason ?? '');
   const role = String(user?.role || '');
-  const isSupervisor = DISCOUNT_SUPERVISOR_ROLES.includes(role);
+  const isSupervisor = canOverrideDiscountCeiling(principal, user);
 
   const hardPercent = Number(restaurant?.maxDiscountPercent ?? 100);
   const staffPercent = Number(restaurant?.staffMaxDiscountPercent ?? 20);

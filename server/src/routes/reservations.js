@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Reservation} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {publishTableEvent} from '../services/realtime.js';
@@ -49,7 +49,7 @@ const updateSchema = z.object({
 }).strict();
 
 // Front-of-house needs to read and take bookings; staff are included.
-r.get('/reservations', auth(roles), async (req, res) => {
+r.get('/reservations', requirePermission('tables.view'), async (req, res) => {
   try {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
@@ -65,7 +65,7 @@ r.get('/reservations', auth(roles), async (req, res) => {
 });
 
 // Declared before /reservations/:id so the literal path is not read as an id.
-r.get('/reservations/availability', auth(roles), async (req, res) => {
+r.get('/reservations/availability', requirePermission('tables.view'), async (req, res) => {
   try {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
@@ -81,7 +81,7 @@ r.get('/reservations/availability', auth(roles), async (req, res) => {
   }
 });
 
-r.get('/reservations/:id', auth(roles), async (req, res) => {
+r.get('/reservations/:id', requirePermission('tables.view'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid reservation'), {status: 400});
     const reservation = await Reservation.findById(req.params.id)
@@ -95,7 +95,7 @@ r.get('/reservations/:id', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/reservations', auth(roles), async (req, res) => {
+r.post('/reservations', requirePermission('reservations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = createSchema.parse(req.body);
@@ -114,7 +114,7 @@ r.post('/reservations', auth(roles), async (req, res) => {
   }
 });
 
-r.patch('/reservations/:id', auth(roles), async (req, res) => {
+r.patch('/reservations/:id', requirePermission('reservations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const patch = updateSchema.parse(req.body);
@@ -133,7 +133,7 @@ r.patch('/reservations/:id', auth(roles), async (req, res) => {
   }
 });
 
-r.patch('/reservations/:id/status', auth(roles), async (req, res) => {
+r.patch('/reservations/:id/status', requirePermission('reservations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = z.object({
@@ -157,7 +157,7 @@ r.patch('/reservations/:id/status', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/reservations/:id/hold', auth(roles), async (req, res) => {
+r.post('/reservations/:id/hold', requirePermission('reservations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     let result;
@@ -175,7 +175,7 @@ r.post('/reservations/:id/hold', auth(roles), async (req, res) => {
 
 // Cancelling is a distinct verb from a generic status change so the reason is
 // always captured; it delegates to the same guarded transition.
-r.delete('/reservations/:id', auth(roles), async (req, res) => {
+r.delete('/reservations/:id', requirePermission('reservations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;

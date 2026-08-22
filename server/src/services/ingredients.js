@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {assertCapability} from './capabilities.js';
 import { Ingredient, Supplier, Audit } from '../models/index.js';
 import { Branch, InventoryBalance } from '../models/operations.js';
 import { SupplierIngredient, SupplierPriceHistory } from '../models/supplierCatalog.js';
@@ -169,9 +170,9 @@ export async function getIngredient({ ingredientId, user }){
   return { ...row, costs, suppliers, conversions, supplierCount: suppliers.length, averageCost: costs.averageCost };
 }
 
-export async function createIngredient({ input, user }){
+export async function createIngredient({ input, user, principal }){
   const ctx = await userRestaurantContext(user);
-  if(!['owner','manager'].includes(ctx.role)) throw httpError('Only owner/manager can create ingredients',403);
+  assertCapability(user, principal, 'ingredients.manage', 'Only owner/manager can create ingredients');
   const name = clean(input.name);
   if(!name || name.length<2) throw httpError('Ingredient name must be at least 2 characters',400);
   if(name.length>120) throw httpError('Ingredient name too long',400);
@@ -222,10 +223,10 @@ export async function createIngredient({ input, user }){
   }
 }
 
-export async function updateIngredient({ ingredientId, patch, expectedVersion, user }){
+export async function updateIngredient({ ingredientId, patch, expectedVersion, user, principal }){
   if(!mongoose.isValidObjectId(ingredientId)) throw httpError('Invalid ingredient',400);
   const ctx = await userRestaurantContext(user);
-  if(!['owner','manager'].includes(ctx.role)) throw httpError('Only owner/manager can update ingredients',403);
+  assertCapability(user, principal, 'ingredients.manage', 'Only owner/manager can update ingredients');
   const row = await Ingredient.findOne({ _id: ingredientId, restaurant: ctx.restaurantId });
   if(!row) throw httpError('Ingredient not found',404);
   if(expectedVersion!==undefined && Number(expectedVersion)!==row.__v) throw httpError('Ingredient changed since it was loaded; refresh and try again',409);

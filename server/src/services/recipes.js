@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {assertCapability} from './capabilities.js';
 import { Ingredient, MenuItem, Audit } from '../models/index.js';
 import { Branch, InventoryBalance } from '../models/operations.js';
 import { userRestaurantContext } from './supplierCatalog.js';
@@ -297,11 +298,11 @@ export async function getRecipeVersions({ menuId, user }){
   return { menuId: row._id, name: row.name, currentVersion: row.recipeVersion||1, current, history, all: [current, ...history].sort((a,b)=> b.version - a.version) };
 }
 
-export async function createMenuItem({ input, user }){
+export async function createMenuItem({ input, user, principal }){
   const restaurantId = await resolveRestaurant(user);
   const normalizedModifierGroups = normalizeModifierGroups(input.modifierGroups);
   await assertModifierIngredientsOwned(normalizedModifierGroups, restaurantId);
-  if(!['owner','manager'].includes((await userRestaurantContext(user)).role)) throw httpError('Only owner/manager can create menu items',403);
+  assertCapability(user, principal, 'menu.manage', 'Only owner/manager can create menu items');
   const name = clean(input.name);
   if(!name || name.length<2) throw httpError('Menu name must be at least 2 characters',400);
   if(name.length>120) throw httpError('Menu name too long',400);
@@ -375,10 +376,10 @@ export async function createMenuItem({ input, user }){
   }
 }
 
-export async function updateMenuItem({ menuId, patch, expectedVersion, user }){
+export async function updateMenuItem({ menuId, patch, expectedVersion, user, principal }){
   if(!mongoose.isValidObjectId(menuId)) throw httpError('Invalid menu item',400);
   const restaurantId = await resolveRestaurant(user);
-  if(!['owner','manager'].includes((await userRestaurantContext(user)).role)) throw httpError('Only owner/manager can update menu items',403);
+  assertCapability(user, principal, 'menu.manage', 'Only owner/manager can update menu items');
   const row = await MenuItem.findOne({ _id: menuId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}] });
   if(!row) throw httpError('Menu item not found',404);
   if(expectedVersion!==undefined && Number(expectedVersion)!==row.__v) throw httpError('Menu item changed since loaded; refresh',409);

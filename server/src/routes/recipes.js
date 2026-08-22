@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import { z } from 'zod';
-import { auth } from '../middleware/auth.js';
+import { auth, requirePermission} from '../middleware/auth.js';
 import { listMenuItems, getMenuItem, createMenuItem, updateMenuItem, getRecipeVersions, getFoodCosting } from '../services/recipes.js';
 
 const r = Router();
@@ -80,7 +80,7 @@ const updateSchema = z.object({
   reason: z.string().max(500).optional()
 }).strict();
 
-r.get('/menu-items', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/menu-items', requirePermission('menu.view'), async(req,res)=>{
   try{
     res.json(await listMenuItems({
       user:req.user,
@@ -94,46 +94,46 @@ r.get('/menu-items', auth(['owner','manager','staff']), async(req,res)=>{
   }catch(e){ fail(res,e); }
 });
 
-r.post('/menu-items', auth(['owner','manager']), async(req,res)=>{
+r.post('/menu-items', requirePermission('menu.manage'), async(req,res)=>{
   try{
     const input = parse(createSchema, req.body);
-    const row = await createMenuItem({input, user:req.user});
+    const row = await createMenuItem({principal: req.principal, input, user:req.user});
     res.status(201).json(row);
   }catch(e){ fail(res,e); }
 });
 
-r.get('/menu-items/:id', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/menu-items/:id', requirePermission('menu.view'), async(req,res)=>{
   try{
     if(!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid menu item'),{status:400});
     res.json(await getMenuItem({menuId:req.params.id, user:req.user, branchId:req.query.branch}));
   }catch(e){ fail(res,e); }
 });
 
-r.patch('/menu-items/:id', auth(['owner','manager']), async(req,res)=>{
+r.patch('/menu-items/:id', requirePermission('menu.manage'), async(req,res)=>{
   try{
     if(!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid menu item'),{status:400});
     const {expectedVersion, ...patch} = parse(updateSchema, req.body);
-    res.json(await updateMenuItem({menuId:req.params.id, patch, expectedVersion, user:req.user}));
+    res.json(await updateMenuItem({principal: req.principal, menuId:req.params.id, patch, expectedVersion, user:req.user}));
   }catch(e){ fail(res,e); }
 });
 
-r.delete('/menu-items/:id', auth(['owner']), async(req,res)=>{
+r.delete('/menu-items/:id', requirePermission('menu.delete'), async(req,res)=>{
   res.status(409).json({message:'Menu items with order history cannot be deleted; deactivate instead'});
 });
 
-r.get('/menu-items/:id/versions', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/menu-items/:id/versions', requirePermission('menu.view'), async(req,res)=>{
   try{
     res.json(await getRecipeVersions({menuId:req.params.id, user:req.user}));
   }catch(e){ fail(res,e); }
 });
 
-r.get('/menu-items/:id/food-costing', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/menu-items/:id/food-costing', requirePermission('menu.view'), async(req,res)=>{
   try{
     res.json(await getFoodCosting({menuId:req.params.id, user:req.user, branchId:req.query.branch}));
   }catch(e){ fail(res,e); }
 });
 
-r.get('/menu-items/:id/cost', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/menu-items/:id/cost', requirePermission('menu.view'), async(req,res)=>{
   try{
     const data = await getFoodCosting({menuId:req.params.id, user:req.user, branchId:req.query.branch});
     res.json({ recipeCost: data.recipeCost, packagingCost: data.packagingCost, foodCost: data.foodCost, price: data.sellingPrice, margin: data.grossMargin, foodCostPercent: data.foodCostPercent, recipe: data.recipe, recipeVersion: data.recipeVersion });

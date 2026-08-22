@@ -30,7 +30,7 @@ const splitSchema = z.object({
   items: z.array(z.object({itemId: z.string(), qty: z.number().positive()})).min(1)
 });
 
-r.get('/orders/:id', auth(roles), async (req, res) => {
+r.get('/orders/:id', requirePermission('orders.view'), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id).populate('table', 'name area seats status').populate('customer', 'name phone');
     if (!order) return res.status(404).json({message: 'Order not found'});
@@ -42,7 +42,7 @@ r.get('/orders/:id', auth(roles), async (req, res) => {
   }
 });
 
-r.get('/orders/:id/payments', auth(roles), async (req, res) => {
+r.get('/orders/:id/payments', requirePermission('orders.view'), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({message: 'Order not found'});
@@ -53,7 +53,7 @@ r.get('/orders/:id/payments', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/orders/:id/payments', auth(roles), async (req, res) => {
+r.post('/orders/:id/payments', requirePermission('payments.take'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = paySchema.parse(req.body);
@@ -122,7 +122,7 @@ r.post('/orders/:id/refunds', requirePermission('orders.refund'), async (req, re
  * corrects a till error and reopens the balance. The original row is kept and
  * marked, never deleted.
  */
-r.post('/payments/:id/reverse', auth(['owner']), async (req, res) => {
+r.post('/payments/:id/reverse', requirePermission('payments.reverse'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = z.object({reason: z.string().trim().min(3).max(300)}).strict().parse(req.body || {});
@@ -142,7 +142,7 @@ r.post('/payments/:id/reverse', auth(['owner']), async (req, res) => {
   }
 });
 
-r.get('/orders/:id/payment-summary', auth(roles), async (req, res) => {
+r.get('/orders/:id/payment-summary', requirePermission('orders.view'), async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({message: 'Order not found'});
@@ -156,7 +156,7 @@ r.get('/orders/:id/payment-summary', auth(roles), async (req, res) => {
 
 // Receipt / tax invoice. `issue=true` (or format=html) allocates the invoice
 // number on first print and records the reprint count.
-r.get('/orders/:id/receipt', auth(roles), async (req, res) => {
+r.get('/orders/:id/receipt', requirePermission('invoices.issue'), async (req, res) => {
   const wantsHtml = String(req.query.format || '').toLowerCase() === 'html';
   const issue = wantsHtml || String(req.query.issue || '') === 'true';
   const session = await mongoose.startSession();
@@ -184,7 +184,7 @@ r.get('/orders/:id/receipt', auth(roles), async (req, res) => {
 // Quotes an n-way split of the outstanding balance. This is a calculation, not
 // a mutation: the till shows each guest their share, then takes payments
 // through the existing payments endpoint so there is one payment code path.
-r.post('/orders/:id/split-equal', auth(roles), async (req, res) => {
+r.post('/orders/:id/split-equal', requirePermission('orders.create'), async (req, res) => {
   try {
     const body = z.object({ways: z.number().int().min(2).max(50)}).strict().parse(req.body);
     res.json(await quoteEqualSplit({orderId: req.params.id, ways: body.ways, user: req.user}));
@@ -194,7 +194,7 @@ r.post('/orders/:id/split-equal', auth(roles), async (req, res) => {
 });
 
 // Combined billing position for a table, which may carry several checks.
-r.get('/tables/:id/bill', auth(roles), async (req, res) => {
+r.get('/tables/:id/bill', requirePermission('tables.view'), async (req, res) => {
   try {
     res.json(await buildTableBill({tableId: req.params.id, user: req.user}));
   } catch (e) {
@@ -202,7 +202,7 @@ r.get('/tables/:id/bill', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/orders/:id/split', auth(roles), async (req, res) => {
+r.post('/orders/:id/split', requirePermission('orders.create'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = splitSchema.parse(req.body);

@@ -160,7 +160,7 @@ function publishPurchaseOrder(branch, payload) {
   }
 }
 
-r.get('/purchase-orders', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders', requirePermission('purchase.view'), async (req, res) => {
   try {
     const query = poListSchema.parse(req.query);
     res.json(await listPurchaseOrders({user: req.user, branchId: query.branch, ...query}));
@@ -169,7 +169,7 @@ r.get('/purchase-orders', auth(['owner', 'manager', 'staff']), async (req, res) 
   }
 });
 
-r.get('/purchase-order-branches', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-order-branches', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await listAccessibleBranches({user: req.user}));
   } catch (e) {
@@ -185,7 +185,7 @@ r.post('/purchase-orders', requirePermission('purchase.create'), async (req, res
     let result;
     try {
       await session.withTransaction(async () => {
-        result = await createPurchaseOrder({input, user: req.user, requestKey, session});
+        result = await createPurchaseOrder({input, user: req.user, principal: req.principal, requestKey, session});
       });
     } catch (error) {
       if (error?.code === 11000 && requestKey) result = await replayPurchaseOrderCreate({input, user: req.user, requestKey});
@@ -200,13 +200,14 @@ r.post('/purchase-orders', requirePermission('purchase.create'), async (req, res
   }
 });
 
-r.patch('/purchase-orders/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/purchase-orders/:id', requirePermission('purchase.create'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = poUpdateSchema.parse(req.body);
     let po;
     await session.withTransaction(async () => {
       po = await updatePurchaseOrder({
+        principal: req.principal,
         poId: req.params.id,
         input: body,
         expectedVersion: body.expectedVersion,
@@ -254,7 +255,7 @@ const receiveSchema = z.object({
   })).min(1).max(100)
 }).strict();
 
-r.get('/purchase-orders/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders/:id', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await getPurchaseOrder({poId: req.params.id, user: req.user}));
   } catch (e) {
@@ -272,7 +273,7 @@ const poStatusSchema = z.object({
   }
 });
 
-r.get('/purchase-orders/:id/approval-history', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders/:id/approval-history', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await getPurchaseOrderApprovalHistory({poId: req.params.id, user: req.user}));
   } catch (e) {
@@ -287,6 +288,7 @@ r.patch('/purchase-orders/:id/status', requirePermission('purchase.approve'), as
     let po;
     await session.withTransaction(async () => {
       po = await transitionPurchaseOrder({
+        principal: req.principal,
         poId: req.params.id,
         status: body.status,
         notes: body.notes,
@@ -309,7 +311,7 @@ const shortCloseSchema = z.object({
   expectedVersion: z.number().int().nonnegative()
 }).strict();
 
-r.post('/purchase-orders/:id/close-short', auth(['owner', 'manager']), async (req, res) => {
+r.post('/purchase-orders/:id/close-short', requirePermission('purchase.approve'), async (req, res) => {
   const session = await mongoose.startSession();
   let body;
   let idempotencyKey;
@@ -319,7 +321,7 @@ r.post('/purchase-orders/:id/close-short', auth(['owner', 'manager']), async (re
     let result;
     try {
       await session.withTransaction(async () => {
-        result = await closeShortPurchaseOrder({
+        result = await closeShortPurchaseOrder({principal: req.principal, 
           poId: req.params.id,
           reason: body.reason,
           expectedVersion: body.expectedVersion,
@@ -359,7 +361,7 @@ r.post('/purchase-orders/:id/close-short', auth(['owner', 'manager']), async (re
   }
 });
 
-r.get('/purchase-orders/:id/receipts', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders/:id/receipts', requirePermission('purchase.view'), async (req, res) => {
   try {
     const po = await getPurchaseOrder({poId: req.params.id, user: req.user});
     res.json(await GoodsReceipt.find({
@@ -376,7 +378,7 @@ r.get('/purchase-orders/:id/receipts', auth(['owner', 'manager', 'staff']), asyn
   }
 });
 
-r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, res) => {
+r.post('/purchase-orders/:id/receive', requirePermission('purchase.receive'), async (req, res) => {
   const session = await mongoose.startSession();
   let body;
   let idempotencyKey;
@@ -386,7 +388,7 @@ r.post('/purchase-orders/:id/receive', auth(['owner', 'manager']), async (req, r
     let result;
     try {
       await session.withTransaction(async () => {
-        result = await receivePurchaseOrder({
+        result = await receivePurchaseOrder({principal: req.principal, 
           poId: req.params.id,
           items: body.items,
           notes: body.notes,
@@ -458,7 +460,7 @@ const returnSchema = z.object({
   items: z.array(returnLineSchema).min(1).max(100)
 }).strict();
 
-r.get('/purchase-orders/:id/return-options', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders/:id/return-options', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await listPurchaseReturnOptions({poId: req.params.id, user: req.user}));
   } catch (e) {
@@ -466,7 +468,7 @@ r.get('/purchase-orders/:id/return-options', auth(['owner', 'manager', 'staff'])
   }
 });
 
-r.get('/purchase-orders/:id/returns', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/purchase-orders/:id/returns', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await listPurchaseReturns({poId: req.params.id, user: req.user}));
   } catch (e) {
@@ -474,7 +476,7 @@ r.get('/purchase-orders/:id/returns', auth(['owner', 'manager', 'staff']), async
   }
 });
 
-r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, res) => {
+r.post('/purchase-orders/:id/returns', requirePermission('purchase.return'), async (req, res) => {
   const session = await mongoose.startSession();
   let body;
   let idempotencyKey;
@@ -484,7 +486,7 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
     let result;
     try {
       await session.withTransaction(async () => {
-        result = await returnPurchaseOrder({
+        result = await returnPurchaseOrder({principal: req.principal, 
           poId: req.params.id,
           items: body.items,
           reason: body.reason,
@@ -540,7 +542,7 @@ r.post('/purchase-orders/:id/returns', auth(['owner', 'manager']), async (req, r
   }
 });
 
-r.get('/suppliers/:id/statement', auth(['owner', 'manager']), async (req, res) => {
+r.get('/suppliers/:id/statement', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     res.json(await buildSupplierStatement({
       supplierId: req.params.id,
@@ -556,7 +558,7 @@ r.get('/suppliers/:id/statement', auth(['owner', 'manager']), async (req, res) =
   }
 });
 
-r.get('/suppliers/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+r.get('/suppliers/:id/payments', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     const statement = await buildSupplierStatement({
       supplierId: req.params.id,
@@ -572,7 +574,7 @@ r.get('/suppliers/:id/payments', auth(['owner', 'manager']), async (req, res) =>
   }
 });
 
-r.get('/suppliers/:id/balance', auth(['owner', 'manager']), async (req, res) => {
+r.get('/suppliers/:id/balance', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     const statement = await buildSupplierStatement({
       supplierId: req.params.id,
@@ -641,7 +643,7 @@ const invoicePatchSchema = z.object({
   expectedVersion: z.number().int().nonnegative()
 }).strict();
 
-r.get('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
+r.get('/supplier-invoices', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     const query = invoiceListSchema.parse(req.query);
     res.json(await listSupplierInvoices({
@@ -655,7 +657,7 @@ r.get('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.post('/supplier-invoices', auth(['owner', 'manager']), async (req, res) => {
+r.post('/supplier-invoices', requirePermission('purchase.invoice'), async (req, res) => {
   const session = await mongoose.startSession();
   let input;
   let idempotencyKey;
@@ -704,7 +706,7 @@ const supplierPaymentReversalSchema = z.object({
   expectedInvoiceVersion: z.number().int().nonnegative().optional()
 }).strict();
 
-r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+r.get('/supplier-invoices/:id/payments', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     res.json(await listSupplierInvoicePayments({invoiceId: req.params.id, user: req.user}));
   } catch (e) {
@@ -712,7 +714,7 @@ r.get('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req,
   }
 });
 
-r.post('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req, res) => {
+r.post('/supplier-invoices/:id/payments', requirePermission('purchase.pay'), async (req, res) => {
   const session = await mongoose.startSession();
   let input;
   let idempotencyKey;
@@ -760,7 +762,7 @@ r.post('/supplier-invoices/:id/payments', auth(['owner', 'manager']), async (req
   }
 });
 
-r.post('/supplier-payments/:id/reverse', auth(['owner']), async (req, res) => {
+r.post('/supplier-payments/:id/reverse', requirePermission('purchase.reversepay'), async (req, res) => {
   const session = await mongoose.startSession();
   let body;
   let idempotencyKey;
@@ -809,7 +811,7 @@ r.post('/supplier-payments/:id/reverse', auth(['owner']), async (req, res) => {
   }
 });
 
-r.get('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
+r.get('/supplier-invoices/:id', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     res.json(await getSupplierInvoice({invoiceId: req.params.id, user: req.user}));
   } catch (e) {
@@ -817,7 +819,7 @@ r.get('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => 
   }
 });
 
-r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/supplier-invoices/:id', requirePermission('purchase.invoice'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = invoicePatchSchema.parse(req.body);
@@ -846,7 +848,7 @@ r.patch('/supplier-invoices/:id', auth(['owner', 'manager']), async (req, res) =
   }
 });
 
-r.get('/reports/purchasing', auth(['owner', 'manager']), async (req, res) => {
+r.get('/reports/purchasing', requirePermission('reports.view'), async (req, res) => {
   try {
     const query = purchasingReportQuerySchema.parse(req.query);
     res.json(await buildPurchasingReport({
@@ -873,7 +875,7 @@ r.get('/reports/pnl', requirePermission('reports.view'), async (req, res) => {
   }
 });
 
-r.get('/dashboard', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/dashboard', requirePermission('dashboard.view'), async (req, res) => {
   try {
     res.json(await buildDashboard({
       branchId: req.query.branch,
@@ -884,7 +886,7 @@ r.get('/dashboard', auth(['owner', 'manager', 'staff']), async (req, res) => {
   }
 });
 
-r.get('/inventory', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/inventory', requirePermission('inventory.view'), async (req, res) => {
   try {
     res.json(await listLiveInventory({
       branchId: req.query.branch,
@@ -895,7 +897,7 @@ r.get('/inventory', auth(['owner', 'manager', 'staff']), async (req, res) => {
   }
 });
 
-r.get('/analytics/menu-engineering', auth(['owner', 'manager']), async (req, res) => {
+r.get('/analytics/menu-engineering', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildMenuEngineering({
       branchId: req.query.branch,
@@ -908,7 +910,7 @@ r.get('/analytics/menu-engineering', auth(['owner', 'manager']), async (req, res
   }
 });
 
-r.get('/analytics/menu-engineering/report', auth(['owner', 'manager']), async (req, res) => {
+r.get('/analytics/menu-engineering/report', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildMenuEngineeringReport({
       branchId: req.query.branch,
@@ -941,7 +943,7 @@ const expensePatchSchema = z.object({
   branch: z.string().nullable().optional()
 });
 
-r.get('/expenses', auth(['owner', 'manager']), async (req, res) => {
+r.get('/expenses', requirePermission('expenses.manage'), async (req, res) => {
   try {
     res.json(await listExpenses({
       branchId: req.query.branch,
@@ -954,7 +956,7 @@ r.get('/expenses', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.post('/expenses', auth(['owner', 'manager']), async (req, res) => {
+r.post('/expenses', requirePermission('expenses.manage'), async (req, res) => {
   try {
     const body = expenseSchema.parse(req.body);
     res.status(201).json(await createExpense({...body, user: req.user}));
@@ -963,7 +965,7 @@ r.post('/expenses', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/expenses/:id', requirePermission('expenses.manage'), async (req, res) => {
   try {
     const body = expensePatchSchema.parse(req.body);
     res.json(await updateExpense({expenseId: req.params.id, patch: body, user: req.user}));
@@ -972,7 +974,7 @@ r.patch('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.delete('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
+r.delete('/expenses/:id', requirePermission('expenses.manage'), async (req, res) => {
   try {
     await deleteExpense({expenseId: req.params.id, user: req.user});
     res.status(204).end();
@@ -986,7 +988,7 @@ r.delete('/expenses/:id', auth(['owner', 'manager']), async (req, res) => {
 // pricing and what the restaurant owes, which is not line-staff information.
 const MGMT = ['owner', 'manager'];
 
-r.get('/purchasing/reorder-suggestions', auth(MGMT), async (req, res) => {
+r.get('/purchasing/reorder-suggestions', requirePermission('purchase.analyse'), async (req, res) => {
   try {
     res.json(await buildReorderSuggestions({
       branchId: req.query.branch, user: req.user, includeAll: String(req.query.includeAll) === 'true'
@@ -994,13 +996,13 @@ r.get('/purchasing/reorder-suggestions', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/purchasing/price-comparison/:ingredientId', auth(MGMT), async (req, res) => {
+r.get('/purchasing/price-comparison/:ingredientId', requirePermission('purchase.analyse'), async (req, res) => {
   try {
     res.json(await compareIngredientPrices({ingredientId: req.params.ingredientId, user: req.user}));
   } catch (e) { fail(res, e); }
 });
 
-r.get('/purchasing/purchase-history/:ingredientId', auth(MGMT), async (req, res) => {
+r.get('/purchasing/purchase-history/:ingredientId', requirePermission('purchase.analyse'), async (req, res) => {
   try {
     res.json(await getIngredientPurchaseHistory({
       ingredientId: req.params.ingredientId, supplierId: req.query.supplier,
@@ -1009,7 +1011,7 @@ r.get('/purchasing/purchase-history/:ingredientId', auth(MGMT), async (req, res)
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/purchase-by-supplier', auth(MGMT), async (req, res) => {
+r.get('/reports/purchase-by-supplier', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await purchaseSummary({
       groupBy: 'supplier', branchId: req.query.branch, user: req.user,
@@ -1018,7 +1020,7 @@ r.get('/reports/purchase-by-supplier', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/purchase-by-branch', auth(MGMT), async (req, res) => {
+r.get('/reports/purchase-by-branch', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await purchaseSummary({
       groupBy: 'branch', branchId: req.query.branch, user: req.user,
@@ -1027,7 +1029,7 @@ r.get('/reports/purchase-by-branch', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/ingredient-purchase-prices', auth(MGMT), async (req, res) => {
+r.get('/reports/ingredient-purchase-prices', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await ingredientPriceReport({
       branchId: req.query.branch, user: req.user, limit: req.query.limit
@@ -1035,7 +1037,7 @@ r.get('/reports/ingredient-purchase-prices', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/unpaid-invoices', auth(MGMT), async (req, res) => {
+r.get('/reports/unpaid-invoices', requirePermission('purchase.invoice'), async (req, res) => {
   try {
     res.json(await listUnpaidInvoices({
       branchId: req.query.branch, supplierId: req.query.supplier, user: req.user
@@ -1050,7 +1052,7 @@ const reorderPlanQuery = q => ({
   serviceLevel: q.serviceLevel === undefined ? undefined : Number(q.serviceLevel)
 });
 
-r.get('/purchasing/reorder-plan', auth(MGMT), async (req, res) => {
+r.get('/purchasing/reorder-plan', requirePermission('purchase.analyse'), async (req, res) => {
   try {
     res.json(await buildReorderPlan({
       branchId: req.query.branch, user: req.user,
@@ -1069,7 +1071,7 @@ const suggestedPoSchema = z.object({
   serviceLevel: z.number().int().min(90).max(99).optional()
 }).strict();
 
-r.post('/purchasing/suggested-orders', auth(MGMT), async (req, res) => {
+r.post('/purchasing/suggested-orders', requirePermission('purchase.create'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = suggestedPoSchema.parse(req.body);
@@ -1089,14 +1091,14 @@ r.post('/purchasing/suggested-orders', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); } finally { session.endSession(); }
 });
 
-r.post('/purchasing/reorder-alerts/run', auth(MGMT), async (req, res) => {
+r.post('/purchasing/reorder-alerts/run', requirePermission('alerts.manage'), async (req, res) => {
   try {
     res.json(await raiseReorderAlerts({branchId: req.query.branch, user: req.user}));
   } catch (e) { fail(res, e); }
 });
 
 // Supplier delivery performance measured from real approve -> receive history.
-r.get('/suppliers/:id/performance', auth(MGMT), async (req, res) => {
+r.get('/suppliers/:id/performance', requirePermission('purchase.analyse'), async (req, res) => {
   try {
     res.json(await getSupplierPerformance({
       supplierId: req.params.id, branchId: req.query.branch, user: req.user, limit: req.query.limit
@@ -1106,7 +1108,7 @@ r.get('/suppliers/:id/performance', auth(MGMT), async (req, res) => {
 
 // Scheduler telemetry, so an operator can see whether the sweep is actually
 // running rather than assuming it is.
-r.get('/purchasing/reorder-scheduler', auth(MGMT), async (req, res) => {
+r.get('/purchasing/reorder-scheduler', requirePermission('purchase.analyse'), async (req, res) => {
   try { res.json(schedulerStatus()); } catch (e) { fail(res, e); }
 });
 

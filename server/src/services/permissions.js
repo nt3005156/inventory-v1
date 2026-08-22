@@ -38,9 +38,15 @@ export const PERMISSION_CATALOG = Object.freeze([
   {key: 'orders.create', group: 'Orders', label: 'Create and edit orders'},
   {key: 'orders.cancel', group: 'Orders', label: 'Cancel an order'},
   {key: 'orders.discount', group: 'Orders', label: 'Apply a discount'},
+  // The ceiling override. Holding orders.discount lets you discount at all;
+  // holding this lets you exceed the staff ceiling. Kept as a SEPARATE
+  // capability rather than a role check so a Supervisor custom role can be
+  // given override authority without also being made a manager.
+  {key: 'orders.discountoverride', group: 'Orders', label: 'Exceed the staff discount ceiling'},
   {key: 'orders.refund', group: 'Orders', label: 'Refund a settled order'},
   {key: 'payments.take', group: 'Orders', label: 'Take payment'},
   {key: 'payments.reverse', group: 'Orders', label: 'Reverse a tender'},
+  {key: 'orders.reopen', group: 'Orders', label: 'Reopen a completed order'},
   {key: 'invoices.issue', group: 'Orders', label: 'Issue and reprint tax invoices'},
 
   // Kitchen
@@ -50,6 +56,7 @@ export const PERMISSION_CATALOG = Object.freeze([
   // Tables and reservations
   {key: 'tables.view', group: 'Front of house', label: 'View tables'},
   {key: 'tables.manage', group: 'Front of house', label: 'Seat, move and merge tables'},
+  {key: 'tables.configure', group: 'Front of house', label: 'Create, retire and audit tables'},
   {key: 'reservations.manage', group: 'Front of house', label: 'Manage reservations'},
 
   // Inventory
@@ -58,35 +65,68 @@ export const PERMISSION_CATALOG = Object.freeze([
   {key: 'inventory.count', group: 'Inventory', label: 'Perform a stock count'},
   {key: 'inventory.approve', group: 'Inventory', label: 'Approve a stock count'},
   {key: 'inventory.waste', group: 'Inventory', label: 'Record waste'},
-  {key: 'inventory.transfer', group: 'Inventory', label: 'Transfer stock between branches'},
+  {key: 'inventory.requesttransfer', group: 'Inventory', label: 'Request a branch transfer'},
+  {key: 'inventory.transfer', group: 'Inventory', label: 'Approve, ship and receive transfers'},
 
   // Purchasing
   {key: 'purchase.view', group: 'Purchasing', label: 'View purchase orders'},
+  {key: 'purchase.analyse', group: 'Purchasing', label: 'Reorder planning and price intelligence'},
   {key: 'purchase.create', group: 'Purchasing', label: 'Raise a purchase order'},
   {key: 'purchase.approve', group: 'Purchasing', label: 'Approve a purchase order'},
   {key: 'purchase.receive', group: 'Purchasing', label: 'Receive goods'},
   {key: 'purchase.invoice', group: 'Purchasing', label: 'Record supplier invoices and payments'},
   {key: 'suppliers.manage', group: 'Purchasing', label: 'Manage suppliers and the catalogue'},
+  {key: 'purchase.return', group: 'Purchasing', label: 'Return goods to a supplier'},
+  {key: 'purchase.pay', group: 'Purchasing', label: 'Pay a supplier invoice'},
+  {key: 'purchase.reversepay', group: 'Purchasing', label: 'Reverse a supplier payment'},
 
   // Menu and recipes
   {key: 'menu.view', group: 'Menu', label: 'View the menu and recipes'},
   {key: 'menu.manage', group: 'Menu', label: 'Manage menu items and recipes'},
+  {key: 'menu.delete', group: 'Menu', label: 'Delete a menu item'},
+  {key: 'ingredients.view', group: 'Menu', label: 'View ingredients'},
+  {key: 'ingredients.manage', group: 'Menu', label: 'Manage ingredients'},
+  {key: 'ingredients.delete', group: 'Menu', label: 'Delete an ingredient'},
+  {key: 'coupons.view', group: 'Menu', label: 'View coupons'},
+  {key: 'coupons.manage', group: 'Menu', label: 'Manage coupons'},
+  {key: 'coupons.delete', group: 'Menu', label: 'Delete a coupon'},
+  {key: 'stations.manage', group: 'Kitchen', label: 'Manage kitchen stations'},
 
   // Customers and delivery
   {key: 'customers.view', group: 'Customers', label: 'View customers'},
   {key: 'customers.manage', group: 'Customers', label: 'Manage customer records'},
+  {key: 'customers.merge', group: 'Customers', label: 'Merge and recalculate customer records'},
   {key: 'deliveries.dispatch', group: 'Customers', label: 'Dispatch and track deliveries'},
   {key: 'deliveries.ride', group: 'Customers', label: 'Carry out assigned deliveries'},
+  {key: 'riders.manage', group: 'Customers', label: 'Manage rider profiles'},
+  {key: 'customers.delete', group: 'Customers', label: 'Deactivate or delete a customer'},
+  {key: 'customers.loyalty', group: 'Customers', label: 'Adjust loyalty points'},
+  {key: 'onlineorders.accept', group: 'Customers', label: 'Accept online orders'},
+  {key: 'onlineorders.manage', group: 'Customers', label: 'Reject online orders'},
 
   // Money and reporting
+  {key: 'dashboard.view', group: 'Reports', label: 'View the operations dashboard'},
   {key: 'reports.view', group: 'Reports', label: 'View reports and analytics'},
   {key: 'reports.export', group: 'Reports', label: 'Export data'},
   {key: 'expenses.manage', group: 'Reports', label: 'Manage expenses'},
   {key: 'monthclose.manage', group: 'Reports', label: 'Close and reopen accounting months'},
+  {key: 'alerts.view', group: 'Reports', label: 'View operational alerts'},
+  {key: 'alerts.manage', group: 'Reports', label: 'Acknowledge and resolve alerts'},
+  {key: 'audit.view', group: 'Administration', label: 'Read the system audit log'},
+  {key: 'inventory.recover', group: 'Inventory', label: 'Recover stuck stock-count locks'},
 
   // Administration
   {key: 'users.manage', group: 'Administration', label: 'Manage users and their access'},
+  // Deliberately SEPARATE from users.manage. Provisioning an account, resetting
+  // somebody's password and switching an account off are owner-only acts today
+  // (POST /accounts, POST /accounts/:id/password, PATCH /accounts/:id/active).
+  // Folding them into users.manage -- which managers hold -- would have handed
+  // every manager the ability to mint and disable staff accounts.
+  {key: 'users.create', group: 'Administration', label: 'Create staff accounts'},
+  {key: 'users.password', group: 'Administration', label: 'Reset another user\'s password'},
+  {key: 'users.deactivate', group: 'Administration', label: 'Activate and deactivate accounts'},
   {key: 'roles.manage', group: 'Administration', label: 'Manage roles and permissions'},
+  {key: 'branches.view', group: 'Administration', label: 'See the branch list'},
   {key: 'branches.manage', group: 'Administration', label: 'Manage branches'},
   {key: 'settings.manage', group: 'Administration', label: 'Manage restaurant settings'}
 ]);
@@ -134,17 +174,29 @@ export const BUILTIN_ROLES = Object.freeze({
     baseRole: 'manager',
     permissions: Object.freeze([
       'orders.view', 'orders.create', 'orders.cancel', 'orders.discount', 'orders.refund',
-      'payments.take', 'payments.reverse', 'invoices.issue',
+      // NOT payments.reverse: POST /payments/:id/reverse has always been
+      // owner-only. Phase 20 put the key in this bundle while no endpoint
+      // consumed it, so it granted nothing; leaving it here while migrating
+      // that endpoint would have silently handed managers tender reversal.
+      'payments.take', 'invoices.issue',
       'kds.view', 'kds.advance',
       'tables.view', 'tables.manage', 'reservations.manage',
       'inventory.view', 'inventory.adjust', 'inventory.count', 'inventory.approve',
-      'inventory.waste', 'inventory.transfer',
+      'inventory.waste', 'inventory.transfer', 'inventory.requesttransfer',
       'purchase.view', 'purchase.create', 'purchase.approve', 'purchase.receive',
-      'purchase.invoice', 'suppliers.manage',
+      'purchase.invoice', 'purchase.return', 'purchase.pay', 'suppliers.manage',
       'menu.view', 'menu.manage',
-      'customers.view', 'customers.manage', 'deliveries.dispatch',
+      'ingredients.view', 'ingredients.manage',
+      'coupons.view', 'coupons.manage',
+      'stations.manage',
+      'customers.view', 'customers.manage', 'customers.loyalty',
+      'deliveries.dispatch', 'riders.manage', 'onlineorders.manage',
+      'orders.reopen',
+      'alerts.view', 'alerts.manage',
       'reports.view', 'reports.export', 'expenses.manage',
-      'users.manage'
+      'branches.view', 'users.manage',
+      'tables.configure', 'customers.merge', 'onlineorders.accept',
+      'purchase.analyse', 'dashboard.view', 'orders.discountoverride'
     ])
   },
   staff: {
@@ -158,9 +210,18 @@ export const BUILTIN_ROLES = Object.freeze({
       'kds.view', 'kds.advance',
       'tables.view', 'tables.manage', 'reservations.manage',
       'inventory.view', 'inventory.count', 'inventory.waste',
-      'purchase.view', 'purchase.receive',
-      'menu.view',
-      'customers.view', 'customers.manage', 'deliveries.dispatch'
+      'inventory.requesttransfer',
+      // NOT purchase.receive: POST /purchase-orders/:id/receive has always
+      // been owner/manager. Phase 20 listed the key in this bundle while no
+      // endpoint consumed it, so it granted nothing. Migrating that endpoint
+      // would have made the latent mistake live and handed every staff member
+      // goods receipt, which posts stock AND supplier liability.
+      'purchase.view',
+      'menu.view', 'ingredients.view', 'coupons.view',
+      'alerts.view',
+      'customers.view', 'customers.manage',
+      'deliveries.dispatch', 'onlineorders.accept',
+      'branches.view', 'dashboard.view'
     ])
   },
   rider: {

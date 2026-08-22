@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {userRestaurantContext} from '../services/supplierCatalog.js';
 import {
@@ -24,7 +24,7 @@ const stationSchema = z.object({
 }).strict();
 
 // Anyone working a station needs to read the list; only management changes it.
-r.get('/kitchen/stations', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/kitchen/stations', requirePermission('kds.view'), async (req, res) => {
   try {
     const {restaurantId} = await userRestaurantContext(req.user);
     const includeInactive = String(req.query.includeInactive || '') === 'true';
@@ -47,7 +47,7 @@ r.get('/kitchen/stations', auth(['owner', 'manager', 'staff']), async (req, res)
   }
 });
 
-r.post('/kitchen/stations', auth(['owner', 'manager']), async (req, res) => {
+r.post('/kitchen/stations', requirePermission('stations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = stationSchema.parse(req.body);
@@ -68,7 +68,7 @@ r.post('/kitchen/stations', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/kitchen/stations/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/kitchen/stations/:id', requirePermission('stations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const patch = stationSchema.partial().parse(req.body);
@@ -89,7 +89,7 @@ r.patch('/kitchen/stations/:id', auth(['owner', 'manager']), async (req, res) =>
   }
 });
 
-r.post('/kitchen/stations/:id/default', auth(['owner', 'manager']), async (req, res) => {
+r.post('/kitchen/stations/:id/default', requirePermission('stations.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const {restaurantId} = await userRestaurantContext(req.user);
@@ -105,7 +105,7 @@ r.post('/kitchen/stations/:id/default', auth(['owner', 'manager']), async (req, 
   }
 });
 
-r.delete('/kitchen/stations/:id', auth(['owner']), async (req, res) => {
+r.delete('/kitchen/stations/:id', requirePermission('settings.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const {restaurantId} = await userRestaurantContext(req.user);

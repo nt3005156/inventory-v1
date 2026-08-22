@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
@@ -44,7 +44,7 @@ async function loadBranchTable(req) {
   return table;
 }
 
-r.get('/tables', auth(roles), async (req, res) => {
+r.get('/tables', requirePermission('tables.view'), async (req, res) => {
   try {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
@@ -72,7 +72,7 @@ r.get('/tables', auth(roles), async (req, res) => {
 });
 
 // Declared before /tables/:id so the literal path is not captured as an id.
-r.get('/tables/floor', auth(roles), async (req, res) => {
+r.get('/tables/floor', requirePermission('tables.view'), async (req, res) => {
   try {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
@@ -101,7 +101,7 @@ r.get('/tables/floor', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/tables', auth(['owner', 'manager']), async (req, res) => {
+r.post('/tables', requirePermission('tables.configure'), async (req, res) => {
   try {
     const x = createSchema.parse(req.body);
     if (!mongoose.isValidObjectId(x.branch)) throw Object.assign(new Error('Invalid branch'), {status: 400});
@@ -123,7 +123,7 @@ r.post('/tables', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.post('/tables/:id/move', auth(roles), async (req, res) => {
+r.post('/tables/:id/move', requirePermission('tables.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const toTable = z.object({toTable: z.string().min(1)}).parse(req.body).toTable;
@@ -141,7 +141,7 @@ r.post('/tables/:id/move', auth(roles), async (req, res) => {
   }
 });
 
-r.post('/tables/:id/merge', auth(roles), async (req, res) => {
+r.post('/tables/:id/merge', requirePermission('tables.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const intoTable = z.object({intoTable: z.string().min(1)}).parse(req.body).intoTable;
@@ -161,7 +161,7 @@ r.post('/tables/:id/merge', auth(roles), async (req, res) => {
 });
 
 // What the whole table owes across every check seated there.
-r.get('/tables/:id/settlement', auth(roles), async (req, res) => {
+r.get('/tables/:id/settlement', requirePermission('tables.view'), async (req, res) => {
   try {
     res.json(await getTableSettlement({tableId: req.params.id, user: req.user}));
   } catch (e) {
@@ -170,7 +170,7 @@ r.get('/tables/:id/settlement', auth(roles), async (req, res) => {
 });
 
 // Table activity: audit trail correlated with the orders seated there.
-r.get('/tables/:id/history', auth(['owner', 'manager']), async (req, res) => {
+r.get('/tables/:id/history', requirePermission('tables.configure'), async (req, res) => {
   try {
     res.json(await getTableHistory({
       tableId: req.params.id, user: req.user,
@@ -183,7 +183,7 @@ r.get('/tables/:id/history', auth(['owner', 'manager']), async (req, res) => {
 
 // Reopening a settled check moves money-affecting state, so it is a
 // supervisor action.
-r.post('/orders/:id/reopen', auth(['owner', 'manager']), async (req, res) => {
+r.post('/orders/:id/reopen', requirePermission('orders.reopen'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = z.object({reason: z.string().trim().max(300).optional()}).strict().parse(req.body ?? {});
@@ -203,7 +203,7 @@ r.post('/orders/:id/reopen', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/tables/:id/status', auth(roles), async (req, res) => {
+r.patch('/tables/:id/status', requirePermission('tables.manage'), async (req, res) => {
   try {
     const table = await loadBranchTable(req);
     await applyTableStatus(table, req.body.status, req.user);
@@ -214,7 +214,7 @@ r.patch('/tables/:id/status', auth(roles), async (req, res) => {
   }
 });
 
-r.patch('/tables/:id', auth(roles), async (req, res) => {
+r.patch('/tables/:id', requirePermission('tables.manage'), async (req, res) => {
   try {
     const table = await loadBranchTable(req);
     if (req.body.status && req.body.status !== table.status) {
@@ -242,7 +242,7 @@ r.patch('/tables/:id', auth(roles), async (req, res) => {
   }
 });
 
-r.delete('/tables/:id', auth(['owner', 'manager']), async (req, res) => {
+r.delete('/tables/:id', requirePermission('tables.configure'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const table = await loadBranchTable(req);

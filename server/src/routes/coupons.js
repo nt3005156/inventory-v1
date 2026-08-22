@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Audit, Coupon, CouponRedemption} from '../models/index.js';
 import {normalizeCouponInput, normalizeCode, validateCoupon} from '../services/discounts.js';
 import {userRestaurantContext} from '../services/supplierCatalog.js';
@@ -28,7 +28,7 @@ const couponSchema = z.object({
 }).strict();
 
 // Managing promotions is a management action; redeeming one is not.
-r.post('/coupons', auth(['owner', 'manager']), async (req, res) => {
+r.post('/coupons', requirePermission('coupons.manage'), async (req, res) => {
   try {
     const input = normalizeCouponInput(couponSchema.parse(req.body));
     const {restaurantId} = await userRestaurantContext(req.user);
@@ -46,7 +46,7 @@ r.post('/coupons', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.get('/coupons', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/coupons', requirePermission('coupons.view'), async (req, res) => {
   try {
     const {restaurantId} = await userRestaurantContext(req.user);
     const match = {restaurant: restaurantId};
@@ -61,7 +61,7 @@ r.get('/coupons', auth(['owner', 'manager', 'staff']), async (req, res) => {
   }
 });
 
-r.get('/coupons/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/coupons/:id', requirePermission('coupons.view'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid coupon'), {status: 400});
     const {restaurantId} = await userRestaurantContext(req.user);
@@ -74,7 +74,7 @@ r.get('/coupons/:id', auth(['owner', 'manager', 'staff']), async (req, res) => {
   }
 });
 
-r.patch('/coupons/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/coupons/:id', requirePermission('coupons.manage'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid coupon'), {status: 400});
     const {restaurantId} = await userRestaurantContext(req.user);
@@ -97,7 +97,7 @@ r.patch('/coupons/:id', auth(['owner', 'manager']), async (req, res) => {
 });
 
 // Owners retire coupons rather than deleting them, so redemption history stays intact.
-r.delete('/coupons/:id', auth(['owner']), async (req, res) => {
+r.delete('/coupons/:id', requirePermission('coupons.delete'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid coupon'), {status: 400});
     const {restaurantId} = await userRestaurantContext(req.user);
@@ -117,7 +117,7 @@ r.delete('/coupons/:id', auth(['owner']), async (req, res) => {
 });
 
 // Dry-run a code against a prospective order so the till can preview it.
-r.post('/coupons/validate', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.post('/coupons/validate', requirePermission('coupons.view'), async (req, res) => {
   try {
     const body = z.object({
       code: z.string().min(1),

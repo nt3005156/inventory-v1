@@ -1,6 +1,8 @@
 import {Audit, Role, User} from '../models/index.js';
 import {Branch} from '../models/operations.js';
 import {userRestaurantContext} from './supplierCatalog.js';
+import {invalidateAllRoles, invalidateRole} from './principalCache.js';
+import {refreshRoleHolders, refreshUserAccess, revokeUserSessions} from './sessions.js';
 import {
   ALL_PERMISSIONS, BUILTIN_ROLES, BUILTIN_ROLE_KEYS, PERMISSION_CATALOG,
   ROLE_TEMPLATES, assertPermissionKeys, permissionsForBuiltin
@@ -219,6 +221,10 @@ export async function updateRole({user, principal, key, input}) {
     },
     user: user.id
   });
+  // Permissions moved: every holder's cached principal is now wrong, and
+  // their live sockets may hold rooms they no longer qualify for.
+  await refreshRoleHolders({restaurantId, roleKey, reason: 'role_changed'});
+
   const assignedCount = await User.countDocuments({restaurantId, roleKey, active: {$ne: false}});
   return roleView(role, {assignedCount});
 }
@@ -243,6 +249,7 @@ export async function deleteRole({user, key}) {
   }
 
   await Role.deleteOne({_id: role._id});
+  invalidateRole(restaurantId, roleKey);
   await Audit.create({
     entity: 'role', entityId: role._id, restaurant: restaurantId,
     action: 'role_deleted',
@@ -325,6 +332,20 @@ export async function assignUserRole({user, principal, targetId, roleKey, branch
     after: {role: target.role, roleKey: target.roleKey, branch: target.branch},
     user: user.id
   });
+
+
+  const roleChanged = before.role !== target.role || String(before.roleKey || '') !== String(target.roleKey || '');
+  const branchChanged = String(before.branch || '') !== String(target.branch || '');
+
+  if (roleChanged || branchChanged) {
+    // A role or branch move is security-sensitive: the person keeps working,
+    // but any token or socket minted under the old assignment must stop
+    // carrying the old authority. Sockets are re-authorised in place rather
+    // than dropped, so an in-progress shift is not interrupted.
+    await refreshUserAccess({
+      userId: target._id, reason: branchChanged ? 'branch_changed' : 'role_changed'
+    });
+  }
 
   return {
     _id: target._id,

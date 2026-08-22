@@ -2,7 +2,7 @@ import {Router} from 'express';
 import mongoose from 'mongoose';
 import {createRateLimiter} from '../services/rateLimiting.js';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Order} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
@@ -371,7 +371,7 @@ r.get('/public/payments/:reference', verifyLimit, async (req, res) => {
   }
 });
 
-r.get('/online-orders', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/online-orders', requirePermission('orders.view'), async (req, res) => {
   try {
     const branchId = req.query.branch;
     if (!branchId) throw Object.assign(new Error('Branch is required'), {status: 400});
@@ -403,7 +403,7 @@ r.get('/online-orders', auth(['owner', 'manager', 'staff']), async (req, res) =>
  * Accepting a web order is what commits it: only here does the branch take
  * responsibility, so this is where the ticket enters the kitchen properly.
  */
-r.post('/online-orders/:id/accept', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.post('/online-orders/:id/accept', requirePermission('onlineorders.accept'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     let order;
@@ -476,7 +476,7 @@ r.post('/online-orders/:id/accept', auth(['owner', 'manager', 'staff']), async (
   }
 });
 
-r.post('/online-orders/:id/reject', auth(['owner', 'manager']), async (req, res) => {
+r.post('/online-orders/:id/reject', requirePermission('onlineorders.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = z.object({reason: z.string().trim().max(300).optional()}).strict().parse(req.body ?? {});

@@ -310,6 +310,135 @@ A reopen is also refused if another party has since been seated at that table.
 configuration edits, retirement) with the orders seated there, returning per-table revenue,
 completed/cancelled/reopened counts and average turn time. Supports `from`, `to` and `limit`.
 
+## RBAC: permissions, roles and sessions
+
+Authorization is **permission-based**. A permission is the atom, a role is a named bundle, and a
+user holds exactly one role. There are no per-user permission overrides: "why can this person do
+that?" must always be answerable by naming their role.
+
+### Capability naming
+
+`resource.action`, lowercase, exactly two segments — `orders.refund`, `purchase.approve`,
+`inventory.adjust`, `users.manage`. A test enforces the convention, and a second test asserts
+every `requirePermission(...)` argument is a real catalogue key, so a typo cannot silently make
+an endpoint unreachable.
+
+The catalogue lives in `server/src/services/permissions.js` and is served by
+`GET /api/permissions`. `GET /api/me/permissions` returns the caller's own effective list and is
+readable by every authenticated principal, including riders.
+
+### Built-in roles
+
+| Role | Reach |
+|---|---|
+| `owner` | Everything, implicitly — including permissions added by future phases. An owner can never be locked out by a mis-edited role. |
+| `manager` | Runs a branch: inventory, purchasing, refunds, reports, roster read. |
+| `staff` | Floor work: orders, payments, kitchen, stock counts, waste, goods *view*. |
+| `rider` | `deliveries.ride` only — their own assigned deliveries. |
+
+Built-in roles cannot be edited or deleted. They are the floor the system is tested against and
+the recovery path when a tenant breaks its own custom roles.
+
+Capabilities deliberately withheld from `manager` because the endpoint has always been
+owner-only: `payments.reverse`, `purchase.reversepay`, `menu.delete`, `ingredients.delete`,
+`coupons.delete`, `customers.delete`, `monthclose.manage`, `branches.manage`, `roles.manage`,
+`audit.view`, `inventory.recover`, `settings.manage`, `users.create`, `users.password`,
+`users.deactivate`.
+
+### Custom roles
+
+A tenant defines its own roles (Cashier, Storekeeper, Kitchen, Purchaser…) at
+`POST /api/roles`. Each declares a `baseRole` of `manager`, `staff` or `rider` — never `owner` —
+which is what tenancy scoping, rider workspace routing and Socket.IO room policy continue to
+reason about. `roleKey` narrows; it never widens.
+
+A custom role holds **exactly** the permissions granted. It does *not* inherit its base role's
+bundle, and it is admitted only through `requirePermission()`. Any endpoint still on a bare role
+list refuses custom roles outright — deliberately conservative, so the failure mode is visible
+rather than a silent over-grant.
+
+A non-owner administrator cannot grant or assign a permission they do not themselves hold.
+
+### Account lifecycle
+
+`POST /api/accounts` (permission `users.create`, owner-only by default) is the single
+provisioning path: the tenant comes from the caller's token and is never accepted from the body,
+the password is policy-checked and bcrypt-hashed, and the response is a safe projection that can
+never carry a credential. An owner account cannot be minted through the API.
+
+Deactivation (`users.deactivate`) is immediate and total: the account fails login, its existing
+tokens stop working, and its live sockets are disconnected. Reactivation does **not** resurrect
+old tokens.
+
+### Token and session invalidation
+
+Every JWT carries `sv`, the user's `sessionVersion` at sign-in. The guard compares it to the
+stored value on every request, so incrementing `user.sessionVersion` invalidates every token
+issued before the bump. A version counter was chosen over a token blacklist because it is O(1)
+to check, needs no expiry sweep and cannot grow without bound.
+
+Sessions are revoked on: logout (`POST /api/auth/logout`), password reset, deactivation, and
+explicitly by an administrator. Role and branch reassignment refreshes access *without* signing
+the person out — they are still employed — but their sockets are re-authorised in place.
+
+**Limitation:** the counter cannot express per-device logout. Signing out ends every session for
+that user. Per-device revocation needs a session identifier in the claim and a per-session
+record, which is a larger change than this cycle made.
+
+Tokens minted before `sv` existed are treated as version 0, so shipping this did not sign
+everyone out.
+
+### Socket.IO authorization
+
+The handshake resolves the principal against **storage**, exactly as the HTTP guard does — a
+deactivated, demoted or signed-out user cannot open a socket even with a syntactically valid
+token, and the role used thereafter is the stored one, never the client's claim.
+
+When a role, permission set or branch assignment changes, the write pushes the change to live
+connections: rooms the user no longer qualifies for are left, management rooms are gained or
+lost, and a `permissions:changed` event is emitted. Deactivation and revocation emit
+`session:revoked` and hard-disconnect. Riders never join a branch room.
+
+### Branch and restaurant isolation
+
+Permission checks alone do not grant tenancy. Every branch-scoped handler still resolves scope
+through `assertTenantBranchAccess()` or `purchaseBranchContext()`, so holding `purchase.view`
+lets a user read purchase orders **in their own branch**, not everywhere. A custom role key is
+resolved inside the holder's own restaurant, so it cannot be borrowed across tenants.
+
+### Discount authorization
+
+Any user with `orders.discount` may discount; every discount is audited and requires a reason.
+Exceeding `staffMaxDiscountPercent` / `staffMaxDiscountAmount` requires the separate
+`orders.discountoverride` permission, so a custom Supervisor can be given override authority
+without being promoted to manager. `maxDiscountPercent` remains a hard ceiling that applies to
+everyone, owners included, to catch a mistyped 100%.
+
+When no resolved principal is available (an internal or script caller) the legacy
+owner/manager role list still applies, so pre-existing call paths behave unchanged.
+
+### Cache behaviour
+
+Permission resolution was **measured first**: `resolvePrincipal()` costs ~0.64 ms/call against
+the in-memory replica set (2,000 warmed calls), about 1,565 resolutions/sec/process.
+
+The **user row is never cached**. It carries `active`, `rider.active`, `role` and
+`sessionVersion` — the facts that decide whether a session is still valid — and caching them was
+tried and proven unsafe: deactivating a manager with a direct database write left their token
+returning 200 for the remainder of the TTL, reintroducing the exact defect the previous phase
+fixed. Explicit invalidation cannot rescue that design, because authorization state legitimately
+changes out of band (a second instance, a migration, the mongo shell).
+
+Only the **role definition** is cached, keyed by `restaurant:roleKey`, 5-second TTL, bounded to
+2,000 entries with oldest-first eviction, defensive copies on read, and promise coalescing.
+Only *active* roles are stored, and a hit is revalidated against storage before it is trusted, so
+withdrawing a role takes effect immediately.
+
+Tunable via `RBAC_ROLE_CACHE_TTL_MS`, `RBAC_ROLE_CACHE_MAX`, `RBAC_ROLE_CACHE_DISABLED`.
+
+**Limitation:** the cache is per-process, not distributed. With several API instances a role
+edit can take up to one TTL to reach instances that did not serve the write.
+
 ## Multi-tenant access control
 
 Every branch-scoped endpoint enforces **user → restaurant → branch → resource**. An owner has

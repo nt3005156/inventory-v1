@@ -18,6 +18,7 @@ import {Audit, RIDER_VEHICLES, User} from '../models/index.js';
 import {Delivery} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
+import {revokeUserSessions} from './sessions.js';
 
 const clean = value => String(value ?? '').trim();
 
@@ -204,6 +205,13 @@ export async function resetAccountPassword({user, targetId, password}) {
     action: 'account_password_reset',
     after: {email: target.email}, user: user.id
   });
+
+  // A password reset that leaves the old sessions alive is not a reset: the
+  // usual reason for one is that the credential may be compromised.
+  await revokeUserSessions({
+    userId: target._id, reason: 'password_reset', actor: user, disconnectSockets: true
+  });
+
   return {ok: true};
 }
 
@@ -252,6 +260,19 @@ export async function setAccountActive({user, targetId, active, reason}) {
     action: active ? 'account_reactivated' : 'account_deactivated',
     after: {email: target.email, reason: clean(reason) || null}, user: user.id
   });
+
+  // Phase 17. Deactivation already blocked the next HTTP request through the
+  // live database check, but two gaps remained: a CACHED principal could
+  // answer for up to one TTL, and a live websocket kept streaming branch
+  // traffic. Bumping the session version closes both, and permanently
+  // invalidates the old tokens so REACTIVATION does not resurrect them.
+  await revokeUserSessions({
+    userId: target._id,
+    reason: active ? 'admin' : 'deactivated',
+    actor: user,
+    disconnectSockets: true
+  });
+
   return publicUserView(target);
 }
 

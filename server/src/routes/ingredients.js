@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import { z } from 'zod';
-import { auth } from '../middleware/auth.js';
+import { auth, requirePermission} from '../middleware/auth.js';
 import {
   listIngredients,
   getIngredient,
@@ -65,15 +65,15 @@ const updateSchema = z.object({
   expiryDate: z.string().nullable().optional()
 }).strict();
 
-r.get('/ingredients/categories', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients/categories', requirePermission('ingredients.view'), async(req,res)=>{
   try{ res.json(await listCategories({user:req.user})); }catch(e){ fail(res,e); }
 });
 
-r.get('/ingredients/units', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients/units', requirePermission('ingredients.view'), async(req,res)=>{
   try{ res.json(await listUnits()); }catch(e){ fail(res,e); }
 });
 
-r.get('/ingredients', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients', requirePermission('ingredients.view'), async(req,res)=>{
   try{
     const q = req.query.q;
     const category = req.query.category;
@@ -87,44 +87,44 @@ r.get('/ingredients', auth(['owner','manager','staff']), async(req,res)=>{
   }catch(e){ fail(res,e); }
 });
 
-r.post('/ingredients', auth(['owner','manager']), async(req,res)=>{
+r.post('/ingredients', requirePermission('ingredients.manage'), async(req,res)=>{
   try{
     const input = parse(createSchema, req.body);
-    const row = await createIngredient({input, user:req.user});
+    const row = await createIngredient({principal: req.principal, input, user:req.user});
     res.status(201).json(row);
   }catch(e){ fail(res,e); }
 });
 
-r.get('/ingredients/:id', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients/:id', requirePermission('ingredients.view'), async(req,res)=>{
   try{
     if(!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid ingredient'),{status:400});
     res.json(await getIngredient({ingredientId:req.params.id, user:req.user}));
   }catch(e){ fail(res,e); }
 });
 
-r.patch('/ingredients/:id', auth(['owner','manager']), async(req,res)=>{
+r.patch('/ingredients/:id', requirePermission('ingredients.manage'), async(req,res)=>{
   try{
     if(!mongoose.isValidObjectId(req.params.id)) throw Object.assign(new Error('Invalid ingredient'),{status:400});
     const {expectedVersion, ...patch} = parse(updateSchema, req.body);
-    res.json(await updateIngredient({ingredientId:req.params.id, patch, expectedVersion, user:req.user}));
+    res.json(await updateIngredient({principal: req.principal, ingredientId:req.params.id, patch, expectedVersion, user:req.user}));
   }catch(e){ fail(res,e); }
 });
 
-r.get('/ingredients/:id/suppliers', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients/:id/suppliers', requirePermission('ingredients.view'), async(req,res)=>{
   try{
     const data = await getIngredient({ingredientId:req.params.id, user:req.user});
     res.json({ suppliers: data.suppliers, count: data.suppliers.length });
   }catch(e){ fail(res,e); }
 });
 
-r.get('/ingredients/:id/costs', auth(['owner','manager','staff']), async(req,res)=>{
+r.get('/ingredients/:id/costs', requirePermission('ingredients.view'), async(req,res)=>{
   try{
     const data = await getIngredient({ingredientId:req.params.id, user:req.user});
     res.json({ costs: data.costs, conversions: data.conversions, unit: data.unit, baseUnit: data.baseUnit });
   }catch(e){ fail(res,e); }
 });
 
-r.delete('/ingredients/:id', auth(['owner']), async(req,res)=>{
+r.delete('/ingredients/:id', requirePermission('ingredients.delete'), async(req,res)=>{
   res.status(409).json({message:'Ingredients with inventory history cannot be deleted; deactivate the ingredient instead'});
 });
 

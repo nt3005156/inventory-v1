@@ -11,7 +11,7 @@
  */
 import {Router} from 'express';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {RIDER_VEHICLES} from '../models/index.js';
 import {
   assignRider,
@@ -55,7 +55,16 @@ const DELIVERY_STATUSES = [
 // Declared first so 'mine' is never swallowed by the ':id' routes below.
 
 /** Rider home screen. Everything is derived from the token's own identity. */
-r.get('/deliveries/mine/dashboard', auth(['rider']), async (req, res) => {
+/**
+ * The rider's own workspace.
+ *
+ * Guarded by `deliveries.ride` so a custom rider-based role works. An OWNER
+ * also passes, because an owner implicitly holds every permission — that is
+ * harmless here: every one of these handlers resolves deliveries by
+ * `user.id`, so an owner sees their own (empty) list rather than anybody
+ * else's. The tenancy boundary is in the handler, not the guard.
+ */
+r.get('/deliveries/mine/dashboard', requirePermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await riderDashboard({user: req.user}));
   } catch (e) {
@@ -63,7 +72,7 @@ r.get('/deliveries/mine/dashboard', auth(['rider']), async (req, res) => {
   }
 });
 
-r.get('/deliveries/mine', auth(['rider']), async (req, res) => {
+r.get('/deliveries/mine', requirePermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await listRiderDeliveries({
       user: req.user, includeCompleted: req.query.includeCompleted === 'true'
@@ -73,7 +82,7 @@ r.get('/deliveries/mine', auth(['rider']), async (req, res) => {
   }
 });
 
-r.patch('/deliveries/mine/availability', auth(['rider']), async (req, res) => {
+r.patch('/deliveries/mine/availability', requirePermission('deliveries.ride'), async (req, res) => {
   try {
     const body = z.object({available: z.boolean()}).strict().parse(req.body || {});
     const rider = await setOwnAvailability({user: req.user, available: body.available});
@@ -83,7 +92,7 @@ r.patch('/deliveries/mine/availability', auth(['rider']), async (req, res) => {
   }
 });
 
-r.get('/deliveries/mine/:id', auth(['rider']), async (req, res) => {
+r.get('/deliveries/mine/:id', requirePermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await getDeliveryForRider({user: req.user, deliveryId: req.params.id}));
   } catch (e) {
@@ -93,7 +102,7 @@ r.get('/deliveries/mine/:id', auth(['rider']), async (req, res) => {
 
 // ── Riders ───────────────────────────────────────────────────────────────────
 
-r.get('/riders', auth(STAFF), async (req, res) => {
+r.get('/riders', requirePermission('deliveries.dispatch'), async (req, res) => {
   try {
     res.json(await listRiders({
       user: req.user,
@@ -106,7 +115,7 @@ r.get('/riders', auth(STAFF), async (req, res) => {
   }
 });
 
-r.get('/riders/:id/history', auth(SUPERVISOR), async (req, res) => {
+r.get('/riders/:id/history', requirePermission('riders.manage'), async (req, res) => {
   try {
     res.json(await riderHistory({user: req.user, riderId: req.params.id, limit: req.query.limit}));
   } catch (e) {
@@ -114,7 +123,7 @@ r.get('/riders/:id/history', auth(SUPERVISOR), async (req, res) => {
   }
 });
 
-r.patch('/riders/:id', auth(SUPERVISOR), async (req, res) => {
+r.patch('/riders/:id', requirePermission('riders.manage'), async (req, res) => {
   try {
     const body = z.object({
       phone: z.string().trim().max(30).optional(),
@@ -134,7 +143,7 @@ r.patch('/riders/:id', auth(SUPERVISOR), async (req, res) => {
 
 // ── Dispatch dashboard ───────────────────────────────────────────────────────
 
-r.get('/deliveries/dashboard', auth(STAFF), async (req, res) => {
+r.get('/deliveries/dashboard', requirePermission('deliveries.dispatch'), async (req, res) => {
   try {
     res.json(await deliveryDashboard({user: req.user, branchId: req.query.branch}));
   } catch (e) {
@@ -144,7 +153,7 @@ r.get('/deliveries/dashboard', auth(STAFF), async (req, res) => {
 
 // ── Deliveries ───────────────────────────────────────────────────────────────
 
-r.get('/deliveries', auth(STAFF), async (req, res) => {
+r.get('/deliveries', requirePermission('deliveries.dispatch'), async (req, res) => {
   try {
     res.json(await listDeliveries({
       user: req.user,
@@ -158,7 +167,7 @@ r.get('/deliveries', auth(STAFF), async (req, res) => {
   }
 });
 
-r.post('/deliveries', auth(STAFF), async (req, res) => {
+r.post('/deliveries', requirePermission('deliveries.dispatch'), async (req, res) => {
   try {
     const body = z.object({
       order: z.string(),
@@ -174,7 +183,7 @@ r.post('/deliveries', auth(STAFF), async (req, res) => {
   }
 });
 
-r.post('/deliveries/:id/assign', auth(STAFF), async (req, res) => {
+r.post('/deliveries/:id/assign', requirePermission('deliveries.dispatch'), async (req, res) => {
   try {
     const body = z.object({
       rider: z.string(),
@@ -192,7 +201,7 @@ r.post('/deliveries/:id/assign', auth(STAFF), async (req, res) => {
  * Advance a delivery. Riders and staff share this route because they share the
  * same state machine; the service decides what each principal may set.
  */
-r.patch('/deliveries/:id/status', auth([...STAFF, 'rider']), async (req, res) => {
+r.patch('/deliveries/:id/status', requirePermission('deliveries.dispatch', 'deliveries.ride'), async (req, res) => {
   try {
     const body = z.object({
       status: z.enum(DELIVERY_STATUSES),

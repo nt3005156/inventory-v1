@@ -98,7 +98,8 @@ async function render(props) {
     root = createRoot(container);
     root.render(React.createElement(AccessControl, {
       call: makeCall(), user: {role: 'owner', name: 'Owner'},
-      permissions: ['roles.manage', 'users.manage'], ...props
+      permissions: ['roles.manage', 'users.manage', 'users.create', 'users.deactivate', 'users.password'],
+      ...props
     }));
   });
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
@@ -259,5 +260,88 @@ describe('Access control screen', () => {
     // No role authoring surface without roles.manage.
     assert.equal(container.querySelector('input[aria-label="Role name"]'), null);
     assert.equal(findButton('Create role'), undefined);
+  });
+
+  it('creates an account through the API with the chosen role and branch', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await setValue(container.querySelector('input[aria-label="New name"]'), 'Sunita Gurung');
+    await setValue(container.querySelector('input[aria-label="New email"]'), 'sunita@test.com');
+    await setValue(container.querySelector('input[aria-label="New password"]'), 'Str0ngPassw0rd');
+    await setValue(container.querySelector('select[aria-label="New role"]'), 'cashier');
+    await setValue(container.querySelector('select[aria-label="New branch"]'), 'b2');
+    await click(findButton('Create account'));
+
+    const post = log.find(entry => entry.path === '/accounts' && entry.options.method === 'POST');
+    assert.ok(post, 'expected a POST /accounts');
+    const body = JSON.parse(post.options.body);
+    assert.equal(body.name, 'Sunita Gurung');
+    assert.equal(body.email, 'sunita@test.com');
+    assert.equal(body.role, 'cashier');
+    assert.equal(body.branch, 'b2');
+    assert.equal(body.password, 'Str0ngPassw0rd');
+  });
+
+  it('never offers owner as a creatable role', async () => {
+    await render({});
+    const select = container.querySelector('select[aria-label="New role"]');
+    assert.ok(![...select.options].some(option => option.value === 'owner'),
+      'an owner account must not be creatable from the roster');
+  });
+
+  it('shows the API validation error verbatim when creation is refused', async () => {
+    const call = async (path, options = {}) => {
+      if (options.method === 'POST' && path === '/accounts') {
+        throw new Error('An account with that email already exists');
+      }
+      return makeCall({}, [])(path, options);
+    };
+    await render({call});
+    await setValue(container.querySelector('input[aria-label="New name"]'), 'Dupe');
+    await setValue(container.querySelector('input[aria-label="New email"]'), 'dupe@test.com');
+    await setValue(container.querySelector('input[aria-label="New password"]'), 'Str0ngPassw0rd');
+    await click(findButton('Create account'));
+    assert.match(container.textContent, /already exists/);
+  });
+
+  it('requires an explicit confirmation before deactivating an account', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await click(findButton('Deactivate'));
+    // Nothing must have been sent yet — the first click only asks.
+    assert.equal(log.filter(e => e.options.method === 'PATCH').length, 0);
+    assert.match(container.textContent, /sessions end immediately/i);
+
+    await click(findButton('Confirm'));
+    const patch = log.find(e => e.path === '/accounts/u1/active');
+    assert.ok(patch, 'expected the deactivation PATCH after confirming');
+    assert.equal(JSON.parse(patch.options.body).active, false);
+  });
+
+  it('lets a cancelled confirmation send nothing', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await click(findButton('Deactivate'));
+    await click(findButton('Cancel'));
+    assert.equal(log.filter(e => e.path === '/accounts/u1/active').length, 0);
+  });
+
+  it('offers reactivation for a deactivated account without confirmation', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await click(findButton('Reactivate'));
+    const patch = log.find(e => e.path === '/accounts/u2/active');
+    assert.ok(patch, 'expected the reactivation PATCH');
+    assert.equal(JSON.parse(patch.options.body).active, true);
+  });
+
+  it('hides account creation and deactivation without those permissions', async () => {
+    // A manager holds users.manage but not users.create/users.deactivate.
+    await render({permissions: ['users.manage'], user: {role: 'manager', name: 'M'}});
+    assert.equal(container.querySelector('input[aria-label="New name"]'), null);
+    assert.equal(findButton('Create account'), undefined);
+    assert.equal(findButton('Deactivate'), undefined);
+    // The roster itself is still readable.
+    assert.match(container.textContent, /People/);
   });
 });

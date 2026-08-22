@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {hasCapability} from './capabilities.js';
 import mongoose from 'mongoose';
 import {Audit, Ingredient, Supplier} from '../models/index.js';
 import {InventoryBatch, PurchaseOrder} from '../models/operations.js';
@@ -60,10 +61,10 @@ function populatedPurchaseReturn(returnId, session) {
     .session(session || null);
 }
 
-async function returnContext({poId, user, session, requireManager = false}) {
+async function returnContext({poId, user, principal, session, requireManager = false}) {
   if (!mongoose.isValidObjectId(poId)) throw httpError('Invalid purchase order', 400);
   const identity = await userRestaurantContext(user, {session});
-  if (requireManager && !['owner', 'manager'].includes(identity.role)) {
+  if (requireManager && !hasCapability(user, principal, 'purchase.return')) {
     throw httpError('Only owners and managers can post purchase returns', 403);
   }
   const po = await PurchaseOrder.findOne({_id: poId, restaurant: identity.restaurantId}).session(session || null);
@@ -223,10 +224,10 @@ async function findReturnReplay({po, context, idempotencyKey, requestHash, sessi
   return {purchaseOrder, purchaseReturn, duplicate: true};
 }
 
-export async function replayPurchaseReturn({poId, items, reason, notes, user, idempotencyKey, session}) {
+export async function replayPurchaseReturn({poId, items, reason, notes, user, principal, idempotencyKey, session}) {
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
-  const {po, context} = await returnContext({poId, user, session, requireManager: true});
+  const {po, context} = await returnContext({poId, user, principal, session, requireManager: true});
   const requestHash = purchaseReturnRequestFingerprint({poId, items, reason, notes});
   const replay = await findReturnReplay({po, context, idempotencyKey: key, requestHash, session});
   if (!replay) throw httpError('Purchase return could not be replayed; retry with a new key', 409);
@@ -338,7 +339,7 @@ export async function listPurchaseReturns({poId, user, session}) {
     .session(session || null);
 }
 
-export async function returnPurchaseOrder({poId, items, reason, notes, expectedVersion, user, session, idempotencyKey}) {
+export async function returnPurchaseOrder({poId, items, reason, notes, expectedVersion, user, principal, session, idempotencyKey}) {
   const key = clean(idempotencyKey);
   if (!key) throw httpError('Idempotency-Key is required', 400);
   if (key.length > 120) throw httpError('Idempotency-Key must be 120 characters or fewer', 400);
@@ -349,7 +350,7 @@ export async function returnPurchaseOrder({poId, items, reason, notes, expectedV
     throw httpError('Return notes of at least 3 characters are required when the reason is other', 400);
   }
 
-  const {po, context} = await returnContext({poId, user, session, requireManager: true});
+  const {po, context} = await returnContext({poId, user, principal, session, requireManager: true});
   const requestHash = purchaseReturnRequestFingerprint({poId, items, reason: normalizedReason, notes: normalizedNotes});
   const replay = await findReturnReplay({po, context, idempotencyKey: key, requestHash, session});
   if (replay) return replay;

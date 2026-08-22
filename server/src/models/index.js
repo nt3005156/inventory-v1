@@ -19,6 +19,15 @@ export const User=model('User',new Schema({name:String,email:{type:String,unique
   // base role because tenancy scoping, the rider workspace and Socket.IO all
   // still reason in those four terms; roleKey narrows, it never widens.
   roleKey:{type:String,trim:true,lowercase:true,maxlength:40,default:null},
+  // Phase 17 — server-side session invalidation.
+  //
+  // Every JWT carries the sessionVersion current at sign-in. Incrementing this
+  // field invalidates every token issued before the bump, which is how logout,
+  // password reset, deactivation and security-sensitive role changes revoke
+  // access without a token blacklist. A version counter beats storing every
+  // JWT: it is O(1) to check, needs no expiry sweep, and cannot grow unbounded.
+  sessionVersion:{type:Number,default:0,min:0},
+  sessionsRevokedAt:{type:Date,default:null},
   // Phase 12: employment state for ANY account. Enforced at login, so a
   // deactivated employee cannot authenticate even with a valid password.
   active:{type:Boolean,default:true},

@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Branch} from '../models/operations.js';
 import {
   catalogOptions,
@@ -125,7 +125,7 @@ async function publishSupplierChange(row, changeReason) {
   });
 }
 
-r.get('/suppliers', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/suppliers', requirePermission('purchase.view'), async (req, res) => {
   try {
     const query = supplierQuerySchema.parse(req.query);
     res.json(await listSuppliers({user: req.user, ...query}));
@@ -134,7 +134,7 @@ r.get('/suppliers', auth(['owner', 'manager', 'staff']), async (req, res) => {
   }
 });
 
-r.post('/suppliers', auth(['owner', 'manager']), async (req, res) => {
+r.post('/suppliers', requirePermission('suppliers.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = supplierCreateSchema.parse(req.body);
@@ -152,7 +152,7 @@ r.post('/suppliers', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/suppliers/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/suppliers/:id', requirePermission('suppliers.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const {expectedVersion, ...patch} = supplierUpdateSchema.parse(req.body);
@@ -170,7 +170,7 @@ r.patch('/suppliers/:id', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.get('/supplier-catalog/options', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/supplier-catalog/options', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await catalogOptions({user: req.user}));
   } catch (error) {
@@ -178,7 +178,7 @@ r.get('/supplier-catalog/options', auth(['owner', 'manager', 'staff']), async (r
   }
 });
 
-r.get('/supplier-catalog/:id/price-history', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/supplier-catalog/:id/price-history', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await catalogPriceHistory({catalogId: req.params.id, user: req.user, limit: req.query.limit}));
   } catch (error) {
@@ -186,7 +186,7 @@ r.get('/supplier-catalog/:id/price-history', auth(['owner', 'manager', 'staff'])
   }
 });
 
-r.get('/supplier-catalog', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/supplier-catalog', requirePermission('purchase.view'), async (req, res) => {
   try {
     res.json(await listCatalog({
       user: req.user,
@@ -202,7 +202,7 @@ r.get('/supplier-catalog', auth(['owner', 'manager', 'staff']), async (req, res)
   }
 });
 
-r.post('/supplier-catalog', auth(['owner', 'manager']), async (req, res) => {
+r.post('/supplier-catalog', requirePermission('suppliers.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = createSchema.parse(req.body);
@@ -219,7 +219,7 @@ r.post('/supplier-catalog', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.patch('/supplier-catalog/:id', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/supplier-catalog/:id', requirePermission('suppliers.manage'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const {expectedVersion, ...patch} = updateSchema.parse(req.body);

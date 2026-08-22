@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {assertCapability} from './capabilities.js';
 import mongoose from 'mongoose';
 import {Audit, Ingredient} from '../models/index.js';
 import {InventoryBalance, StockCount} from '../models/operations.js';
@@ -389,7 +390,7 @@ export async function submitStockCount({countId, note, expectedVersion, user, se
   return populatedCountById(count._id, session);
 }
 
-export async function decideStockCount({countId, decision, note, expectedVersion, user, idempotencyKey, session}) {
+export async function decideStockCount({countId, decision, note, expectedVersion, user, principal, idempotencyKey, session}) {
   requireTransaction(session);
   const key = clean(idempotencyKey);
   if (key.length < 3 || key.length > 200) throw httpError('A valid Idempotency-Key is required', 400);
@@ -398,7 +399,7 @@ export async function decideStockCount({countId, decision, note, expectedVersion
   if (decision === 'rejected' && decisionNote.length < 3) throw httpError('A rejection reason is required', 400);
   const hash = decisionEvidence({countId, decision, note: decisionNote});
   const {count, context} = await scopedCount({countId, user, session, secrets: true});
-  if (!['owner', 'manager'].includes(context.role)) throw httpError('Only owners and managers can decide stock counts', 403);
+  assertCapability(user, principal, 'inventory.approve', 'Only owners and managers can decide stock counts');
 
   if (count.decisionKey) {
     if (count.decisionKey === key && count.decisionHash === hash && count.status === decision) {

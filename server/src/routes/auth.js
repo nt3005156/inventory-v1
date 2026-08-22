@@ -13,9 +13,10 @@ import {Router} from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import {User} from '../models/index.js';
-import {auth} from '../middleware/auth.js';
+import {authenticated, requirePermission} from '../middleware/auth.js';
 import {AUTH_RATE_LIMIT, createRateLimiter} from '../services/rateLimiting.js';
 import {createStaffAccount} from '../services/staffAccounts.js';
+import {revokeUserSessions} from '../services/sessions.js';
 
 const r = Router();
 
@@ -25,7 +26,11 @@ export const signToken = user => jwt.sign(
     name: user.name,
     role: user.role,
     restaurantId: user.restaurantId || null,
-    branch: user.branch || null
+    branch: user.branch || null,
+    // Phase 17: the session version this token was minted against. The guard
+    // compares it to the stored value on every request, so incrementing
+    // `user.sessionVersion` invalidates every token issued before the bump.
+    sv: Number(user.sessionVersion || 0)
   },
   process.env.JWT_SECRET,
   {expiresIn: '12h'}
@@ -74,13 +79,36 @@ r.post('/auth/login', authLimit, async (req, res) => {
  * hash back in the response, accepted a one-character password, and crashed
  * when the password was omitted.
  */
-r.post('/auth/register', auth(['owner']), async (req, res) => {
+r.post('/auth/register', requirePermission('users.create'), async (req, res) => {
   try {
     res.status(201).json(await createStaffAccount({user: req.user, input: req.body || {}}));
   } catch (error) {
     const status = error?.status || 500;
     res.status(status).json({
       message: status >= 500 ? 'Server error' : String(error.message).slice(0, 300)
+    });
+  }
+});
+
+/**
+ * Log out: end EVERY session for the calling user.
+ *
+ * A JWT cannot be un-issued, so this increments the user's session version,
+ * which invalidates all tokens minted before now, drops the cached principal
+ * and disconnects their live sockets.
+ *
+ * It is deliberately all-sessions rather than this-device-only. A version
+ * counter cannot express per-device logout; supporting that needs a session
+ * identifier in the claim and a per-session record. Documented as a
+ * limitation rather than half-implemented.
+ */
+r.post('/auth/logout', authenticated(), async (req, res) => {
+  try {
+    const result = await revokeUserSessions({userId: req.user.id, reason: 'logout'});
+    res.json({ok: true, sessionVersion: result.sessionVersion});
+  } catch (error) {
+    res.status(error?.status || 500).json({
+      message: (error?.status || 500) >= 500 ? 'Server error' : String(error.message).slice(0, 300)
     });
   }
 });

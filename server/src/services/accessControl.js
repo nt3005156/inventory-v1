@@ -1,4 +1,5 @@
 import {Role, User} from '../models/index.js';
+import {invalidateRole, withRoleCache} from './principalCache.js';
 import {
   ALL_PERMISSIONS, BUILTIN_ROLES, grants, permissionsForBuiltin
 } from './permissions.js';
@@ -39,8 +40,36 @@ function httpError(message, status = 400) {
 export async function resolvePrincipal(tokenUser, {session} = {}) {
   if (!tokenUser?.id) throw httpError('Authentication required', 401);
 
+  // The user row is read live on EVERY request -- never cached. It carries
+  // `active`, `rider.active`, `role` and `sessionVersion`, the four facts that
+  // decide whether this session is still valid. Caching them was tried and
+  // proven unsafe (see principalCache.js).
+  const resolved = await loadPrincipal(tokenUser, {session});
+
+  /**
+   * SESSION VERSION — checked on every request, against the CACHED snapshot.
+   *
+   * The token carries the version that was current when it was signed.
+   * Incrementing `user.sessionVersion` therefore invalidates every token
+   * issued before the bump. Compared here rather than inside the loader so
+   * that a cached principal is still rejected the moment its version moves
+   * on; the writer also invalidates the cache entry directly, so this is the
+   * second of two independent mechanisms.
+   *
+   * Tokens minted before this field existed carry no `sv` claim and are
+   * treated as version 0, which matches the schema default — so shipping this
+   * does not log out every existing session.
+   */
+  const tokenVersion = Number(tokenUser.sv ?? 0);
+  if (tokenVersion !== resolved.sessionVersion) {
+    throw httpError('This session has been signed out. Sign in again.', 401);
+  }
+  return resolved;
+}
+
+async function loadPrincipal(tokenUser, {session} = {}) {
   const stored = await User.findById(tokenUser.id)
-    .select('name email role roleKey branch restaurantId restaurant active rider')
+    .select('name email role roleKey branch restaurantId restaurant active rider sessionVersion')
     .session(session || null)
     .lean();
   if (!stored) throw httpError('Authentication required', 401);
@@ -80,15 +109,43 @@ export async function resolvePrincipal(tokenUser, {session} = {}) {
       custom: false,
       branch: stored.branch ? String(stored.branch) : null,
       restaurantId: stored.restaurantId ? String(stored.restaurantId) : null,
+      sessionVersion: Number(stored.sessionVersion || 0),
       permissions: new Set(permissionsForBuiltin(stored.role))
     };
   }
 
   // A custom role. It is looked up inside the user's OWN restaurant, so a role
   // key cannot be borrowed across tenants.
-  const role = await Role.findOne({restaurant: stored.restaurantId, key: roleKey})
-    .session(session || null)
-    .lean();
+  // The role DEFINITION is cacheable: it changes rarely, only through
+  // roles.js (which invalidates), and it cannot resurrect a dead session
+  // because the live user row above already decided that.
+  let role = session
+    ? await Role.findOne({restaurant: stored.restaurantId, key: roleKey}).session(session).lean()
+    : await withRoleCache(stored.restaurantId, roleKey, () =>
+      Role.findOne({restaurant: stored.restaurantId, key: roleKey}).lean());
+
+  /**
+   * REVALIDATE A CACHE HIT BEFORE TRUSTING IT.
+   *
+   * The cache can only ever hold a role that was active when it was stored.
+   * Deleting or disabling a role out of band -- another API instance, a
+   * migration, an operator in the shell -- would otherwise keep its holders
+   * authorised for up to one TTL, which is the same staleness that made
+   * caching the user row unsafe. Withdrawal of access must be immediate, so a
+   * hit is confirmed against storage and the stale entry dropped.
+   *
+   * This costs one extra read only on the path that is about to 401 in the
+   * common case; a normal request with a live role still pays a single query.
+   */
+  if (role && !session) {
+    const stillLive = await Role.exists({
+      restaurant: stored.restaurantId, key: roleKey, active: {$ne: false}
+    });
+    if (!stillLive) {
+      invalidateRole(stored.restaurantId, roleKey);
+      role = null;
+    }
+  }
 
   // A role that has been deleted or switched off must not silently fall back
   // to the base role's full bundle — that would QUIETLY WIDEN access at the
@@ -112,6 +169,7 @@ export async function resolvePrincipal(tokenUser, {session} = {}) {
     custom: true,
     branch: stored.branch ? String(stored.branch) : null,
     restaurantId: stored.restaurantId ? String(stored.restaurantId) : null,
+    sessionVersion: Number(stored.sessionVersion || 0),
     // A custom role is an EXACT permission list. It does not inherit its base
     // role's bundle: a Cashier based on `staff` must not silently receive
     // every staff permission, or the whole point of a narrower role is lost.

@@ -34,6 +34,9 @@ function Pill({children, tone = 'grey'}) {
 export default function AccessControl({call, user, permissions = []}) {
   const canManageRoles = permissions.includes('roles.manage');
   const canManageUsers = permissions.includes('users.manage');
+  const canCreateUsers = permissions.includes('users.create');
+  const canDeactivate = permissions.includes('users.deactivate');
+  const canResetPassword = permissions.includes('users.password');
   const allowed = canManageRoles || canManageUsers;
 
   const [catalogue, setCatalogue] = useState(null);
@@ -45,6 +48,13 @@ export default function AccessControl({call, user, permissions = []}) {
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const [newUser, setNewUser] = useState({
+    name: '', email: '', password: '', role: 'staff', branch: ''
+  });
+  // Destructive actions require an explicit confirmation step rather than a
+  // browser confirm(): the preview iframe blocks modals, and an inline
+  // confirmation states exactly what is about to happen.
+  const [confirming, setConfirming] = useState(null);
 
   const load = useCallback(async () => {
     if (!allowed) return;
@@ -143,6 +153,51 @@ export default function AccessControl({call, user, permissions = []}) {
       await load();
     } catch (e) {
       setError(e.message || 'Could not update the account');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createAccount = async () => {
+    setBusy(true);
+    setError('');
+    setNote('');
+    try {
+      await call('/accounts', {method: 'POST', body: JSON.stringify({
+        name: newUser.name.trim(),
+        email: newUser.email.trim(),
+        password: newUser.password,
+        role: newUser.role,
+        ...(newUser.branch ? {branch: newUser.branch} : {})
+      })});
+      setNote(`Created ${newUser.name.trim()}`);
+      setNewUser({name: '', email: '', password: '', role: 'staff', branch: ''});
+      await load();
+    } catch (e) {
+      // The API is the source of truth for validation: duplicate email, weak
+      // password, unauthorised role. Show exactly what it said.
+      setError(e.message || 'Could not create the account');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setActive = async (account, active) => {
+    setBusy(true);
+    setError('');
+    setNote('');
+    try {
+      await call(`/accounts/${account._id}/active`, {
+        method: 'PATCH',
+        body: JSON.stringify({active, reason: active ? 'Reinstated' : 'Deactivated by administrator'})
+      });
+      setNote(active
+        ? `Reactivated ${account.name}`
+        : `Deactivated ${account.name}. Their sessions have been ended.`);
+      setConfirming(null);
+      await load();
+    } catch (e) {
+      setError(e.message || 'Could not change the account status');
     } finally {
       setBusy(false);
     }
@@ -281,6 +336,42 @@ export default function AccessControl({call, user, permissions = []}) {
           {canManageUsers && (
             <>
               <h2 style={{fontSize: '15px', marginTop: '20px'}}>People</h2>
+
+              {canCreateUsers && (
+                <section style={{border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px', marginBottom: '12px'}}>
+                  <h3 style={{marginTop: 0, fontSize: '14px'}}>Create an account</h3>
+                  <div style={{display: 'flex', gap: '8px', flexWrap: 'wrap'}}>
+                    <input aria-label="New name" placeholder="Full name" value={newUser.name}
+                      onChange={e => setNewUser({...newUser, name: e.target.value})}/>
+                    <input aria-label="New email" placeholder="Email" value={newUser.email}
+                      onChange={e => setNewUser({...newUser, email: e.target.value})}/>
+                    <input aria-label="New password" type="password" placeholder="Temporary password"
+                      value={newUser.password}
+                      onChange={e => setNewUser({...newUser, password: e.target.value})}/>
+                    <select aria-label="New role" value={newUser.role}
+                      onChange={e => setNewUser({...newUser, role: e.target.value})}>
+                      {catalogue.roles
+                        .filter(role => role.key !== 'owner')
+                        .map(role => <option key={role.key} value={role.key}>{role.name}</option>)}
+                    </select>
+                    <select aria-label="New branch" value={newUser.branch}
+                      onChange={e => setNewUser({...newUser, branch: e.target.value})}>
+                      <option value="">No branch</option>
+                      {branches.map(branch => (
+                        <option key={branch._id} value={String(branch._id)}>{branch.name}</option>
+                      ))}
+                    </select>
+                    <button onClick={createAccount}
+                      disabled={busy || !newUser.name.trim() || !newUser.email.trim() || !newUser.password}>
+                      Create account
+                    </button>
+                  </div>
+                  <p style={{fontSize: '11px', opacity: 0.65, marginBottom: 0}}>
+                    An owner account cannot be created here. The password must be at least 10 characters
+                    with letters and numbers; the server enforces this and rejects duplicates.
+                  </p>
+                </section>
+              )}
               <div style={{overflowX: 'auto'}}>
                 <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '13px'}}>
                   <thead>
@@ -329,6 +420,27 @@ export default function AccessControl({call, user, permissions = []}) {
                           {account.active === false
                             ? <Pill tone="amber">deactivated</Pill>
                             : <Pill tone="green">active</Pill>}
+                          {canDeactivate && account.role !== 'owner' && (
+                            <div style={{marginTop: '4px'}}>
+                              {confirming === account._id ? (
+                                <span style={{fontSize: '11px'}}>
+                                  Deactivate {account.name}? Their sessions end immediately.{' '}
+                                  <button onClick={() => setActive(account, false)} disabled={busy}>
+                                    Confirm
+                                  </button>{' '}
+                                  <button onClick={() => setConfirming(null)} disabled={busy}>Cancel</button>
+                                </span>
+                              ) : account.active === false ? (
+                                <button onClick={() => setActive(account, true)} disabled={busy}>
+                                  Reactivate
+                                </button>
+                              ) : (
+                                <button onClick={() => setConfirming(account._id)} disabled={busy}>
+                                  Deactivate
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))}
