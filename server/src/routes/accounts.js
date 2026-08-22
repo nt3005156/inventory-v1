@@ -8,6 +8,7 @@
 import {Router} from 'express';
 import {z} from 'zod';
 import {auth, requirePermission} from '../middleware/auth.js';
+import {signToken} from './auth.js';
 import {RIDER_VEHICLES} from '../models/index.js';
 import {
   CREATABLE_ROLES,
@@ -71,9 +72,25 @@ r.post('/accounts', requirePermission('users.create'), async (req, res) => {
 r.post('/accounts/:id/password', requirePermission('users.password'), async (req, res) => {
   try {
     const body = z.object({password: z.string().min(1).max(200)}).strict().parse(req.body || {});
-    res.json(await resetAccountPassword({
-      user: req.user, targetId: req.params.id, password: body.password
-    }));
+    const result = await resetAccountPassword({
+      user: req.user, targetId: req.params.id, password: body.password,
+      // Only meaningful for a SELF reset: the session the caller is using is
+      // spared, and its token is rotated below because sessionVersion moved.
+      currentSessionRowId: req.principal?.sessionId || null
+    });
+    // A self reset keeps this device signed in, but the version bump made the
+    // caller's existing token stale. Hand back a fresh one so the client is
+    // not silently logged out on its next request. Never issued for an
+    // administrator resetting somebody else -- there is no session to rotate.
+    const token = result.rotatedSession && result.user
+      ? signToken(result.user, req.user.sid || null)
+      : undefined;
+    res.json({
+      ok: true,
+      selfReset: result.selfReset,
+      rotatedSession: result.rotatedSession,
+      ...(token ? {token} : {})
+    });
   } catch (e) {
     fail(res, e);
   }

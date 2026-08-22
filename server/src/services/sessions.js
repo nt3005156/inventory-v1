@@ -49,7 +49,8 @@ export const REVOCATION_REASONS = Object.freeze([
  * @param {boolean} [options.disconnectSockets] hard-drop live sockets too
  */
 export async function revokeUserSessions({
-  userId, reason = 'security', actor = null, session = null, disconnectSockets = true
+  userId, reason = 'security', actor = null, session = null, disconnectSockets = true,
+  keepSessionRowId = null
 }) {
   if (!userId) throw httpError('A user is required', 400);
   const updated = await User.findByIdAndUpdate(
@@ -64,7 +65,9 @@ export async function revokeUserSessions({
   // leaves a window where a concurrent request repopulates the cache from
   // pre-bump state.
 
-  await revokeAllDeviceSessions({userId, actor, reason, session});
+  await revokeAllDeviceSessions({
+    userId, actor, reason, session, exceptSessionRowId: keepSessionRowId
+  });
 
   await Audit.create([{
     entity: 'user',
@@ -80,7 +83,7 @@ export async function revokeUserSessions({
     // the revocation, which has already taken effect for HTTP.
     try { disconnectUserSockets(String(userId), reason); } catch { /* not fatal */ }
   }
-  return {sessionVersion: updated.sessionVersion, reason};
+  return {sessionVersion: updated.sessionVersion, reason, keptSessionRowId: keepSessionRowId};
 }
 
 /**
@@ -207,10 +210,31 @@ export async function revokeDeviceSession({sessionRowId, ownerId, actor, reason 
   return {alreadyRevoked: false, id: String(session._id)};
 }
 
-/** Mark every session for a user revoked. Used alongside a version bump. */
-export async function revokeAllDeviceSessions({userId, actor, reason, session = null}) {
+/**
+ * Mark every session for a user revoked, optionally SPARING one.
+ *
+ * `exceptSessionRowId` exists for password SELF-service: a user changing their
+ * own password must lose every other device (that is the whole point) but
+ * should not be signed out of the browser they are typing in. Sparing a
+ * session is only safe when the caller has just proved control of the account,
+ * which is exactly the self-reset case; an administrator resetting SOMEBODY
+ * ELSE'S password never spares anything.
+ *
+ * The `user` scoping below is what makes a mis-passed `exceptSessionRowId`
+ * harmless: because the update is filtered by `user`, an id belonging to a
+ * different account cannot match any row in this account's set, so it excludes
+ * nothing. Confirmed by mutation testing -- forcing the caller's own session
+ * id through on an administrator reset is an equivalent mutant, since the
+ * target still ends with zero live rows. The `selfReset` decision upstream
+ * expresses intent; this scoping is the actual guarantee.
+ */
+export async function revokeAllDeviceSessions({
+  userId, actor, reason, session = null, exceptSessionRowId = null
+}) {
+  const match = {user: userId, revokedAt: null};
+  if (exceptSessionRowId) match._id = {$ne: exceptSessionRowId};
   const result = await UserSession.updateMany(
-    {user: userId, revokedAt: null},
+    match,
     {$set: {revokedAt: new Date(), revokedBy: actor?.id || userId, revokedReason: reason}},
     {session: session || null}
   );

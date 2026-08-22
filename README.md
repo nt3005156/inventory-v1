@@ -499,15 +499,33 @@ that the watcher starts, that an out-of-band role write invalidates this process
 the stream, and that it shuts down cleanly. Treat the multi-instance behaviour as designed, not
 proven.
 
-### Administrator password reset
+### Password reset
 
 `POST /api/accounts/:id/password` (permission `users.password`, owner-only by default). There is
-**no email infrastructure in this repository**, so there is no self-service reset flow and none is
-implied — this is an authorised administrator action. The new password is policy-checked by the
-existing `assertPasswordPolicy()`, hashed with the existing bcrypt cost, and never echoed back;
-no hash is ever returned. Every device session is revoked and `sessionVersion` is bumped, because
-a reset usually means the old credential may be compromised. The reset is audited with the actor
-and timestamp, and the audit row carries no credential.
+**no email infrastructure in this repository**, so there is no self-service "forgot password"
+flow and none is implied. The new password is policy-checked by the existing
+`assertPasswordPolicy()`, hashed with the existing bcrypt cost, and never echoed back; no hash is
+ever returned, and the audit row carries no credential.
+
+**Revocation policy — two deliberately different cases:**
+
+| Case | Sessions revoked | Token returned |
+|---|---|---|
+| Administrator resets **somebody else's** password | **All** of the target's devices | None — an administrator is never handed the target's session |
+| User resets **their own** password | Every **other** device; the calling one is spared | A rotated token for the calling device |
+
+An admin reset almost always means the credential is suspect or the person has lost access, so
+sparing anything would defeat it. A self reset keeps the browser the user just typed into, which
+is not a weakening: every other device still dies, and sparing is only safe because the caller has
+just proved control of the account.
+
+`sessionVersion` is bumped in **both** cases, so a legacy token with no `sid` cannot survive
+either path. That also makes the spared session's own token stale, which is why the route returns
+a rotated token — the client is not silently signed out on its next request.
+
+The revocation is scoped by `user`, so a reset can only ever touch the target's rows. Verified at
+the database level, because HTTP status alone cannot distinguish it: the `sessionVersion` bump
+would 401 the target regardless of whether the row-level revocation were correctly scoped.
 
 ### Role deletion
 
@@ -517,6 +535,105 @@ same operation, each move is audited individually, and their cached permissions 
 are refreshed. The replacement must share the outgoing role's `baseRole`, so nobody silently
 changes tenancy regime, and can never be `owner`. Nobody is ever left pointing at a role that no
 longer resolves. The API enforces all of this independently of the UI.
+
+## Production runbook — sessions, cache and realtime
+
+Operational reference for the RBAC/session subsystem. Everything here is
+behaviour that has been verified against the test suite unless explicitly
+marked otherwise.
+
+### Session and device semantics
+
+| Fact | Value |
+|---|---|
+| Token lifetime | 12 hours (`TOKEN_TTL_HOURS`) |
+| "Device" | One `UserSession` row, created per login. Not hardware — two logins from one browser are two sessions. |
+| Stored credential | SHA-256 hash of an opaque `sid` only. The plaintext exists solely inside the JWT. |
+| Global kill switch | `user.sessionVersion`; incrementing it invalidates every token minted earlier. |
+| Row cleanup | TTL index on `expiresAt`; the collection self-prunes and stays bounded. |
+| Revoked rows | Kept, not deleted, so the trail survives until the TTL removes it. |
+
+Endpoints: `POST /api/auth/logout` (this device), the same with
+`{"allDevices": true}` (everything), `GET /api/auth/sessions`,
+`DELETE /api/auth/sessions/:id`. Revocation is always scoped to the
+authenticated user; another user's id yields 404 rather than confirming it
+exists.
+
+Both authentication layers are checked on every request: the session row must
+be live **and** the token's `sv` must match the stored `sessionVersion`.
+Tokens minted before per-device sessions carry no `sid`, still work, and remain
+covered by the version check alone.
+
+**Operational note:** there is no admin endpoint to list or revoke *another*
+user's individual devices. Ending someone else's access is all-or-nothing —
+deactivate the account, or reset their password.
+
+### Permission cache
+
+| Setting | Default | Env var |
+|---|---|---|
+| TTL | 5 s | `RBAC_ROLE_CACHE_TTL_MS` |
+| Max entries | 2000 | `RBAC_ROLE_CACHE_MAX` |
+| Disable | off | `RBAC_ROLE_CACHE_DISABLED=true` |
+
+Only **role definitions** are cached. The user row — `active`, `rider.active`,
+`role`, `sessionVersion` — is read live on every request and is never cached,
+which is what makes deactivation, demotion and revocation immediate.
+
+Three layers keep the cache honest, in order of precedence:
+
+1. **Explicit invalidation** on every role write through the service — same
+   process, same request, immediate.
+2. **Change stream** on the `roles` collection for writes made elsewhere
+   (another instance, a migration, the mongo shell).
+3. **TTL** as the backstop. If both of the above fail, staleness is bounded by
+   the TTL and resolves on its own. Verified: with the stream stopped and an
+   out-of-band write, access converged after the TTL lapsed.
+
+**Withdrawal is never deferred.** Bounded staleness is acceptable when access
+is being granted; it is not when access is being taken away. A disabled or
+deleted role is revalidated against storage on read, so it takes effect
+immediately even with a 60-second TTL configured.
+
+### Change-stream fallback
+
+Change streams require a replica set. This deployment already requires one —
+`verifyTransactionCapableDatabase()` refuses to boot otherwise, because
+purchasing uses transactions — so no new infrastructure was introduced.
+
+If the stream cannot start or later drops, the API logs it, continues serving,
+and falls back to the TTL. Startup failure of the watcher is deliberately
+non-fatal: losing an optimisation must never stop the API booting.
+
+**Not verified multi-instance.** The test harness runs one API process against
+a single-node replica set. What is tested is that the watcher starts, that an
+out-of-band role write invalidates this process's cache through the stream,
+and that it stops cleanly. Treat cross-instance propagation as designed, not
+proven.
+
+### Socket.IO authorization and horizontal scaling
+
+Single instance: when a role, permission set or branch assignment changes, the
+write pushes to live sockets — unauthorized rooms are left, management rooms
+gained or lost, `permissions:changed` emitted. Deactivation and revocation emit
+`session:revoked` and hard-disconnect. Handshakes resolve the principal from
+storage, so a deactivated, demoted or signed-out user cannot open a socket.
+
+**Multi-instance requires a shared adapter, which this repository does not
+have.** `io.fetchSockets()` sees only the current process's connections, so a
+role change served by instance A cannot push to a socket held by instance B.
+
+To scale horizontally with correct socket permission invalidation you must add
+a Socket.IO adapter — `@socket.io/redis-adapter` with Redis, or the MongoDB
+adapter, which would reuse the replica set already required. Until then:
+
+- **Safe:** run a single API instance, where push refresh is immediate.
+- **Degraded but not unsafe:** run several instances. A socket on another
+  instance keeps its rooms until it reconnects or that branch next publishes,
+  at which point `evictStaleBranchSockets()` revalidates it lazily.
+- **HTTP is unaffected either way.** Authorization resolves from the database
+  on every request, so a stale socket can receive events it should no longer
+  see, but can never perform an action.
 
 ## Multi-tenant access control
 

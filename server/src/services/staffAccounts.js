@@ -189,7 +189,7 @@ export async function listStaffAccounts({user, role, branchId, includeInactive =
  * Returns nothing but a confirmation: the new password is chosen by the
  * caller, so echoing it back would only create another place for it to leak.
  */
-export async function resetAccountPassword({user, targetId, password}) {
+export async function resetAccountPassword({user, targetId, password, currentSessionRowId = null}) {
   const {restaurantId} = await userRestaurantContext(user);
   const target = await User.findOne({_id: targetId, restaurantId});
   if (!target) throw httpError('Account not found', 404);
@@ -200,19 +200,46 @@ export async function resetAccountPassword({user, targetId, password}) {
   target.password = await bcrypt.hash(assertPasswordPolicy(password), 12);
   await target.save();
 
+  /**
+   * REVOCATION POLICY. Two cases, deliberately different.
+   *
+   * ADMINISTRATOR RESETS SOMEBODY ELSE  -> revoke everything, spare nothing.
+   *   The reason for an admin reset is almost always that the credential is
+   *   suspect or the person has lost access. Leaving any of the target's
+   *   sessions alive would defeat it, and the administrator is not sitting at
+   *   the target's devices, so nothing is lost by ending them all.
+   *
+   * USER RESETS THEIR OWN PASSWORD      -> revoke every OTHER device, keep this one.
+   *   Signing someone out of the browser they just typed their new password
+   *   into is hostile and teaches nothing; every other device still dies,
+   *   which is the security property that matters. Sparing is only safe
+   *   because the caller has just proved control of the account.
+   *
+   * Either way `sessionVersion` is bumped, so tokens with no `sid` (minted
+   * before per-device sessions) cannot survive a reset in either case. The
+   * spared session's own token is therefore stale too, and the route rotates
+   * it — the caller receives a fresh token rather than silently keeping an
+   * old one.
+   */
+  const selfReset = String(target._id) === String(user.id);
+  const keepSessionRowId = selfReset ? currentSessionRowId : null;
+
   await Audit.create({
     entity: 'user', entityId: target._id, branch: target.branch,
     action: 'account_password_reset',
-    after: {email: target.email}, user: user.id
+    after: {email: target.email, selfReset, sparedCurrentSession: Boolean(keepSessionRowId)},
+    user: user.id
   });
 
-  // A password reset that leaves the old sessions alive is not a reset: the
-  // usual reason for one is that the credential may be compromised.
   await revokeUserSessions({
-    userId: target._id, reason: 'password_reset', actor: user, disconnectSockets: true
+    userId: target._id, reason: 'password_reset', actor: user,
+    disconnectSockets: true, keepSessionRowId
   });
 
-  return {ok: true};
+  // Reloaded so the caller can mint a token carrying the new sessionVersion.
+  const refreshed = await User.findById(target._id)
+    .select('_id name role restaurantId branch sessionVersion').lean();
+  return {ok: true, selfReset, rotatedSession: Boolean(keepSessionRowId), user: refreshed};
 }
 
 /**

@@ -747,3 +747,228 @@ describe('Gap closure · socket authorisation', () => {
     assert.match(src, /single-instance|this process|not distributed/i);
   });
 });
+
+// ── password reset revocation policy ─────────────────────────────────────────
+
+describe('Gap closure · password reset revocation policy', () => {
+  /**
+   * Two deliberately different policies, reviewed and confirmed:
+   *
+   *   admin resets SOMEBODY ELSE -> revoke every session, spare nothing.
+   *   user resets THEIR OWN      -> revoke every OTHER device, keep this one,
+   *                                 and rotate its token.
+   *
+   * Sparing is only safe in the self case, where the caller has just proved
+   * control of the account. `sessionVersion` is bumped either way, so a legacy
+   * token with no `sid` cannot survive a reset in either case.
+   */
+
+  it('spares only the calling device on a SELF reset, and rotates its token', async () => {
+    const bcryptModule = await import('bcryptjs');
+    await User.updateOne(
+      {_id: world.owner._id},
+      {$set: {password: await bcryptModule.default.hash('OwnerP4ssword', 12)}}
+    );
+    const deviceA = (await login('owner@test.com', 'OwnerP4ssword', 'Laptop')).body.token;
+    const deviceB = (await login('owner@test.com', 'OwnerP4ssword', 'Phone')).body.token;
+
+    const res = await request(`/api/accounts/${world.owner._id}/password`, {
+      method: 'POST', token: deviceA, body: {password: 'OwnerNewP4ss'}
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.selfReset, true);
+    assert.equal(res.body.rotatedSession, true);
+    assert.ok(res.body.token, 'a self reset must hand back a rotated token');
+
+    // The OLD token is dead (sessionVersion moved) but the session row lives,
+    // and the rotated token works against it.
+    assert.equal((await request('/api/me/permissions', {token: deviceA})).status, 401);
+    assert.equal((await request('/api/me/permissions', {token: res.body.token})).status, 200);
+    // Every OTHER device is gone. That is the security property.
+    assert.equal((await request('/api/me/permissions', {token: deviceB})).status, 401);
+
+    // DATABASE: exactly one session row survives.
+    assert.equal(await UserSession.countDocuments({user: world.owner._id, revokedAt: null}), 1);
+    assert.equal(await UserSession.countDocuments({user: world.owner._id, revokedAt: {$ne: null}}), 1);
+
+    // Credential actually changed.
+    assert.equal((await login('owner@test.com', 'OwnerP4ssword')).status, 401);
+    assert.equal((await login('owner@test.com', 'OwnerNewP4ss')).status, 200);
+  });
+
+  it('spares nothing when an administrator resets somebody else', async () => {
+    const account = await makeAccount('other@gap.test');
+    const deviceA = (await login('other@gap.test', 'Str0ngPassw0rd', 'Phone')).body.token;
+    const deviceB = (await login('other@gap.test', 'Str0ngPassw0rd', 'Till')).body.token;
+
+    const res = await request(`/api/accounts/${account._id}/password`, {
+      method: 'POST', token: owner(), body: {password: 'BrandNewP4ssword'}
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.selfReset, false);
+    assert.equal(res.body.rotatedSession, false);
+    // No token may be minted for a third party — that would be an
+    // administrator handing themselves the target's session.
+    assert.equal(res.body.token, undefined);
+
+    assert.equal((await request('/api/me/permissions', {token: deviceA})).status, 401);
+    assert.equal((await request('/api/me/permissions', {token: deviceB})).status, 401);
+    assert.equal(await UserSession.countDocuments({user: account._id, revokedAt: null}), 0);
+  });
+
+  it('leaves the administrator\'s own sessions untouched', async () => {
+    const bcryptModule = await import('bcryptjs');
+    await User.updateOne(
+      {_id: world.owner._id},
+      {$set: {password: await bcryptModule.default.hash('OwnerP4ssword', 12)}}
+    );
+    const adminToken = (await login('owner@test.com', 'OwnerP4ssword', 'Admin')).body.token;
+    const account = await makeAccount('victim2@gap.test');
+    await request(`/api/accounts/${account._id}/password`, {
+      method: 'POST', token: adminToken, body: {password: 'BrandNewP4ssword'}
+    });
+    assert.equal((await request('/api/me/permissions', {token: adminToken})).status, 200,
+      'resetting somebody else must not sign the administrator out');
+  });
+
+  it('records the policy taken on the audit row', async () => {
+    const account = await makeAccount('audited@gap.test');
+    await request(`/api/accounts/${account._id}/password`, {
+      method: 'POST', token: owner(), body: {password: 'BrandNewP4ssword'}
+    });
+    const row = await Audit.findOne({entityId: account._id, action: 'account_password_reset'}).lean();
+    assert.equal(row.after.selfReset, false);
+    assert.equal(row.after.sparedCurrentSession, false);
+    assert.doesNotMatch(JSON.stringify(row), /BrandNewP4ssword/);
+  });
+
+  it('kills a legacy token with no sid through either reset path', async () => {
+    // A pre-per-device token cannot be spared, because there is no session row
+    // to spare. The version bump must end it.
+    const account = await makeAccount('legacy@gap.test');
+    const legacy = jwt.sign(
+      {
+        id: String(account._id), name: 'Account', role: 'staff',
+        restaurantId: String(world.restaurant._id), branch: String(world.branchA._id), sv: 0
+      },
+      process.env.JWT_SECRET
+    );
+    assert.equal((await request('/api/me/permissions', {token: legacy})).status, 200);
+    await request(`/api/accounts/${account._id}/password`, {
+      method: 'POST', token: owner(), body: {password: 'BrandNewP4ssword'}
+    });
+    assert.equal((await request('/api/me/permissions', {token: legacy})).status, 401);
+  });
+
+  it('confines a reset to the target account only', async () => {
+    // BLAST RADIUS. A reset must touch exactly one user's sessions. Asserted
+    // at the DATABASE level because the HTTP outcome alone is masked by
+    // `sessionVersion`: even if the row-level revocation were mis-scoped, the
+    // version bump would still 401 the target, so a status-code-only test
+    // cannot see the difference. This checks the rows themselves.
+    const target = await makeAccount('blast-target@gap.test');
+    const bystander = await makeAccount('blast-bystander@gap.test');
+    await login('blast-target@gap.test', 'Str0ngPassw0rd', 'T1');
+    await login('blast-target@gap.test', 'Str0ngPassw0rd', 'T2');
+    const bystanderToken = (await login('blast-bystander@gap.test', 'Str0ngPassw0rd', 'B1')).body.token;
+
+    const bystanderVersionBefore =
+      (await User.findById(bystander._id).select('sessionVersion').lean()).sessionVersion;
+
+    await request(`/api/accounts/${target._id}/password`, {
+      method: 'POST', token: owner(), body: {password: 'BrandNewP4ssword'}
+    });
+
+    // Target: every row revoked.
+    assert.equal(await UserSession.countDocuments({user: target._id, revokedAt: null}), 0);
+    assert.equal(await UserSession.countDocuments({user: target._id, revokedAt: {$ne: null}}), 2);
+
+    // Bystander: untouched at every level — row, version, and live access.
+    assert.equal(await UserSession.countDocuments({user: bystander._id, revokedAt: null}), 1,
+      'another user\'s session row must not be revoked');
+    assert.equal(
+      (await User.findById(bystander._id).select('sessionVersion').lean()).sessionVersion,
+      bystanderVersionBefore,
+      'another user\'s sessionVersion must not move'
+    );
+    assert.equal((await request('/api/me/permissions', {token: bystanderToken})).status, 200);
+  });
+
+  it('revokes only the target\'s rows even when the actor holds a session', async () => {
+    // Directly pins the scoping of the bulk revocation: the actor is signed in
+    // on their own device while resetting somebody else, and their row must
+    // survive. Without user-scoping on the update this fails at the row level.
+    const bcryptModule = await import('bcryptjs');
+    await User.updateOne(
+      {_id: world.owner._id},
+      {$set: {password: await bcryptModule.default.hash('OwnerP4ssword', 12)}}
+    );
+    const adminToken = (await login('owner@test.com', 'OwnerP4ssword', 'Admin device')).body.token;
+    const target = await makeAccount('scoped-target@gap.test');
+    await login('scoped-target@gap.test', 'Str0ngPassw0rd', 'Target device');
+
+    await request(`/api/accounts/${target._id}/password`, {
+      method: 'POST', token: adminToken, body: {password: 'BrandNewP4ssword'}
+    });
+
+    assert.equal(await UserSession.countDocuments({user: world.owner._id, revokedAt: null}), 1,
+      'the administrator\'s own session row must survive');
+    assert.equal(await UserSession.countDocuments({user: target._id, revokedAt: null}), 0);
+    assert.equal((await request('/api/me/permissions', {token: adminToken})).status, 200);
+  });
+});
+
+// ── cache TTL fallback ───────────────────────────────────────────────────────
+
+describe('Gap closure · cache TTL fallback without the change stream', () => {
+  it('self-heals within the TTL when the change stream is unavailable', async () => {
+    // The stream is the fast path. This proves correctness does NOT depend on
+    // it: with the stream stopped and an out-of-band write (no service call,
+    // so no explicit invalidation), staleness is bounded by the TTL and then
+    // resolves on its own.
+    const {configureRoleCache} = await import('../src/services/principalCache.js');
+    await stopRoleChangeStream();
+    configureRoleCache({ttl: 800, max: 2000});
+    try {
+      const {token} = await withRole({
+        key: 'ttlclerk', name: 'TTL Clerk', permissions: ['orders.view', 'branches.view']
+      });
+      await request('/api/branches', {token});
+      assert.equal((await request('/api/reports/pnl', {token})).status, 403);
+
+      await Role.collection.updateOne(
+        {restaurant: world.restaurant._id, key: 'ttlclerk'},
+        {$set: {permissions: ['orders.view', 'branches.view', 'reports.view']}}
+      );
+      // Within the TTL the old answer may still be served — that is the
+      // documented, bounded staleness, not a defect.
+      await settle(1100);
+      assert.equal((await request('/api/reports/pnl', {token})).status, 200,
+        'the cache must self-heal once the TTL lapses');
+    } finally {
+      configureRoleCache({ttl: 5000, max: 2000});
+    }
+  });
+
+  it('never lets the cache outlive a WITHDRAWAL of access, TTL or not', async () => {
+    // Bounded staleness is acceptable when access is being GRANTED. It is not
+    // acceptable when access is being taken away, so a disabled role is
+    // revalidated on read rather than waiting for the TTL.
+    const {configureRoleCache} = await import('../src/services/principalCache.js');
+    await stopRoleChangeStream();
+    configureRoleCache({ttl: 60_000, max: 2000});
+    try {
+      const {token} = await withRole({
+        key: 'doomed', name: 'Doomed', permissions: ['orders.view', 'branches.view']
+      });
+      assert.equal((await request('/api/branches', {token})).status, 200);
+      await Role.collection.updateOne(
+        {restaurant: world.restaurant._id, key: 'doomed'}, {$set: {active: false}}
+      );
+      assert.equal((await request('/api/branches', {token})).status, 401,
+        'withdrawal must be immediate even with a 60s TTL');
+    } finally {
+      configureRoleCache({ttl: 5000, max: 2000});
+    }
+  });
+});
