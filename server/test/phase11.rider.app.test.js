@@ -516,7 +516,14 @@ describe('11 — rider availability', () => {
     const res = await request('/api/deliveries/mine/availability', {
       method: 'PATCH', token: riderToken(), body: {available: true}
     });
-    assert.equal(res.status, 403);
+    // Phase 20 STRENGTHENED this from 403 to 401. It used to be the
+    // availability handler refusing one action while the rider's token kept
+    // working everywhere else. Deactivation is now enforced in the auth guard
+    // against live database state, so the session ends outright and the rider
+    // loses every endpoint at once. The outcome that matters is unchanged and
+    // still asserted: they do not get back on shift.
+    assert.equal(res.status, 401);
+    assert.match(res.body.message, /deactivated/i);
     assert.equal((await User.findById(rider._id)).rider.available, false);
   });
 

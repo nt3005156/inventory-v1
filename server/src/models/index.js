@@ -14,6 +14,11 @@ auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{nam
  */
 export const RIDER_VEHICLES=Object.freeze(['motorcycle','scooter','bicycle','car','on-foot']);
 export const User=model('User',new Schema({name:String,email:{type:String,unique:true,lowercase:true},password:String,role:{type:String,enum:['owner','manager','staff','rider'],default:'staff'},
+  // Phase 20: the CUSTOM role this user holds, if any. Null means the user
+  // runs on the built-in bundle for `role`. `role` itself is retained as the
+  // base role because tenancy scoping, the rider workspace and Socket.IO all
+  // still reason in those four terms; roleKey narrows, it never widens.
+  roleKey:{type:String,trim:true,lowercase:true,maxlength:40,default:null},
   // Phase 12: employment state for ANY account. Enforced at login, so a
   // deactivated employee cannot authenticate even with a valid password.
   active:{type:Boolean,default:true},
@@ -330,3 +335,47 @@ export const KitchenStation=model('KitchenStation',kitchenStationSchema);
 
 export const MonthlySnapshot=model('MonthlySnapshot',monthlySnapshotSchema);
 export const Audit=model('Audit',auditSchema);
+
+/**
+ * Phase 20 — a configurable role.
+ *
+ * A role is a NAMED BUNDLE OF PERMISSIONS scoped to one restaurant. The four
+ * built-in roles (owner/manager/staff/rider) are NOT stored here: they are
+ * defined in code in services/permissions.js so that a tenant cannot delete
+ * or weaken them, and so a fresh database is immediately usable. This
+ * collection holds only the roles a tenant creates for itself — Cashier,
+ * Storekeeper, Kitchen and so on.
+ *
+ * `baseRole` is the compatibility bridge. Large parts of the system still
+ * reason in terms of the four legacy strings: tenancy scoping asks "is this an
+ * owner?", the rider workspace asks "is this a rider?", and Socket.IO refuses
+ * riders a branch room. A custom role therefore declares which legacy role it
+ * behaves as, and that value — never the custom key — is what those checks
+ * see. Without it, inventing a "Cashier" role would have silently bypassed
+ * every one of those guards.
+ */
+const roleSchema=new Schema({
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',required:true,index:true,immutable:true},
+  key:{type:String,required:true,trim:true,lowercase:true,maxlength:40,immutable:true},
+  name:{type:String,required:true,trim:true,maxlength:60},
+  description:{type:String,trim:true,maxlength:300},
+  // Which legacy role this behaves as for tenancy and workspace routing.
+  // 'owner' is deliberately NOT allowed: a custom role must never be able to
+  // mint itself unrestricted access, which is what an owner base would mean.
+  baseRole:{type:String,enum:['manager','staff','rider'],required:true,default:'staff'},
+  permissions:{type:[String],default:[]},
+  // A role in use cannot be deleted; it is deactivated instead, so historical
+  // audit rows naming it still resolve.
+  active:{type:Boolean,default:true,index:true},
+  createdBy:{type:Schema.Types.ObjectId,ref:'User'},
+  updatedBy:{type:Schema.Types.ObjectId,ref:'User'}
+},{timestamps:true,autoIndex:false});
+roleSchema.index({restaurant:1,key:1},{unique:true,name:'role_restaurant_key'});
+roleSchema.pre('validate',function normaliseRole(){
+  if(this.key)this.key=String(this.key).trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'');
+  if(this.name)this.name=String(this.name).trim().replace(/\s+/g,' ');
+  if(Array.isArray(this.permissions)){
+    this.permissions=[...new Set(this.permissions.map(value=>String(value||'').trim()).filter(Boolean))].sort();
+  }
+});
+export const Role=model('Role',roleSchema);

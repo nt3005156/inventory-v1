@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Order, Payment} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {applyPayment, splitOrder, quoteEqualSplit, buildTableBill} from '../services/billing.js';
@@ -84,7 +84,7 @@ r.post('/orders/:id/payments', auth(roles), async (req, res) => {
 });
 
 // Refunds move money out of the till, so they are a supervisor action.
-r.post('/orders/:id/refunds', auth(['owner', 'manager']), async (req, res) => {
+r.post('/orders/:id/refunds', requirePermission('orders.refund'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = refundSchema.parse(req.body);

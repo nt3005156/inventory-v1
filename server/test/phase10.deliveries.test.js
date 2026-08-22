@@ -583,7 +583,28 @@ describe('10 — rider authorisation', () => {
     const res = await request('/api/deliveries/mine/availability', {
       method: 'PATCH', token: riderToken(), body: {available: true}
     });
-    assert.equal(res.status, 403);
+    // Phase 20 STRENGTHENED this. It used to be a 403 from the availability
+    // handler: the rider was refused this one action but their token still
+    // worked everywhere else. Deactivation is now enforced in the auth guard
+    // against live database state, so the session itself ends — 401 — and the
+    // rider loses every endpoint at once, not just this one. Asserted below.
+    assert.equal(res.status, 401);
+    assert.match(res.body.message, /deactivated/i);
+  });
+
+  it('ends the whole session for a deactivated rider, not just one action', async () => {
+    // The guarantee the test above used to miss. Before Phase 20 a
+    // deactivated rider could still READ their deliveries with an existing
+    // token; only the availability toggle was guarded.
+    await User.updateOne({_id: rider._id}, {$set: {'rider.active': false}});
+    for (const path of ['/api/deliveries/mine', '/api/deliveries/mine/dashboard']) {
+      const res = await request(path, {token: riderToken()});
+      assert.equal(res.status, 401, `${path} must refuse a deactivated rider`);
+    }
+    // Control: reinstating them restores access, so the refusal above is
+    // about activation and not a broken route.
+    await User.updateOne({_id: rider._id}, {$set: {'rider.active': true}});
+    assert.equal((await request('/api/deliveries/mine', {token: riderToken()})).status, 200);
   });
 
   it('isolates riders across restaurants', async () => {

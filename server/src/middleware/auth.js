@@ -1,7 +1,64 @@
 import jwt from 'jsonwebtoken';
+import {resolvePrincipal} from '../services/accessControl.js';
+import {BASE_ROLES, grants} from '../services/permissions.js';
 
 /** Every role that is part of restaurant operations, excluding riders. */
 export const STAFF_ROLES = Object.freeze(['owner', 'manager', 'staff']);
+
+/**
+ * Verify the bearer token and resolve the principal against the DATABASE.
+ *
+ * Phase 20 changed what happens after the signature checks out. The token is
+ * now only proof of identity; role, activation state and permissions are read
+ * live from storage by `resolvePrincipal()`. See accessControl.js for the
+ * reproduced defect this closes — a deactivated employee's existing token
+ * could still move stock and take money.
+ *
+ * `req.user` keeps its historical shape (`id`, `role`, `branch`,
+ * `restaurantId`, `name`) because ~135 call sites and a dozen services read
+ * those fields. `req.principal` is the new, richer object.
+ */
+/**
+ * The token's own claims, or null if it is missing or unverifiable.
+ *
+ * Used ONLY to decide between a 401 and a 403 before the database lookup.
+ * Never used to grant anything.
+ */
+function readClaim(req) {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    return jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+async function authenticate(req) {
+  const token = req.headers.authorization?.split(' ')[1];
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
+  const principal = await resolvePrincipal(payload);
+
+  req.principal = principal;
+  req.user = {
+    ...payload,
+    // Storage wins over the claim for everything that governs access. A token
+    // is a 12-hour snapshot; the database is the truth.
+    id: payload.id,
+    role: principal.baseRole,
+    roleKey: principal.roleKey,
+    branch: principal.branch,
+    restaurantId: principal.restaurantId
+  };
+  return principal;
+}
+
+function deny(res, error) {
+  const status = error?.status === 403 ? 403 : 401;
+  const message = status === 403
+    ? 'Insufficient permission'
+    : (error?.status === 401 && error.message ? error.message : 'Authentication required');
+  return res.status(status).json({message});
+}
 
 /**
  * Authenticate, and optionally authorise against a role list.
@@ -11,18 +68,118 @@ export const STAFF_ROLES = Object.freeze(['owner', 'manager', 'staff']);
  * account in the system, so `auth()` must NOT be used to guard anything
  * operational. Use `requireStaff()` for endpoints that are staff-only but not
  * role-specific.
+ *
+ * Phase 20: the role list is matched against the BASE role, so an existing
+ * `auth(['owner','manager'])` keeps behaving exactly as it did. A custom role
+ * additionally has to hold the endpoint's permission — see `requirePermission`.
  */
 export const auth = (roles = []) => async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1];
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload;
-    if (roles.length && !roles.includes(payload.role)) {
+    /**
+     * The role list is checked against the TOKEN's claim first, before the
+     * database is consulted, purely to preserve the historical status code:
+     * a role that is not permitted for this endpoint has always been 403,
+     * while a token that disagrees with storage has always been 401.
+     *
+     * This ordering cannot admit anyone it should not. `authenticate()` runs
+     * immediately afterwards and requires the claimed role to equal the stored
+     * role, so checking the claim here is equivalent to checking storage — it
+     * can only ever reject earlier, never grant.
+     */
+    const claimed = readClaim(req);
+    if (roles.length && claimed && !roles.includes(claimed.role)) {
+      return res.status(403).json({message: 'Insufficient permission'});
+    }
+
+    const principal = await authenticate(req);
+    if (roles.length && !roles.includes(principal.baseRole)) {
+      return res.status(403).json({message: 'Insufficient permission'});
+    }
+    /**
+     * FAIL CLOSED for custom roles.
+     *
+     * A custom role must not inherit its base role's reach simply because the
+     * legacy list admits that base. If a Cashier built on `staff` were let
+     * through every `auth(['owner','manager','staff'])` endpoint, it would
+     * hold refunds-adjacent surface, stock counts and goods receipt — the
+     * entire point of a narrow role would be gone.
+     *
+     * So a custom role is admitted ONLY through `requirePermission()`, which
+     * states exactly which permission an endpoint needs. An endpoint still
+     * guarded by a bare role list has not been classified yet and therefore
+     * refuses custom roles outright. That is deliberately conservative: the
+     * failure mode is "a custom role cannot reach something it maybe should",
+     * which an owner can see and report, rather than "a custom role silently
+     * reaches something it must not".
+     *
+     * The four built-in roles are unaffected, so no existing deployment
+     * changes behaviour.
+     */
+    if (principal.custom) {
+      return res.status(403).json({
+        message: 'Insufficient permission'
+      });
+    }
+    next();
+  } catch (error) {
+    return deny(res, error);
+  }
+};
+
+/**
+ * Authenticate only — no role or permission requirement.
+ *
+ * Used by `/me/permissions`, which every principal (riders included) must be
+ * able to read about THEMSELVES. Deliberately named so it can never be
+ * confused with the historical bare `auth()`, which a test forbids.
+ */
+export const authenticated = () => async (req, res, next) => {
+  try {
+    await authenticate(req);
+    next();
+  } catch (error) {
+    return deny(res, error);
+  }
+};
+
+/**
+ * Guard an endpoint by PERMISSION — the Phase 20 primitive.
+ *
+ * Authenticates, then requires the permission. An owner always passes. This is
+ * the authoritative control: the client hiding a button is presentation only.
+ */
+export const requirePermission = (...permissions) => async (req, res, next) => {
+  try {
+    let principal;
+    try {
+      principal = await authenticate(req);
+    } catch (error) {
+      /**
+       * Preserve the historical 401/403 split.
+       *
+       * A token whose claimed role is not a real role — the forged
+       * `role: 'guest'` several suites use to prove an endpoint is closed —
+       * must read as "you may not do this" (403), not "your session expired"
+       * (401). `authenticate()` raises 401 for that case because storage and
+       * claim disagree, so it is reclassified here.
+       *
+       * Only a role that does not exist at all is reclassified. A genuine
+       * demotion or a deactivated account still ends the session with 401,
+       * which is what the Phase 20 fix depends on.
+       */
+      const claimed = readClaim(req);
+      if (claimed && !BASE_ROLES.includes(claimed.role)) {
+        return res.status(403).json({message: 'Insufficient permission'});
+      }
+      throw error;
+    }
+    const allowed = permissions.some(permission => grants(principal, permission));
+    if (!allowed) {
       return res.status(403).json({message: 'Insufficient permission'});
     }
     next();
-  } catch {
-    return res.status(401).json({message: 'Authentication required'});
+  } catch (error) {
+    return deny(res, error);
   }
 };
 

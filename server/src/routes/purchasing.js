@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
 import {z} from 'zod';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {PurchaseOrder, SupplierInvoice} from '../models/operations.js';
 import {GoodsReceipt} from '../models/purchasing.js';
 
@@ -177,7 +177,7 @@ r.get('/purchase-order-branches', auth(['owner', 'manager', 'staff']), async (re
   }
 });
 
-r.post('/purchase-orders', auth(['owner', 'manager']), async (req, res) => {
+r.post('/purchase-orders', requirePermission('purchase.create'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const input = poCreateSchema.parse(req.body);
@@ -280,7 +280,7 @@ r.get('/purchase-orders/:id/approval-history', auth(['owner', 'manager', 'staff'
   }
 });
 
-r.patch('/purchase-orders/:id/status', auth(['owner', 'manager']), async (req, res) => {
+r.patch('/purchase-orders/:id/status', requirePermission('purchase.approve'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const body = poStatusSchema.parse(req.body);
@@ -860,7 +860,7 @@ r.get('/reports/purchasing', auth(['owner', 'manager']), async (req, res) => {
   }
 });
 
-r.get('/reports/pnl', auth(['owner', 'manager']), async (req, res) => {
+r.get('/reports/pnl', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildPnl({
       branchId: req.query.branch,
@@ -1114,7 +1114,7 @@ r.get('/purchasing/reorder-scheduler', auth(MGMT), async (req, res) => {
 // Read-only. Management only: these expose revenue, margin and customer data.
 // Every one is tenant- and branch-scoped through analyticsScope(), which reuses
 // the same guards purchasing uses.
-r.get('/reports/sales', auth(MGMT), async (req, res) => {
+r.get('/reports/sales', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildSalesReport({
       branchId: req.query.branch, user: req.user,
@@ -1123,7 +1123,7 @@ r.get('/reports/sales', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/inventory', auth(MGMT), async (req, res) => {
+r.get('/reports/inventory', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildInventoryReport({
       branchId: req.query.branch, user: req.user, from: req.query.from, to: req.query.to
@@ -1131,7 +1131,7 @@ r.get('/reports/inventory', auth(MGMT), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/reports/customers', auth(MGMT), async (req, res) => {
+r.get('/reports/customers', requirePermission('reports.view'), async (req, res) => {
   try {
     res.json(await buildCustomerReport({
       branchId: req.query.branch, user: req.user,

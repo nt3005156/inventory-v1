@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -12,6 +12,7 @@ import Reorder from './Reorder.jsx';
 import SupplierPerformance from './SupplierPerformance.jsx';
 import AnalyticsReports from './AnalyticsReports.jsx';
 import Exports from './Exports.jsx';
+import AccessControl from './AccessControl.jsx';
 import Dashboard from './Dashboard.jsx';
 import Ingredients from './Ingredients.jsx';
 import Recipes from './Recipes.jsx';
@@ -34,6 +35,9 @@ function App() {
   const [page, setPage] = useState('Dashboard');
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(false);
+  // Phase 20: the caller's real permissions, resolved server-side. Used only
+  // to decide what to SHOW; the backend enforces every one of them again.
+  const [permissions, setPermissions] = useState([]);
 
   const call = async (path, opts = {}) => {
     const {raw, ...init} = opts;
@@ -55,9 +59,16 @@ function App() {
     if (!token) return;
     setLoading(true);
     try {
-      const [menu, branches] = await Promise.all(['/menu-items', '/branches'].map(call));
+      const [menu, branches, me] = await Promise.all([
+        call('/menu-items'),
+        call('/branches'),
+        // A principal always has this; failing soft keeps the shell usable if
+        // an older server has not shipped the endpoint yet.
+        call('/me/permissions').catch(() => ({permissions: []}))
+      ]);
       // /menu-items is paginated ({items, pagination}); older builds returned a bare array.
       setData({menu: Array.isArray(menu) ? menu : (menu?.items || []), branches});
+      setPermissions(me?.permissions || []);
     } catch (e) {
       if (e.message === 'Authentication required') logout();
     } finally {
@@ -93,6 +104,10 @@ function App() {
     return <RiderApp call={call} user={user} token={token} onLogout={logout}/>;
   }
 
+  // An owner is unrestricted, so the nav must not hide anything from them
+  // even before /me/permissions resolves.
+  const can = key => user?.role === 'owner' || permissions.includes(key);
+
   const nav = [
     ['Dashboard', LayoutDashboard],
     ['Inventory', Package],
@@ -103,7 +118,7 @@ function App() {
     ['Reorder', PackageSearch],
     ['Supplier Performance', Gauge],
     ['Reports', BarChart3],
-    ...(user?.role !== 'staff' ? [['Exports', Download]] : []),
+    ...(can('reports.export') ? [['Exports', Download]] : []),
     ['Expenses', Receipt],
     ['Supplier Catalog', ShoppingCart],
     ['Tables', Armchair],
@@ -113,7 +128,8 @@ function App() {
     ['POS', ChefHat],
     ['POS Admin', ClipboardList],
     ['KDS', UtensilsCrossed],
-    ...(user?.role !== 'staff' ? [['Month Close', CalendarCheck2]] : []),
+    ...(can('monthclose.manage') ? [['Month Close', CalendarCheck2]] : []),
+    ...(can('users.manage') || can('roles.manage') ? [['Access Control', ShieldCheck]] : []),
     ['Analytics', BarChart3]
   ];
 
@@ -137,7 +153,9 @@ function App() {
           </div>
           <div className="date">Aaja · {new Date().toLocaleDateString('en-NP', {dateStyle: 'full'})}</div>
         </header>
-        {loading ? <p>Updating live data…</p> : <Page page={page} data={data} call={call} user={user} token={token}/>}
+        {loading
+          ? <p>Updating live data…</p>
+          : <Page page={page} data={data} call={call} user={user} token={token} permissions={permissions}/>}
       </main>
     </div>
   );
@@ -176,7 +194,7 @@ function Login({onLogin}) {
   );
 }
 
-function Page({page, data, call, user, token}) {
+function Page({page, data, call, user, token, permissions = []}) {
   const branches = data.branches || [];
   if (page === 'Dashboard') return <Dashboard call={call} branches={branches} user={user}/>;
   if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user} token={token}/>;
@@ -195,6 +213,12 @@ function Page({page, data, call, user, token}) {
   if (page === 'Supplier Performance') return <SupplierPerformance call={call} branches={branches} user={user}/>;
   if (page === 'Reports') return <AnalyticsReports call={call} branches={branches} user={user}/>;
   if (page === 'Exports') return <Exports call={call} token={token} user={user} apiBase={API}/>;
+  if (page === 'Access Control') {
+    const effective = user?.role === 'owner' && permissions.length === 0
+      ? ['users.manage', 'roles.manage']
+      : permissions;
+    return <AccessControl call={call} user={user} permissions={effective}/>;
+  }
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;

@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import operations from '../src/routes/operations.js';
 import exportsRouter from '../src/routes/exports.js';
+import rbacRouter from '../src/routes/rbac.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
@@ -51,6 +52,7 @@ export async function startTestApp() {
     app.use('/api', accountsRouter);
     app.use('/api', customersRouter);
     app.use('/api', deliveriesRouter);
+    app.use('/api', rbacRouter);
     app.use('/api', exportsRouter);
     app.use('/api', operations);
     app.use('/api', supplierCatalog);

@@ -1,6 +1,6 @@
 import {Router} from 'express';
 import mongoose from 'mongoose';
-import {auth} from '../middleware/auth.js';
+import {auth, requirePermission} from '../middleware/auth.js';
 import {Audit} from '../models/index.js';
 import {Restaurant} from '../models/operations.js';
 import {
@@ -83,7 +83,7 @@ async function recordExport({req, kind, target, format, scope, extra = {}}) {
 
 // ── catalogue ────────────────────────────────────────────────────────────────
 
-r.get('/exports/datasets', auth(MGMT), async (req, res) => {
+r.get('/exports/datasets', requirePermission('reports.export'), async (req, res) => {
   try {
     res.json({
       datasets: availableDatasets(req.user),
@@ -99,7 +99,7 @@ r.get('/exports/datasets', auth(MGMT), async (req, res) => {
  * `:dataset.:format` rather than a `?format=` query so the URL a browser
  * downloads already carries a sensible extension.
  */
-r.get(`/exports/:dataset(${EXPORT_DATASET_KEYS.join('|')}).:format`, auth(MGMT), async (req, res) => {
+r.get(`/exports/:dataset(${EXPORT_DATASET_KEYS.join('|')}).:format`, requirePermission('reports.export'), async (req, res) => {
   try {
     const format = assertExportFormat(req.params.format);
     const prepared = await prepareExport({
@@ -132,7 +132,7 @@ r.get(`/exports/:dataset(${EXPORT_DATASET_KEYS.join('|')}).:format`, auth(MGMT),
  * which already transacts, pins `invoicedTotal` and writes the audit row. This
  * endpoint renders what exists — an un-invoiced order prints as a receipt.
  */
-r.get('/exports/invoices/:orderId.pdf', auth(['owner', 'manager', 'staff']), async (req, res) => {
+r.get('/exports/invoices/:orderId.pdf', requirePermission('invoices.issue'), async (req, res) => {
   try {
     const receipt = await getReceipt({orderId: req.params.orderId, user: req.user, issue: false});
     await Audit.create({
@@ -149,7 +149,7 @@ r.get('/exports/invoices/:orderId.pdf', auth(['owner', 'manager', 'staff']), asy
   } catch (e) { fail(res, e); }
 });
 
-r.get('/exports/statements/:supplierId.pdf', auth(MGMT), async (req, res) => {
+r.get('/exports/statements/:supplierId.pdf', requirePermission('reports.export'), async (req, res) => {
   try {
     const statement = await buildSupplierStatement({
       supplierId: req.params.supplierId,
@@ -190,7 +190,7 @@ const REPORT_PACKS = Object.freeze({
   full: {title: 'Management Report Pack', parts: ['pnl', 'sales', 'inventory', 'customers']}
 });
 
-r.get(`/exports/reports/:report(${Object.keys(REPORT_PACKS).join('|')}).pdf`, auth(MGMT), async (req, res) => {
+r.get(`/exports/reports/:report(${Object.keys(REPORT_PACKS).join('|')}).pdf`, requirePermission('reports.export'), async (req, res) => {
   try {
     const pack = REPORT_PACKS[req.params.report];
     const scope = await analyticsScope({branchId: req.query.branch, user: req.user});
