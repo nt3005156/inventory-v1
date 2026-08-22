@@ -49,7 +49,9 @@ const ROLES = {
   roles: [
     {key: 'owner', name: 'Owner', baseRole: 'owner', permissions: [], builtin: true, unrestricted: true, assignedCount: 1},
     {key: 'manager', name: 'Manager', baseRole: 'manager', permissions: ['reports.view'], builtin: true, assignedCount: 2},
-    {key: 'cashier', name: 'Cashier', baseRole: 'staff', permissions: ['orders.create', 'payments.take'], builtin: false, assignedCount: 3}
+    {key: 'cashier', name: 'Cashier', baseRole: 'staff', permissions: ['orders.create', 'payments.take'], builtin: false, assignedCount: 3},
+    // A second staff-based built-in, so reassignment has a valid target.
+    {key: 'staff', name: 'Staff', baseRole: 'staff', permissions: ['orders.view'], builtin: true, assignedCount: 4}
   ],
   permissions: [
     {key: 'orders.create', group: 'Orders', label: 'Create and edit orders'},
@@ -343,5 +345,104 @@ describe('Access control screen', () => {
     assert.equal(findButton('Deactivate'), undefined);
     // The roster itself is still readable.
     assert.match(container.textContent, /People/);
+  });
+
+  it('shows built-in roles as protected system roles with no delete control', async () => {
+    await render({});
+    const rows = [...container.querySelectorAll('tbody tr')];
+    const ownerRow = rows.find(row => row.textContent.includes('Owner'));
+    assert.match(ownerRow.textContent, /system role/i);
+    assert.match(ownerRow.textContent, /protected/i);
+    assert.equal([...ownerRow.querySelectorAll('button')].some(b => b.textContent === 'Delete'), false);
+  });
+
+  it('requires confirmation before deleting an unused role', async () => {
+    const log = [];
+    // Override /roles so the cashier role has no holders.
+    const unheld = {
+      ...ROLES,
+      roles: ROLES.roles.map(role => role.key === 'cashier' ? {...role, assignedCount: 0} : role)
+    };
+    await render({call: makeCall({'/roles': unheld}, log)});
+    await click(findButton('Delete'));
+    // The first click only asks; nothing must be sent.
+    assert.equal(log.filter(e => e.options.method === 'DELETE').length, 0);
+    assert.match(container.textContent, /Nobody holds it/i);
+
+    await click(findButton('Confirm delete'));
+    const del = log.find(e => e.options.method === 'DELETE');
+    assert.ok(del, 'expected the DELETE after confirming');
+    assert.equal(del.path, '/roles/cashier');
+  });
+
+  it('demands a reassignment target when the role is still held', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    // CATALOGUE gives cashier assignedCount 3.
+    await click(findButton('Delete'));
+    assert.match(container.textContent, /3 account\(s\) hold/i);
+    // No plain confirm button while holders exist — a target must be chosen.
+    assert.equal(findButton('Confirm delete'), undefined);
+
+    const select = container.querySelector('select[aria-label="Reassign Cashier to"]');
+    assert.ok(select, 'expected a reassignment picker');
+    // Only same-base-role, non-owner options may be offered.
+    const values = [...select.options].map(option => option.value).filter(Boolean);
+    assert.ok(!values.includes('owner'));
+    assert.ok(!values.includes('manager'), 'a manager-based role must not be offered for a staff role');
+    assert.ok(values.includes('staff'));
+
+    await setValue(select, 'staff');
+    await click(findButton('Reassign and delete'));
+    const del = log.find(e => e.options.method === 'DELETE');
+    assert.equal(del.path, '/roles/cashier?reassignTo=staff');
+  });
+
+  it('surfaces an API refusal to delete a role in use', async () => {
+    const call = async (path, options = {}) => {
+      if (options.method === 'DELETE') {
+        throw new Error('3 account(s) still hold this role. Reassign them first.');
+      }
+      return makeCall({}, [])(path, options);
+    };
+    await render({call});
+    await click(findButton('Delete'));
+    await setValue(container.querySelector('select[aria-label="Reassign Cashier to"]'), 'staff');
+    await click(findButton('Reassign and delete'));
+    assert.match(container.textContent, /still hold this role/);
+  });
+
+  it('resets a password without ever echoing it back', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await click(findButton('Reset password'));
+    const input = container.querySelector('input[aria-label="New password for Sita Rai"]');
+    assert.ok(input);
+    assert.equal(input.type, 'password', 'the field must be masked');
+
+    await setValue(input, 'BrandNewP4ssword');
+    await click(findButton('Set password'));
+
+    const post = log.find(e => e.path === '/accounts/u1/password');
+    assert.ok(post, 'expected the reset POST');
+    assert.equal(JSON.parse(post.options.body).password, 'BrandNewP4ssword');
+    // After the reset the field is cleared and the plaintext is not rendered.
+    assert.doesNotMatch(container.textContent, /BrandNewP4ssword/);
+    assert.match(container.textContent, /sessions have ended/i);
+  });
+
+  it('will not submit a password shorter than the policy minimum', async () => {
+    const log = [];
+    await render({call: makeCall({}, log)});
+    await click(findButton('Reset password'));
+    await setValue(container.querySelector('input[aria-label="New password for Sita Rai"]'), 'short');
+    const submit = findButton('Set password');
+    assert.equal(submit.disabled, true, 'a too-short password must not be submittable');
+    assert.equal(log.filter(e => e.path === '/accounts/u1/password').length, 0);
+  });
+
+  it('hides password reset without users.password', async () => {
+    await render({permissions: ['users.manage'], user: {role: 'manager', name: 'M'}});
+    assert.equal(findButton('Reset password'), undefined);
   });
 });

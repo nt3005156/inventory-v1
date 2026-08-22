@@ -49,6 +49,9 @@ export async function startTestApp() {
     try {
       const {ensureStockTransferIndexes} = await import('../src/services/stockTransferMigration.js');
       await ensureStockTransferIndexes();
+      // Per-device sessions need the unique sessionHash index in tests too.
+      const {ensureSessionIndexes} = await import('../src/services/sessionMigration.js');
+      await ensureSessionIndexes();
     } catch {}
   }
   if (!server) {

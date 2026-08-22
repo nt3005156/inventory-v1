@@ -229,7 +229,7 @@ export async function updateRole({user, principal, key, input}) {
   return roleView(role, {assignedCount});
 }
 
-export async function deleteRole({user, key}) {
+export async function deleteRole({user, key, reassignTo = null}) {
   const {restaurantId} = await userRestaurantContext(user);
   const roleKey = clean(key).toLowerCase();
   if (BUILTIN_ROLE_KEYS.includes(roleKey)) {
@@ -238,14 +238,67 @@ export async function deleteRole({user, key}) {
   const role = await Role.findOne({restaurant: restaurantId, key: roleKey});
   if (!role) throw httpError('Role not found', 404);
 
-  // Deleting a role out from under its holders would lock them out with no
-  // trace of what they used to be able to do.
-  const holders = await User.countDocuments({restaurantId, roleKey});
-  if (holders > 0) {
-    throw httpError(
-      `${holders} account(s) still hold this role. Reassign them first.`,
-      409
-    );
+  /**
+   * Deleting a role out from under its holders would leave them pointing at a
+   * role that no longer resolves — `resolvePrincipal()` refuses that, so they
+   * would be locked out with no record of what they used to be able to do.
+   *
+   * Two safe outcomes are offered, and the caller must pick one explicitly:
+   *
+   *   • refuse (default) — the operator reassigns people first;
+   *   • reassign — move every holder to `reassignTo` in the same operation,
+   *     so no account is ever left with a dangling role reference.
+   *
+   * `reassignTo` is validated exactly like an assignment: it must exist, be
+   * active, share the outgoing role's base role (so nobody silently changes
+   * tenancy regime), and never be `owner`.
+   */
+  const holderDocs = await User.find({restaurantId, roleKey}).select('_id name email role').lean();
+  if (holderDocs.length > 0) {
+    if (!reassignTo) {
+      throw httpError(
+        `${holderDocs.length} account(s) still hold this role. Reassign them first.`,
+        409
+      );
+    }
+    const targetKey = clean(reassignTo).toLowerCase();
+    if (targetKey === roleKey) throw httpError('Choose a different role to reassign to', 400);
+    if (targetKey === 'owner') {
+      throw httpError('Accounts cannot be reassigned to the owner role', 403);
+    }
+
+    let nextRole;
+    let nextRoleKey;
+    if (BUILTIN_ROLE_KEYS.includes(targetKey)) {
+      nextRole = targetKey;
+      nextRoleKey = null;
+    } else {
+      const target = await Role.findOne({restaurant: restaurantId, key: targetKey}).lean();
+      if (!target) throw httpError('Replacement role not found', 404);
+      if (target.active === false) throw httpError('The replacement role is not active', 409);
+      nextRole = target.baseRole;
+      nextRoleKey = target.key;
+    }
+    if (nextRole !== role.baseRole) {
+      throw httpError(
+        `The replacement role must be based on '${role.baseRole}' so nobody changes access regime silently`,
+        409
+      );
+    }
+
+    await User.updateMany({restaurantId, roleKey}, {$set: {role: nextRole, roleKey: nextRoleKey}});
+    for (const holder of holderDocs) {
+      await Audit.create({
+        entity: 'user', entityId: holder._id, restaurant: restaurantId,
+        action: 'user_role_assigned',
+        before: {role: holder.role, roleKey},
+        after: {role: nextRole, roleKey: nextRoleKey, reason: 'role_deleted_reassignment'},
+        user: user.id
+      });
+      // Their permissions changed, so cached role data and live sockets must
+      // both be brought up to date immediately.
+      await refreshUserAccess({userId: holder._id, reason: 'role_changed'});
+    }
   }
 
   await Role.deleteOne({_id: role._id});
@@ -254,9 +307,10 @@ export async function deleteRole({user, key}) {
     entity: 'role', entityId: role._id, restaurant: restaurantId,
     action: 'role_deleted',
     before: {key: role.key, name: role.name, permissions: [...role.permissions]},
+    after: {reassignedTo: reassignTo || null, reassignedCount: holderDocs.length},
     user: user.id
   });
-  return {deleted: true, key: role.key};
+  return {deleted: true, key: role.key, reassigned: holderDocs.length};
 }
 
 /**

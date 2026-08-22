@@ -102,7 +102,13 @@ r.patch('/roles/:key', requirePermission('roles.manage'), async (req, res) => {
 
 r.delete('/roles/:key', requirePermission('roles.manage'), async (req, res) => {
   try {
-    res.json(await deleteRole({user: req.user, key: req.params.key}));
+    // `reassignTo` opts into moving every holder in the same operation. Without
+    // it a role still in use is refused, so nobody is ever left pointing at a
+    // role that no longer resolves.
+    res.json(await deleteRole({
+      user: req.user, key: req.params.key,
+      reassignTo: req.query.reassignTo || req.body?.reassignTo || null
+    }));
   } catch (e) { fail(res, e); }
 });
 

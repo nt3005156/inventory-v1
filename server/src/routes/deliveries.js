@@ -11,7 +11,7 @@
  */
 import {Router} from 'express';
 import {z} from 'zod';
-import {auth, requirePermission} from '../middleware/auth.js';
+import {auth, requirePermission, requireSelfScopedPermission} from '../middleware/auth.js';
 import {RIDER_VEHICLES} from '../models/index.js';
 import {
   assignRider,
@@ -58,13 +58,17 @@ const DELIVERY_STATUSES = [
 /**
  * The rider's own workspace.
  *
- * Guarded by `deliveries.ride` so a custom rider-based role works. An OWNER
- * also passes, because an owner implicitly holds every permission — that is
- * harmless here: every one of these handlers resolves deliveries by
- * `user.id`, so an owner sees their own (empty) list rather than anybody
- * else's. The tenancy boundary is in the handler, not the guard.
+ * Guarded by `requireSelfScopedPermission('deliveries.ride')`, which requires
+ * the permission to be EXPLICITLY held rather than inherited. An owner's
+ * implicit `*` does not open this surface: these endpoints act on "my own"
+ * deliveries, and a non-rider has nothing of their own here. Verified before
+ * the change that an owner previously received 200 and a synthesised rider
+ * profile from the dashboard.
+ *
+ * Self-scope is unchanged: every handler still resolves by `user.id`, so one
+ * rider can never see another's work.
  */
-r.get('/deliveries/mine/dashboard', requirePermission('deliveries.ride'), async (req, res) => {
+r.get('/deliveries/mine/dashboard', requireSelfScopedPermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await riderDashboard({user: req.user}));
   } catch (e) {
@@ -72,7 +76,7 @@ r.get('/deliveries/mine/dashboard', requirePermission('deliveries.ride'), async 
   }
 });
 
-r.get('/deliveries/mine', requirePermission('deliveries.ride'), async (req, res) => {
+r.get('/deliveries/mine', requireSelfScopedPermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await listRiderDeliveries({
       user: req.user, includeCompleted: req.query.includeCompleted === 'true'
@@ -82,7 +86,7 @@ r.get('/deliveries/mine', requirePermission('deliveries.ride'), async (req, res)
   }
 });
 
-r.patch('/deliveries/mine/availability', requirePermission('deliveries.ride'), async (req, res) => {
+r.patch('/deliveries/mine/availability', requireSelfScopedPermission('deliveries.ride'), async (req, res) => {
   try {
     const body = z.object({available: z.boolean()}).strict().parse(req.body || {});
     const rider = await setOwnAvailability({user: req.user, available: body.available});
@@ -92,7 +96,7 @@ r.patch('/deliveries/mine/availability', requirePermission('deliveries.ride'), a
   }
 });
 
-r.get('/deliveries/mine/:id', requirePermission('deliveries.ride'), async (req, res) => {
+r.get('/deliveries/mine/:id', requireSelfScopedPermission('deliveries.ride'), async (req, res) => {
   try {
     res.json(await getDeliveryForRider({user: req.user, deliveryId: req.params.id}));
   } catch (e) {

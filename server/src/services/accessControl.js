@@ -1,5 +1,6 @@
 import {Role, User} from '../models/index.js';
 import {invalidateRole, withRoleCache} from './principalCache.js';
+import {assertSessionLive} from './sessions.js';
 import {
   ALL_PERMISSIONS, BUILTIN_ROLES, grants, permissionsForBuiltin
 } from './permissions.js';
@@ -64,6 +65,23 @@ export async function resolvePrincipal(tokenUser, {session} = {}) {
   if (tokenVersion !== resolved.sessionVersion) {
     throw httpError('This session has been signed out. Sign in again.', 401);
   }
+
+  /**
+   * PER-DEVICE revocation.
+   *
+   * `sessionVersion` above ends every session at once. This checks the ONE
+   * device: the token carries an opaque `sid` whose hash is stored, and a
+   * revoked or expired row fails here while the user's other devices keep
+   * working. A token minted before per-device sessions existed carries no
+   * `sid` and is accepted — it stays covered by the version check — so
+   * shipping this does not sign everybody out.
+   */
+  const {legacy, session: deviceSession} = await assertSessionLive(tokenUser.sid);
+  if (!legacy && !deviceSession) {
+    throw httpError('This session has been signed out. Sign in again.', 401);
+  }
+  resolved.sessionId = deviceSession ? String(deviceSession._id) : null;
+
   return resolved;
 }
 

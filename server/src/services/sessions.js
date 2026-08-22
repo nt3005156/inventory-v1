@@ -1,4 +1,5 @@
-import {Audit, User} from '../models/index.js';
+import {createHash, randomBytes} from 'node:crypto';
+import {Audit, User, UserSession} from '../models/index.js';
 import {invalidateAllRoles} from './principalCache.js';
 import {disconnectUserSockets, refreshUserSockets} from './realtime.js';
 
@@ -23,6 +24,8 @@ import {disconnectUserSockets, refreshUserSockets} from './realtime.js';
  * any live Socket.IO connection, so HTTP, cache and socket state cannot drift
  * apart.
  */
+
+const clean = value => String(value ?? '').trim();
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), {status});
@@ -60,6 +63,8 @@ export async function revokeUserSessions({
   // first; only then is the cached copy dropped. Doing it the other way round
   // leaves a window where a concurrent request repopulates the cache from
   // pre-bump state.
+
+  await revokeAllDeviceSessions({userId, actor, reason, session});
 
   await Audit.create([{
     entity: 'user',
@@ -103,6 +108,113 @@ export async function refreshRoleHolders({restaurantId, roleKey, reason = 'role_
     try { await refreshUserSockets(String(holder._id), reason); } catch { /* not fatal */ }
   }
   return holders.length;
+}
+
+
+// ── per-device sessions ──────────────────────────────────────────────────────
+
+/** Session ids are opaque randoms; only the hash is ever persisted. */
+export const hashSessionId = value => createHash('sha256').update(String(value)).digest('hex');
+
+export const TOKEN_TTL_HOURS = 12;
+
+/**
+ * Mint a session row for one device and return the plaintext id for the JWT.
+ *
+ * The caller puts `sid` in the token. Nothing reversible is stored, so a
+ * database leak cannot be replayed as a session.
+ */
+export async function createDeviceSession({user, label, userAgent, ip}) {
+  const sessionId = randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + TOKEN_TTL_HOURS * 3600 * 1000);
+  await UserSession.create({
+    user: user._id,
+    restaurant: user.restaurantId || null,
+    sessionHash: hashSessionId(sessionId),
+    label: clean(label).slice(0, 120) || 'Unnamed device',
+    userAgent: clean(userAgent).slice(0, 300) || undefined,
+    ip: clean(ip).slice(0, 60) || undefined,
+    expiresAt
+  });
+  return {sessionId, expiresAt};
+}
+
+/**
+ * Is this session still usable?
+ *
+ * Returns the row when live, `null` when revoked, expired or unknown. A token
+ * with no `sid` (minted before per-device sessions existed) is accepted and
+ * reported as `legacy`, so shipping this does not sign everybody out; those
+ * tokens remain covered by `sessionVersion`.
+ */
+export async function assertSessionLive(sessionId) {
+  if (!sessionId) return {legacy: true, session: null};
+  const session = await UserSession.findOne({sessionHash: hashSessionId(sessionId)}).lean();
+  if (!session) return {legacy: false, session: null};
+  if (session.revokedAt) return {legacy: false, session: null};
+  if (session.expiresAt && session.expiresAt.getTime() <= Date.now()) return {legacy: false, session: null};
+  return {legacy: false, session};
+}
+
+/** Sessions for one user, newest first. Never exposes the hash. */
+export async function listUserSessions({userId, includeRevoked = false}) {
+  const match = {user: userId};
+  if (!includeRevoked) match.revokedAt = null;
+  const rows = await UserSession.find(match).sort({createdAt: -1}).limit(50).lean();
+  return rows.map(row => ({
+    id: String(row._id),
+    label: row.label,
+    userAgent: row.userAgent || null,
+    createdAt: row.createdAt,
+    lastSeenAt: row.lastSeenAt,
+    expiresAt: row.expiresAt,
+    revokedAt: row.revokedAt,
+    active: !row.revokedAt && row.expiresAt > new Date()
+  }));
+}
+
+/**
+ * Revoke ONE device session, leaving the user's other devices working.
+ *
+ * `ownerId` is the user the session must belong to. It is always the
+ * authenticated caller (or an administrator's explicit target), so one user
+ * can never revoke another's session by guessing an id — the query is scoped
+ * by user, and a mismatch is a 404 rather than a leak that the id exists.
+ */
+export async function revokeDeviceSession({sessionRowId, ownerId, actor, reason = 'logout'}) {
+  const session = await UserSession.findOne({_id: sessionRowId, user: ownerId});
+  if (!session) throw httpError('Session not found', 404);
+  if (session.revokedAt) return {alreadyRevoked: true, id: String(session._id)};
+
+  session.revokedAt = new Date();
+  session.revokedBy = actor?.id || ownerId;
+  session.revokedReason = reason;
+  await session.save();
+
+  await Audit.create({
+    entity: 'user',
+    entityId: ownerId,
+    restaurant: session.restaurant || null,
+    action: 'session_device_revoked',
+    after: {sessionId: String(session._id), label: session.label, reason},
+    user: actor?.id || ownerId
+  });
+
+  // The socket for this device cannot be identified individually, so live
+  // sockets are re-authorised: any whose session is now dead is dropped by the
+  // handshake-equivalent check in refreshUserSockets().
+  try { await refreshUserSockets(String(ownerId), reason); } catch { /* not fatal */ }
+  return {alreadyRevoked: false, id: String(session._id)};
+}
+
+/** Mark every session for a user revoked. Used alongside a version bump. */
+export async function revokeAllDeviceSessions({userId, actor, reason, session = null}) {
+  const result = await UserSession.updateMany(
+    {user: userId, revokedAt: null},
+    {$set: {revokedAt: new Date(), revokedBy: actor?.id || userId, revokedReason: reason}},
+    {session: session || null}
+  );
+  return result.modifiedCount || 0;
 }
 
 /** The version a freshly minted token must carry. */

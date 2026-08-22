@@ -184,6 +184,49 @@ export const requirePermission = (...permissions) => async (req, res, next) => {
 };
 
 /**
+ * Guard a SELF-SCOPED endpoint: the permission must be EXPLICITLY held.
+ *
+ * `requirePermission()` lets an owner through everything, because an owner
+ * implicitly holds `*`. That is right for administrative capability, and
+ * wrong for an endpoint that operates on "my own" records.
+ *
+ * PROVEN before this was added: `GET /api/deliveries/mine/dashboard` returned
+ * 200 to an owner with a synthesised rider profile built from their own user
+ * document, and `/deliveries/mine` returned an empty list rather than a
+ * refusal. No other rider's data leaked — the handlers scope by `user.id` —
+ * but an owner was still transacting against a rider-private surface, and
+ * `PATCH /deliveries/mine/availability` reached the service before failing
+ * 404 "Rider not found". A principal who is not a rider has no business
+ * inside the rider workspace at all.
+ *
+ * So this guard requires the permission to come from the principal's OWN
+ * role bundle and refuses the owner's implicit grant. Checking the permission
+ * Set alone is not sufficient: `resolvePrincipal()` materialises the full
+ * catalogue into an owner's Set, so `.has('deliveries.ride')` is true for
+ * them — verified. The owner is therefore excluded explicitly, and the base
+ * role must be one the capability actually belongs to.
+ *
+ * `selfScopeRoles` names the base roles for which the endpoint is meaningful.
+ * A custom role built on one of them, and explicitly granted the permission,
+ * is admitted — so a tenant-defined "Courier" works exactly like a rider.
+ */
+export const requireSelfScopedPermission = (permission, {
+  selfScopeRoles = ['rider']
+} = {}) => async (req, res, next) => {
+  try {
+    const principal = await authenticate(req);
+    const held = Boolean(principal.permissions?.has?.(permission));
+    const inScope = selfScopeRoles.includes(principal.baseRole);
+    if (!held || !inScope) {
+      return res.status(403).json({message: 'Insufficient permission'});
+    }
+    next();
+  } catch (error) {
+    return deny(res, error);
+  }
+};
+
+/**
  * Any restaurant employee, but never a rider.
  *
  * Introduced because adding the rider role would otherwise have silently

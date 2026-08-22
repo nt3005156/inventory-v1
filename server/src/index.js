@@ -1,7 +1,7 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import cors from 'cors';
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth,requireStaff,requirePermission} from './middleware/auth.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -43,6 +43,7 @@ async function shutdown(signal){
   const force=setTimeout(()=>process.exit(1),10000);force.unref();
   try{
     await stopReorderScheduler();
+    await stopRoleChangeStream();
     await closeRealtime();
     if(httpServer.listening)await new Promise((resolve,reject)=>httpServer.close(error=>error?reject(error):resolve()));
     if(mongoose.connection.readyState)await mongoose.disconnect();
@@ -60,6 +61,9 @@ async function start(){
   // Phase 16A: opt-in scheduled reorder sweep. Disabled unless
   // REORDER_SCHEDULER_ENABLED is set, and it never blocks startup.
   try{startReorderScheduler();}catch(error){console.error('Reorder scheduler failed to start',error);}
+  // Cross-instance role-cache invalidation. Optional: losing it degrades to
+  // the 5s TTL, so a failure must never stop the API booting.
+  try{await startRoleChangeStream();}catch(error){console.error('Role change stream failed to start',error);}
   startupReady=true;
   const port=Number(process.env.PORT||4000);
   await new Promise((resolve,reject)=>{httpServer.once('error',reject);httpServer.listen(port,'0.0.0.0',()=>{httpServer.off('error',reject);resolve()})});

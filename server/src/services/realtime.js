@@ -295,6 +295,31 @@ export async function closeRealtime() {
 }
 
 /**
+ * Push-based socket authorisation refresh.
+ *
+ * SCOPE — SINGLE INSTANCE ONLY, stated plainly because it matters.
+ *
+ * `io.fetchSockets()` and `io.sockets.sockets` see only the connections held
+ * by THIS process. There is no Redis, no Socket.IO adapter and no pub/sub in
+ * this repository, so a role change served by instance A cannot reach a socket
+ * held by instance B. Running more than one API process therefore leaves that
+ * socket with its old rooms until it reconnects or the branch it sits in next
+ * publishes an event, at which point `evictStaleBranchSockets()` revalidates
+ * it lazily.
+ *
+ * No fake distributed guarantee is implied. Closing this properly needs a
+ * shared adapter (`@socket.io/redis-adapter` or the Mongo equivalent), which
+ * is infrastructure this deployment does not have. What IS implemented is the
+ * strongest safe single-instance behaviour: an immediate push on the instance
+ * that served the write, plus the pre-existing lazy revalidation on delivery
+ * that covers every instance.
+ *
+ * HTTP authorisation is unaffected either way — it resolves from the database
+ * on every request, so a stale socket can never grant an action, only receive
+ * events it should no longer see.
+ */
+
+/**
  * Phase 17 — push-based socket authorisation refresh.
  *
  * `evictStaleBranchSockets()` above is LAZY: it revalidates a branch room only

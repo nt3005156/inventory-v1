@@ -466,16 +466,31 @@ describe('Phase 17 · JWT/session revocation', () => {
 
     const out = await request('/api/auth/logout', {method: 'POST', token});
     assert.equal(out.status, 200);
-    assert.equal(out.body.sessionVersion, 1);
+    // Logout now defaults to THIS DEVICE, so it revokes the session row rather
+    // than bumping the global version. The security outcome asserted below is
+    // unchanged: this token stops working immediately. The all-devices form is
+    // exercised separately.
+    assert.equal(out.body.scope, 'device');
 
     const after = await request('/api/me/permissions', {token});
     assert.equal(after.status, 401, 'the revoked token must stop working');
     assert.match(after.body.message, /signed out/i);
 
-    // The database records the bump, and a new login mints a usable token.
+    // DATABASE: the device row is marked revoked, and a new login still works.
+    const {UserSession} = await import('../src/models/index.js');
     const stored = await User.findOne({email: 'sess1@p17.test'}).lean();
-    assert.equal(stored.sessionVersion, 1);
-    assert.ok(stored.sessionsRevokedAt instanceof Date);
+    assert.equal(await UserSession.countDocuments({user: stored._id, revokedAt: {$ne: null}}), 1);
+
+    // An explicit all-devices logout still bumps the version.
+    const third = await login('sess1@p17.test');
+    const globalOut = await request('/api/auth/logout', {
+      method: 'POST', token: third.body.token, body: {allDevices: true}
+    });
+    assert.equal(globalOut.body.scope, 'all');
+    assert.equal(globalOut.body.sessionVersion, 1);
+    const bumped = await User.findOne({email: 'sess1@p17.test'}).lean();
+    assert.equal(bumped.sessionVersion, 1);
+    assert.ok(bumped.sessionsRevokedAt instanceof Date);
 
     const second = await login('sess1@p17.test');
     assert.equal(second.status, 200);

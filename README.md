@@ -370,6 +370,23 @@ Deactivation (`users.deactivate`) is immediate and total: the account fails logi
 tokens stop working, and its live sockets are disconnected. Reactivation does **not** resurrect
 old tokens.
 
+### Rider self-scope
+
+The four rider-workspace endpoints (`/deliveries/mine*`) use
+`requireSelfScopedPermission('deliveries.ride')` rather than
+`requirePermission`. The difference matters: `requirePermission` admits an
+owner because an owner implicitly holds every permission, and before this was
+fixed `GET /deliveries/mine/dashboard` returned 200 to an owner with a rider
+profile synthesised from their own user document. No other rider's data leaked
+— the handlers scope by `user.id` — but a non-rider had no business there.
+
+The self-scoped guard requires the permission to come from the principal's own
+bundle **and** the base role to be one the capability belongs to, so an owner,
+manager or staff member is refused while a built-in rider or a custom
+rider-based role (a "Courier") is served. `PATCH /deliveries/:id/status` is
+genuinely dual-audience and remains on `requirePermission('deliveries.dispatch',
+'deliveries.ride')`; the service decides what each principal may set.
+
 ### Token and session invalidation
 
 Every JWT carries `sv`, the user's `sessionVersion` at sign-in. The guard compares it to the
@@ -381,12 +398,35 @@ Sessions are revoked on: logout (`POST /api/auth/logout`), password reset, deact
 explicitly by an administrator. Role and branch reassignment refreshes access *without* signing
 the person out — they are still employed — but their sockets are re-authorised in place.
 
-**Limitation:** the counter cannot express per-device logout. Signing out ends every session for
-that user. Per-device revocation needs a session identifier in the claim and a per-session
-record, which is a larger change than this cycle made.
-
 Tokens minted before `sv` existed are treated as version 0, so shipping this did not sign
 everyone out.
+
+### Per-device sessions
+
+`sessionVersion` gives global revocation; it cannot express "sign this phone out and leave the
+till running". Each login therefore also mints a `UserSession` row and puts an opaque random
+`sid` in the JWT. **Only the SHA-256 hash of that id is stored** — a leaked database yields no
+usable session credential — and the row carries `expiresAt` with a TTL index, so the collection
+is self-pruning and bounded.
+
+| Endpoint | Effect |
+|---|---|
+| `POST /api/auth/logout` | Ends **this device** only. Other devices keep working. |
+| `POST /api/auth/logout` with `{"allDevices": true}` | Bumps `sessionVersion`; ends everything. |
+| `GET /api/auth/sessions` | The caller's own devices. Never exposes a hash. |
+| `DELETE /api/auth/sessions/:id` | Revokes one named device. |
+
+Revoking is always scoped to the authenticated user, so one user cannot end another's session by
+guessing an id — a mismatch is a 404, which also avoids confirming the id exists. Revoked rows
+are kept, not deleted, so the trail survives until the TTL removes them. Deactivation and
+password reset revoke every device row **and** bump the version.
+
+A token with no `sid` (minted before this shipped) is accepted and stays covered by the version
+check; logging such a token out falls back to a global sign-out rather than silently doing
+nothing.
+
+**Limitation:** a device is identified by its session row, not by hardware. Two logins from the
+same browser are two sessions.
 
 ### Socket.IO authorization
 
@@ -398,6 +438,14 @@ When a role, permission set or branch assignment changes, the write pushes the c
 connections: rooms the user no longer qualifies for are left, management rooms are gained or
 lost, and a `permissions:changed` event is emitted. Deactivation and revocation emit
 `session:revoked` and hard-disconnect. Riders never join a branch room.
+
+**Limitation — single instance.** `io.fetchSockets()` sees only this process's connections. There
+is no Redis, no Socket.IO adapter and no pub/sub in this repository, so a role change served by
+instance A cannot push to a socket held by instance B; that socket keeps its rooms until it
+reconnects or the branch next publishes, at which point `evictStaleBranchSockets()` revalidates it
+lazily. No distributed guarantee is claimed. HTTP authorization is unaffected either way — it
+resolves from the database on every request, so a stale socket can receive events it should not
+see but can never perform an action.
 
 ### Branch and restaurant isolation
 
@@ -436,8 +484,39 @@ withdrawing a role takes effect immediately.
 
 Tunable via `RBAC_ROLE_CACHE_TTL_MS`, `RBAC_ROLE_CACHE_MAX`, `RBAC_ROLE_CACHE_DISABLED`.
 
-**Limitation:** the cache is per-process, not distributed. With several API instances a role
-edit can take up to one TTL to reach instances that did not serve the write.
+**Cross-instance invalidation** is implemented with a MongoDB **change stream** on the `roles`
+collection, not with new infrastructure. Change streams require a replica set, and this
+deployment already requires one — `verifyTransactionCapableDatabase()` refuses to boot otherwise,
+because purchasing uses transactions — so the seam already existed. Every instance watches for
+role writes and drops its cached copy, which closes the window for an edit made on another
+instance.
+
+Honest scope: this covers **role definitions only**, which is all that is cached. User state is
+read live on every request. It is best-effort — if the stream drops, the 5-second TTL remains the
+backstop and correctness still holds. **The multi-instance path is not verified by the test
+suite**: the harness runs one API process against a single-node replica set. What is tested is
+that the watcher starts, that an out-of-band role write invalidates this process's cache through
+the stream, and that it shuts down cleanly. Treat the multi-instance behaviour as designed, not
+proven.
+
+### Administrator password reset
+
+`POST /api/accounts/:id/password` (permission `users.password`, owner-only by default). There is
+**no email infrastructure in this repository**, so there is no self-service reset flow and none is
+implied — this is an authorised administrator action. The new password is policy-checked by the
+existing `assertPasswordPolicy()`, hashed with the existing bcrypt cost, and never echoed back;
+no hash is ever returned. Every device session is revoked and `sessionVersion` is bumped, because
+a reset usually means the old credential may be compromised. The reset is audited with the actor
+and timestamp, and the audit row carries no credential.
+
+### Role deletion
+
+Built-in roles cannot be deleted or edited. A custom role still held by somebody is refused with
+409 unless the caller supplies `?reassignTo=<roleKey>`, in which case every holder is moved in the
+same operation, each move is audited individually, and their cached permissions and live sockets
+are refreshed. The replacement must share the outgoing role's `baseRole`, so nobody silently
+changes tenancy regime, and can never be `owner`. Nobody is ever left pointing at a role that no
+longer resolves. The API enforces all of this independently of the UI.
 
 ## Multi-tenant access control
 

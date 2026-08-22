@@ -55,6 +55,13 @@ export default function AccessControl({call, user, permissions = []}) {
   // browser confirm(): the preview iframe blocks modals, and an inline
   // confirmation states exactly what is about to happen.
   const [confirming, setConfirming] = useState(null);
+  // Role deletion needs its own confirmation, and a reassignment target when
+  // the role is still held by somebody.
+  const [deletingRole, setDeletingRole] = useState(null);
+  const [reassignTo, setReassignTo] = useState('');
+  // Password reset: never pre-filled, never echoed back.
+  const [resetting, setResetting] = useState(null);
+  const [newPassword, setNewPassword] = useState('');
 
   const load = useCallback(async () => {
     if (!allowed) return;
@@ -130,15 +137,43 @@ export default function AccessControl({call, user, permissions = []}) {
     setDraft({name: role.name, baseRole: role.baseRole, permissions: [...role.permissions]});
   };
 
-  const removeRole = async role => {
+  const removeRole = async (role, replacement) => {
     setBusy(true);
     setError('');
+    setNote('');
     try {
-      await call(`/roles/${role.key}`, {method: 'DELETE'});
-      setNote(`Deleted ${role.name}`);
+      const query = replacement ? `?reassignTo=${encodeURIComponent(replacement)}` : '';
+      const result = await call(`/roles/${role.key}${query}`, {method: 'DELETE'});
+      setNote(result?.reassigned
+        ? `Deleted ${role.name} and moved ${result.reassigned} account(s) to ${replacement}`
+        : `Deleted ${role.name}`);
+      setDeletingRole(null);
+      setReassignTo('');
       await load();
     } catch (e) {
+      // The API refuses deletion of a role still in use unless a replacement
+      // is given. Surface that verbatim rather than guessing.
       setError(e.message || 'Could not delete the role');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetPassword = async account => {
+    setBusy(true);
+    setError('');
+    setNote('');
+    try {
+      await call(`/accounts/${account._id}/password`, {
+        method: 'POST', body: JSON.stringify({password: newPassword})
+      });
+      // The plaintext is never displayed back, stored in state after use, or
+      // logged. The operator communicates it out of band.
+      setNewPassword('');
+      setResetting(null);
+      setNote(`Password reset for ${account.name}. Their existing sessions have ended.`);
+    } catch (e) {
+      setError(e.message || 'Could not reset the password');
     } finally {
       setBusy(false);
     }
@@ -256,13 +291,56 @@ export default function AccessControl({call, user, permissions = []}) {
                     </td>
                     <td style={{padding: '4px 6px'}}>{role.assignedCount}</td>
                     <td style={{padding: '4px 6px', textAlign: 'right'}}>
-                      {!role.builtin && canManageRoles && (
+                      {!role.builtin && canManageRoles && deletingRole !== role.key && (
                         <>
                           <button onClick={() => editRole(role)} disabled={busy}>Edit</button>{' '}
-                          <button onClick={() => removeRole(role)} disabled={busy}>Delete</button>
+                          <button onClick={() => { setDeletingRole(role.key); setReassignTo(''); }}
+                            disabled={busy}>Delete</button>
                         </>
                       )}
-                      {role.builtin && <span style={{fontSize: '11px', opacity: 0.6}}>protected</span>}
+                      {!role.builtin && canManageRoles && deletingRole === role.key && (
+                        <div style={{fontSize: '11px', textAlign: 'left'}}>
+                          {role.assignedCount > 0 ? (
+                            <>
+                              <div style={{marginBottom: '4px'}}>
+                                {role.assignedCount} account(s) hold <strong>{role.name}</strong>.
+                                Move them to:
+                              </div>
+                              <select aria-label={`Reassign ${role.name} to`} value={reassignTo}
+                                onChange={e => setReassignTo(e.target.value)}>
+                                <option value="">Choose a role…</option>
+                                {catalogue.roles
+                                  .filter(other => other.key !== role.key
+                                    && other.key !== 'owner'
+                                    && other.baseRole === role.baseRole
+                                    && other.active !== false)
+                                  .map(other => (
+                                    <option key={other.key} value={other.key}>{other.name}</option>
+                                  ))}
+                              </select>{' '}
+                              <button disabled={busy || !reassignTo}
+                                onClick={() => removeRole(role, reassignTo)}>
+                                Reassign and delete
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              Delete <strong>{role.name}</strong>? Nobody holds it.{' '}
+                              <button onClick={() => removeRole(role, null)} disabled={busy}>
+                                Confirm delete
+                              </button>
+                            </>
+                          )}
+                          {' '}
+                          <button onClick={() => { setDeletingRole(null); setReassignTo(''); }}
+                            disabled={busy}>Cancel</button>
+                        </div>
+                      )}
+                      {role.builtin && (
+                        <span style={{fontSize: '11px', opacity: 0.6}} title="Built-in roles cannot be edited or deleted">
+                          system role · protected
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -420,6 +498,37 @@ export default function AccessControl({call, user, permissions = []}) {
                           {account.active === false
                             ? <Pill tone="amber">deactivated</Pill>
                             : <Pill tone="green">active</Pill>}
+                          {canResetPassword && (
+                            <div style={{marginTop: '4px'}}>
+                              {resetting === account._id ? (
+                                <span style={{fontSize: '11px'}}>
+                                  <input
+                                    aria-label={`New password for ${account.name}`}
+                                    type="password" placeholder="New password"
+                                    value={newPassword}
+                                    onChange={e => setNewPassword(e.target.value)}
+                                  />{' '}
+                                  <button disabled={busy || newPassword.length < 10}
+                                    onClick={() => resetPassword(account)}>
+                                    Set password
+                                  </button>{' '}
+                                  <button disabled={busy}
+                                    onClick={() => { setResetting(null); setNewPassword(''); }}>
+                                    Cancel
+                                  </button>
+                                  <div style={{opacity: 0.65}}>
+                                    At least 10 characters with letters and numbers. This ends
+                                    their existing sessions.
+                                  </div>
+                                </span>
+                              ) : (
+                                <button disabled={busy}
+                                  onClick={() => { setResetting(account._id); setNewPassword(''); }}>
+                                  Reset password
+                                </button>
+                              )}
+                            </div>
+                          )}
                           {canDeactivate && account.role !== 'owner' && (
                             <div style={{marginTop: '4px'}}>
                               {confirming === account._id ? (

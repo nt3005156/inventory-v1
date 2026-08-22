@@ -16,11 +16,13 @@ import {User} from '../models/index.js';
 import {authenticated, requirePermission} from '../middleware/auth.js';
 import {AUTH_RATE_LIMIT, createRateLimiter} from '../services/rateLimiting.js';
 import {createStaffAccount} from '../services/staffAccounts.js';
-import {revokeUserSessions} from '../services/sessions.js';
+import {
+  createDeviceSession, listUserSessions, revokeDeviceSession, revokeUserSessions
+} from '../services/sessions.js';
 
 const r = Router();
 
-export const signToken = user => jwt.sign(
+export const signToken = (user, sessionId = null) => jwt.sign(
   {
     id: user._id,
     name: user.name,
@@ -30,7 +32,11 @@ export const signToken = user => jwt.sign(
     // Phase 17: the session version this token was minted against. The guard
     // compares it to the stored value on every request, so incrementing
     // `user.sessionVersion` invalidates every token issued before the bump.
-    sv: Number(user.sessionVersion || 0)
+    sv: Number(user.sessionVersion || 0),
+    // Opaque per-device session id. Only its hash is stored, so this token is
+    // the only place the plaintext exists. Enables signing out one device
+    // without ending the user's other sessions.
+    ...(sessionId ? {sid: sessionId} : {})
   },
   process.env.JWT_SECRET,
   {expiresIn: '12h'}
@@ -57,8 +63,14 @@ r.post('/auth/login', authLimit, async (req, res) => {
   if (user.active === false || (user.role === 'rider' && user.rider?.active === false)) {
     return res.status(403).json({message: 'This account is deactivated. Contact your manager.'});
   }
+  const {sessionId} = await createDeviceSession({
+    user,
+    label: String(req.body?.deviceLabel || '').trim() || 'Web session',
+    userAgent: req.headers['user-agent'],
+    ip: req.ip
+  });
   res.json({
-    token: signToken(user),
+    token: signToken(user, sessionId),
     user: {
       id: user._id,
       name: user.name,
@@ -104,8 +116,58 @@ r.post('/auth/register', requirePermission('users.create'), async (req, res) => 
  */
 r.post('/auth/logout', authenticated(), async (req, res) => {
   try {
-    const result = await revokeUserSessions({userId: req.user.id, reason: 'logout'});
-    res.json({ok: true, sessionVersion: result.sessionVersion});
+    // Default is THIS DEVICE only, so signing out a phone leaves the till
+    // running. `allDevices: true` bumps the version and ends everything.
+    if (req.body?.allDevices === true) {
+      const result = await revokeUserSessions({userId: req.user.id, reason: 'logout'});
+      return res.json({ok: true, scope: 'all', sessionVersion: result.sessionVersion});
+    }
+    if (!req.principal?.sessionId) {
+      // A legacy token carries no session id, so there is nothing device-level
+      // to revoke. Fall back to a global sign-out rather than silently doing
+      // nothing, which would leave the user believing they had logged out.
+      const result = await revokeUserSessions({userId: req.user.id, reason: 'logout'});
+      return res.json({ok: true, scope: 'all', legacyToken: true, sessionVersion: result.sessionVersion});
+    }
+    await revokeDeviceSession({
+      sessionRowId: req.principal.sessionId, ownerId: req.user.id,
+      actor: req.user, reason: 'logout'
+    });
+    res.json({ok: true, scope: 'device'});
+  } catch (error) {
+    res.status(error?.status || 500).json({
+      message: (error?.status || 500) >= 500 ? 'Server error' : String(error.message).slice(0, 300)
+    });
+  }
+});
+
+/** The caller's own devices. Never exposes a session hash. */
+r.get('/auth/sessions', authenticated(), async (req, res) => {
+  try {
+    const sessions = await listUserSessions({userId: req.user.id});
+    res.json({
+      sessions: sessions.map(session => ({
+        ...session, current: session.id === req.principal?.sessionId
+      }))
+    });
+  } catch (error) {
+    res.status(error?.status || 500).json({message: 'Server error'});
+  }
+});
+
+/**
+ * Revoke one of the CALLER'S OWN sessions.
+ *
+ * `ownerId` is always the authenticated user, so a caller cannot revoke
+ * somebody else's device by guessing an id — the lookup is scoped by user and
+ * a mismatch is a 404, which also avoids confirming that the id exists.
+ */
+r.delete('/auth/sessions/:id', authenticated(), async (req, res) => {
+  try {
+    await revokeDeviceSession({
+      sessionRowId: req.params.id, ownerId: req.user.id, actor: req.user, reason: 'logout'
+    });
+    res.json({ok: true});
   } catch (error) {
     res.status(error?.status || 500).json({
       message: (error?.status || 500) >= 500 ? 'Server error' : String(error.message).slice(0, 300)

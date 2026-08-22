@@ -388,3 +388,46 @@ roleSchema.pre('validate',function normaliseRole(){
   }
 });
 export const Role=model('Role',roleSchema);
+
+/**
+ * Per-device session (final RBAC gap closure).
+ *
+ * `sessionVersion` on the user gives GLOBAL revocation — one counter ends every
+ * session at once. It cannot express "sign this phone out and leave the till
+ * running", so each login now also mints a session record.
+ *
+ * What is stored, and what deliberately is not:
+ *
+ *   • The JWT carries an opaque random session id (`sid`). Only its SHA-256
+ *     HASH is persisted. A leaked database therefore yields no usable session
+ *     credential — the same reasoning that applies to passwords. There is no
+ *     reversible secret in this collection.
+ *   • `expiresAt` matches the token lifetime and drives a TTL index, so the
+ *     collection is self-pruning and cannot grow without bound.
+ *   • `revokedAt` marks a session ended before its natural expiry. The row is
+ *     kept rather than deleted so "who signed out from where, and when"
+ *     survives for an auditor until the TTL removes it.
+ *
+ * Label and user agent are recorded so an operator can recognise a device in a
+ * list. They are advisory, never authoritative — the client supplies them.
+ */
+const userSessionSchema=new Schema({
+  user:{type:Schema.Types.ObjectId,ref:'User',required:true,index:true,immutable:true},
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',index:true,immutable:true},
+  // SHA-256 of the session id. The plaintext id lives only in the JWT.
+  sessionHash:{type:String,required:true,unique:true,immutable:true},
+  label:{type:String,trim:true,maxlength:120},
+  userAgent:{type:String,trim:true,maxlength:300},
+  ip:{type:String,trim:true,maxlength:60},
+  createdAt:{type:Date,default:Date.now,required:true,immutable:true},
+  lastSeenAt:{type:Date,default:Date.now},
+  expiresAt:{type:Date,required:true,immutable:true},
+  revokedAt:{type:Date,default:null},
+  revokedBy:{type:Schema.Types.ObjectId,ref:'User',default:null},
+  revokedReason:{type:String,trim:true,maxlength:120}
+},{autoIndex:false});
+userSessionSchema.index({user:1,revokedAt:1,expiresAt:-1},{name:'session_user_state'});
+// TTL backstop: MongoDB removes the row once the token could not be valid
+// anyway, so the collection stays bounded with no sweep job.
+userSessionSchema.index({expiresAt:1},{name:'session_ttl',expireAfterSeconds:0});
+export const UserSession=model('UserSession',userSessionSchema);
