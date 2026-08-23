@@ -118,7 +118,19 @@ export async function notify({
     if (!restaurant) throw httpError('A notification needs a restaurant', 400);
 
     const requested = [...new Set(['in_app', ...channels])].filter(c => CHANNELS.includes(c));
-    const delivery = requested.map(channelStatus);
+    /**
+     * Per-channel dispatch result, stored under `channels`.
+     *
+     * It used to be stored under `context.delivery`, which SILENTLY DESTROYED
+     * caller context: `createDelivery()` passes `context: {delivery: <id>}`, and
+     * because the channel list was spread in after `...context` it overwrote the
+     * delivery id with the channel array. The notification then had no way back
+     * to the delivery it was about. Found by building the deterministic delivery
+     * fixture; the old test never reached the assertion, so nothing caught it.
+     * The READ shape still exposes it as `delivery` so the client contract is
+     * unchanged.
+     */
+    const channelResults = requested.map(channelStatus);
 
     const [row] = await Notification.create([{
       restaurant,
@@ -147,7 +159,7 @@ export async function notify({
         kind: 'event',
         reference: clean(reference) || undefined,
         audience: user ? 'user' : definition.roles,
-        delivery
+        channels: channelResults
       }
     }], {session: session || undefined});
 
@@ -315,7 +327,10 @@ function view(row) {
     branch: row.branch?._id || row.branch || null,
     branchName: row.branch?.name || null,
     user: row.user || null,
-    delivery: row.context?.delivery || [{channel: 'in_app', status: 'delivered'}],
+    // `channels` is the dispatch result. Older rows (and alert rows written by
+    // alerts.js) stored it as `delivery`; both are read so the badge keeps
+    // working for data written before the key was renamed.
+    delivery: row.context?.channels || row.context?.delivery || [{channel: 'in_app', status: 'delivered'}],
     createdAt: row.createdAt
   };
 }

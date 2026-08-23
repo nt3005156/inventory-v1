@@ -587,6 +587,14 @@ delivery: [
 ]
 ```
 
+The dispatch result is stored on the row as `context.channels` and read back as
+`delivery`. It used to be stored as `context.delivery`, which silently
+**overwrote the caller's entity context** — `createDelivery()` passes
+`context: {delivery: <id>}`, and the channel array was spread in afterwards, so
+every delivery notification lost the id of the delivery it was about. Found
+while building a deterministic delivery fixture; the read shape is unchanged, so
+clients see the same field.
+
 ### Notification centre
 
 | Endpoint | Purpose |
@@ -632,6 +640,14 @@ title to a branch B socket, which the Phase 22 isolation test caught.
 - **No digest or batching.** A busy service period produces one notification
   per order.
 - No retention policy — the collection grows.
+- **A rider cannot open the notification centre.** A `delivery_update` is
+  addressed to the assigned rider personally and is private to them (not even
+  the owner reads it), but the built-in `rider` bundle holds only
+  `deliveries.ride`. `notifications.view` is branch-scoped, so granting it to a
+  courier would also hand them the branch's payment and refund notifications.
+  Riders therefore receive the assignment through the delivery screens and the
+  `rider:<userId>` socket room, not through `/api/notifications`. Closing this
+  properly needs a self-scoped notification permission, which is not built.
 
 ## Realtime platform
 

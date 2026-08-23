@@ -76,7 +76,7 @@ describe('Phase 23 · notification catalogue', () => {
       title: 'Channel probe', channels: ['in_app', 'email', 'sms', 'push']
     });
     assert.ok(row);
-    const delivery = row.context.delivery;
+    const delivery = row.context.channels;
     assert.equal(delivery.find(d => d.channel === 'in_app').status, 'delivered');
     for (const channel of ['email', 'sms', 'push']) {
       const entry = delivery.find(d => d.channel === channel);
@@ -220,50 +220,299 @@ describe('Phase 23 · notifications are raised by real business acts', () => {
     assert.ok(await Notification.findOne({type: 'inventory_count_approved'}).lean());
   });
 
-  it('addresses a delivery notification to the assigned rider personally', async () => {
-    // A rider does not read the branch board, so a branch-wide notification
-    // would never reach them.
-    const rider = await User.create({
-      name: 'Notify Rider', email: 'notifyrider@test.com', password: 'x', role: 'rider',
-      restaurantId: world.restaurant._id, branch: world.branchA._id,
-      rider: {active: true, available: true}
-    });
-    const {createDelivery} = await import('../src/services/deliveries.js');
-    const order = await makeOrder();
-    await request(`/api/orders/${order.body._id}/status`, {
-      method: 'PATCH', token: manager(), body: {status: 'accepted'}
-    });
-    await request(`/api/orders/${order.body._id}/status`, {
-      method: 'PATCH', token: manager(), body: {status: 'preparing'}
-    });
-    await request(`/api/orders/${order.body._id}/status`, {
-      method: 'PATCH', token: manager(), body: {status: 'ready'}
-    });
-
+  /**
+   * DETERMINISTIC DELIVERY FIXTURE.
+   *
+   * The previous version of this test built a `counter` order and then
+   * swallowed the failure, treating it as "a dispatch precondition may
+   * legitimately refuse". It was not legitimate: `createDelivery()` rejects any
+   * order whose `type` is not `delivery` with 409 "Only a delivery order can be
+   * dispatched", so the refusal was UNCONDITIONAL and every assertion below it
+   * was dead code. Probed directly: 0 delivery_update rows were ever written.
+   *
+   * The two real preconditions are:
+   *   1. the order must be `type: 'delivery'`, which the POS additionally
+   *      requires to carry a customer ("Delivery orders require a customer");
+   *   2. the order must have reached a dispatchable status.
+   * Both are satisfied here through the public API. Nothing in the application
+   * was weakened to make this pass.
+   */
+  async function dispatchableDeliveryOrder() {
     const customer = await request('/api/customers', {
       method: 'POST', token: manager(),
       body: {name: 'Delivery Guest', phone: '9800000123', branch: String(world.branchA._id)}
     });
     assert.equal(customer.status, 201, JSON.stringify(customer.body));
 
-    try {
-      await createDelivery({
-        user: {id: world.manager._id, role: 'manager'},
-        input: {
-          order: String(order.body._id), branch: String(world.branchA._id),
-          address: 'Kalanki, Kathmandu', rider: String(rider._id)
-        }
+    const order = await request('/api/orders', {
+      method: 'POST', token: manager(),
+      body: {
+        branch: String(world.branchA._id), type: 'delivery',
+        customer: String(customer.body._id),
+        deliveryAddress: 'Kalanki, Kathmandu',
+        items: [{menuItem: String(world.menu._id), qty: 1}]
+      }
+    });
+    assert.equal(order.status, 201, JSON.stringify(order.body));
+    assert.equal(order.body.type, 'delivery');
+
+    for (const status of ['accepted', 'preparing', 'ready']) {
+      const moved = await request(`/api/orders/${order.body._id}/status`, {
+        method: 'PATCH', token: manager(), body: {status}
       });
-    } catch (error) {
-      // A dispatch precondition may legitimately refuse; the notification
-      // contract is what is under test, so only assert when it succeeded.
-      assert.match(String(error.message), /.+/);
+      assert.equal(moved.status, 200, `${status}: ${JSON.stringify(moved.body)}`);
     }
+    return order.body;
+  }
+
+  async function makeRider(overrides = {}) {
+    return User.create({
+      name: 'Notify Rider', email: `rider-${Math.random().toString(36).slice(2, 8)}@test.com`,
+      password: 'x', role: 'rider',
+      restaurantId: world.restaurant._id, branch: world.branchA._id,
+      rider: {active: true, available: true}, ...overrides
+    });
+  }
+
+  it('addresses a delivery notification to the assigned rider personally', async () => {
+    // A rider does not read the branch board, so a branch-wide notification
+    // would never reach them.
+    const rider = await makeRider();
+    const order = await dispatchableDeliveryOrder();
+
+    const dispatched = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {
+        order: String(order._id), rider: String(rider._id),
+        address: 'Kalanki, Kathmandu', phone: '9800000123'
+      }
+    });
+    // 1. delivery creation SUCCEEDS — no swallowed failure.
+    assert.equal(dispatched.status, 201, JSON.stringify(dispatched.body));
+    assert.equal(dispatched.body.status, 'assigned');
+    assert.equal(String(dispatched.body.rider), String(rider._id));
+    await settle();
+
+    // 2. exactly one notification is generated.
+    const rows = await Notification.find({type: 'delivery_update'}).lean();
+    assert.equal(rows.length, 1, 'one dispatch must raise exactly one notification');
+    const row = rows[0];
+
+    // 3. correct recipient/audience: the rider personally, not the branch board.
+    assert.equal(String(row.user), String(rider._id), 'must be addressed to the rider');
+    assert.equal(row.context.audience, 'user');
+    assert.match(row.title, /assigned to you/i);
+
+    // 4. correct type.
+    assert.equal(row.type, 'delivery_update');
+    assert.equal(row.context.kind, 'event');
+    assert.equal(row.severity, 'info');
+
+    // 5. correct reference/entity. `deliveryNo` never existed on the Delivery
+    // schema, so this used to be silently undefined; the order number is what
+    // staff and riders actually quote.
+    assert.equal(row.context.delivery, String(dispatched.body._id), 'links back to the delivery');
+    assert.equal(row.context.order, String(order._id), 'links back to the order');
+    assert.equal(row.context.rider, String(rider._id));
+    assert.equal(row.context.status, 'assigned');
+    assert.equal(row.context.reference, order.orderNo);
+    // The channel result must not clobber the caller's entity context — it
+    // used to be written to `context.delivery` and destroyed the delivery id.
+    assert.ok(Array.isArray(row.context.channels));
+    assert.equal(row.context.channels.find(c => c.channel === 'in_app').status, 'delivered');
+
+    // 6. correct database persistence: it is a real, unread, queryable row and
+    // it reaches the rider through the API, not only through the model.
+    assert.equal(row.read, false);
+    assert.equal(String(row.restaurant), String(world.restaurant._id));
+    assert.equal(String(row.branch), String(world.branchA._id));
+    assert.ok(row.createdAt instanceof Date);
+
+    /**
+     * The row is addressed to the rider and is PRIVATE to them: a colleague in
+     * the same branch, who does hold `notifications.view`, must not see it.
+     * That is the audience assertion that matters — it is enforced by
+     * `inboxMatch()`, not by hiding a button.
+     *
+     * The rider cannot fetch it over `/api/notifications` because the built-in
+     * `rider` bundle holds only `deliveries.ride`. That is deliberate and is
+     * NOT loosened here: `notifications.view` is branch-scoped, so granting it
+     * to a courier would also hand them the branch's payment and refund
+     * notifications. The consequence — a rider cannot yet read their own
+     * notification centre — is recorded as a known limitation rather than
+     * papered over by widening a role in a test.
+     */
+    const colleague = await request('/api/notifications?type=delivery_update', {
+      token: tokenFor(world.staffA)
+    });
+    assert.equal(colleague.status, 200, JSON.stringify(colleague.body));
+    assert.equal(colleague.body.notifications.length, 0,
+      'a personally addressed notification is not branch-readable');
+
+    const riderRead = await request('/api/notifications', {token: tokenFor(rider)});
+    assert.equal(riderRead.status, 403, 'rider bundle deliberately excludes notifications.view');
+
+    // Privacy is absolute, not merely branch-shaped: even the OWNER, who spans
+    // the whole restaurant, does not read a row addressed to one person.
+    const ownerRead = await request('/api/notifications?type=delivery_update', {token: owner()});
+    assert.equal(ownerRead.status, 200, JSON.stringify(ownerRead.body));
+    assert.equal(ownerRead.body.notifications.length, 0,
+      'a personally addressed notification is private even from the owner');
+
+    // The read shape still surfaces the channel result as `delivery`, so the
+    // client contract is unchanged by the `context.channels` rename. Driven
+    // through the service with the rider's identity, which is the only
+    // identity entitled to this row.
+    const {listInbox} = await import('../src/services/notifications.js');
+    const inbox = await listInbox({user: {id: rider._id, role: 'rider'}, type: 'delivery_update'});
+    assert.equal(inbox.notifications.length, 1, 'the rider is the entitled reader');
+    assert.equal(String(inbox.notifications[0]._id), String(row._id));
+    assert.equal(inbox.notifications[0].reference, order.orderNo);
+    assert.equal(inbox.notifications[0].kind, 'event');
+    assert.equal(inbox.notifications[0].delivery[0].channel, 'in_app');
+    assert.equal(inbox.notifications[0].delivery[0].status, 'delivered');
+
+    // The read shape must REFLECT the stored channel result, not hard-code a
+    // cheerful default. Mutation testing caught this: replacing the lookup with
+    // a constant `[{in_app, delivered}]` originally survived, which would have
+    // let the UI claim an email had been sent. Asked for a channel that does
+    // not exist, the row must still read back as skipped.
+    const multi = await notify({
+      type: 'delivery_update', restaurant: world.restaurant._id, branch: world.branchA._id,
+      title: 'Channel shape probe', channels: ['in_app', 'email']
+    });
+    assert.ok(multi);
+    const shaped = await request(`/api/notifications?type=delivery_update`, {token: manager()});
+    const shapedRow = shaped.body.notifications.find(n => String(n._id) === String(multi._id));
+    assert.ok(shapedRow, 'the branch notification is readable in branch scope');
+    assert.equal(shapedRow.delivery.length, 2, 'both requested channels are reported');
+    assert.equal(shapedRow.delivery.find(c => c.channel === 'email').status, 'skipped',
+      'the read shape must not claim an unimplemented channel was delivered');
+  });
+
+  it('addresses an unassigned dispatch to the branch, not to a person', async () => {
+    // The other half of the branch: with no rider there is nobody to address,
+    // so it must fall back to the branch board rather than write user: null
+    // and disappear.
+    const order = await dispatchableDeliveryOrder();
+    const dispatched = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(order._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(dispatched.status, 201, JSON.stringify(dispatched.body));
+    assert.equal(dispatched.body.status, 'pending');
+    await settle();
+
     const row = await Notification.findOne({type: 'delivery_update'}).lean();
-    if (row) {
-      assert.equal(String(row.user), String(rider._id), 'must be addressed to the rider');
-      assert.equal(row.context.kind, 'event');
-    }
+    assert.ok(row, 'an unassigned dispatch still notifies the branch');
+    assert.equal(row.user, undefined, 'nobody to address personally');
+    assert.deepEqual(row.context.audience, ['owner', 'manager', 'staff']);
+    assert.equal(row.context.rider, null);
+    assert.equal(row.context.delivery, String(dispatched.body._id));
+    assert.equal(row.context.status, 'pending');
+  });
+
+  // ── failure paths ─────────────────────────────────────────────────────────
+
+  it('does not notify when the dispatch is refused', async () => {
+    const rider = await makeRider();
+
+    // (a) INVALID: a counter order is not dispatchable. This is exactly the
+    // refusal the old test mistook for an environmental flake.
+    const counter = await makeOrder();
+    assert.equal(counter.status, 201);
+    const wrongType = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(counter.body._id), rider: String(rider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(wrongType.status, 409, JSON.stringify(wrongType.body));
+    assert.match(wrongType.body.message, /only a delivery order/i);
+
+    // (a2) INVALID: a delivery order that has not been accepted yet. Mutation
+    // testing caught this gap — removing the DISPATCHABLE_ORDER_STATUSES check
+    // originally survived because nothing exercised a too-early dispatch.
+    const tooEarlyCustomer = await request('/api/customers', {
+      method: 'POST', token: manager(),
+      body: {name: 'Early Guest', phone: '9800000777', branch: String(world.branchA._id)}
+    });
+    assert.equal(tooEarlyCustomer.status, 201, JSON.stringify(tooEarlyCustomer.body));
+    const pendingOrder = await request('/api/orders', {
+      method: 'POST', token: manager(),
+      body: {
+        branch: String(world.branchA._id), type: 'delivery',
+        customer: String(tooEarlyCustomer.body._id), deliveryAddress: 'Kalanki, Kathmandu',
+        items: [{menuItem: String(world.menu._id), qty: 1}]
+      }
+    });
+    assert.equal(pendingOrder.status, 201, JSON.stringify(pendingOrder.body));
+    assert.equal(pendingOrder.body.status, 'pending');
+    const tooEarly = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(pendingOrder.body._id), rider: String(rider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(tooEarly.status, 409, JSON.stringify(tooEarly.body));
+    assert.match(tooEarly.body.message, /cannot be dispatched/i);
+
+    // (b) INVALID: a dispatchable order but a rider from another restaurant.
+    const otherRestaurant = await Restaurant.create({name: 'Other Co', vatNumber: 'V-OTHER'});
+    const otherBranch = await Branch.create({
+      restaurant: otherRestaurant._id, name: 'Other Branch', code: 'OTH', active: true
+    });
+    const foreignRider = await User.create({
+      name: 'Foreign Rider', email: 'foreignrider@test.com', password: 'x', role: 'rider',
+      restaurantId: otherRestaurant._id, branch: otherBranch._id, rider: {active: true, available: true}
+    });
+    const order = await dispatchableDeliveryOrder();
+    const foreign = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(order._id), rider: String(foreignRider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(foreign.status, 404, JSON.stringify(foreign.body));
+
+    // (c) UNAUTHORISED: a rider may not dispatch at all.
+    const unauthorised = await request('/api/deliveries', {
+      method: 'POST', token: tokenFor(rider),
+      body: {order: String(order._id), rider: String(rider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(unauthorised.status, 403, JSON.stringify(unauthorised.body));
+
+    await settle();
+    // No refused dispatch may leave a notification behind, and no delivery may
+    // have been written either.
+    assert.equal(await Notification.countDocuments({type: 'delivery_update'}), 0,
+      'a refused dispatch must not notify anybody');
+    const {Delivery} = await import('../src/models/operations.js');
+    assert.equal(await Delivery.countDocuments({}), 0);
+
+    // CONTROL: the same call, correctly authorised, does notify — proving the
+    // absence above is the refusal and not a broken fixture.
+    const ok = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(order._id), rider: String(rider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    await settle();
+    assert.equal(await Notification.countDocuments({type: 'delivery_update'}), 1);
+  });
+
+  it('does not leak a rider-addressed delivery notification to another branch', async () => {
+    const rider = await makeRider();
+    const order = await dispatchableDeliveryOrder();
+    const ok = await request('/api/deliveries', {
+      method: 'POST', token: manager(),
+      body: {order: String(order._id), rider: String(rider._id), address: 'Kalanki, Kathmandu'}
+    });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    await settle();
+
+    // staffB sits in branchB. A personally addressed notification is not
+    // theirs, and neither is another branch's dispatch.
+    const otherInbox = await request('/api/notifications?type=delivery_update', {
+      token: tokenFor(world.staffB)
+    });
+    assert.equal(otherInbox.status, 200, JSON.stringify(otherInbox.body));
+    assert.equal(otherInbox.body.notifications.length, 0,
+      'another user must not read a rider-addressed delivery notification');
   });
 
   it('sweeps supplier invoices that are due, once each', async () => {

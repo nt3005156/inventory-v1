@@ -248,9 +248,11 @@ export async function createDelivery({user, input}) {
   const session = await mongoose.startSession();
   try {
     let created;
+    let orderNo;
     await session.withTransaction(async () => {
       const order = await Order.findById(input.order).session(session);
       if (!order) throw httpError('Order not found', 404);
+      orderNo = order.orderNo;
       await assertTenantBranchAccess(user, order.branch, {session});
 
       if (order.type !== 'delivery') {
@@ -327,8 +329,17 @@ export async function createDelivery({user, input}) {
       user: created.rider || null,
       title: created.rider ? 'A delivery has been assigned to you' : 'Delivery created',
       body: created.address ? String(created.address).slice(0, 200) : undefined,
-      reference: created.deliveryNo || undefined,
-      context: {delivery: String(created._id), status: created.status}
+      // A Delivery has no number of its own -- `deliveryNo` never existed on
+      // the schema, so this was always undefined and every delivery
+      // notification shipped without a human reference. The order number is
+      // the identifier staff and riders actually quote.
+      reference: orderNo || undefined,
+      context: {
+        delivery: String(created._id),
+        order: String(created.order),
+        rider: created.rider ? String(created.rider) : null,
+        status: created.status
+      }
     });
     return created;
   } finally {
