@@ -8,7 +8,7 @@ import {applyPayment, splitOrder, quoteEqualSplit, buildTableBill} from '../serv
 import {refundOrder, reversePayment, summarisePayments} from '../services/refunds.js';
 import {refreshCustomerStatsSafe} from '../services/customers.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
-import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
+import {publishKitchenOrder, publishOrderEvent, publishPaymentEvent, publishTableEvent} from '../services/realtime.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -71,6 +71,19 @@ r.post('/orders/:id/payments', requirePermission('payments.take'), async (req, r
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    // Phase 22: money moving is broadcast. The idempotency key doubles as the
+    // event id, so a retried request republishes the SAME event id and a
+    // client that already applied it discards the duplicate.
+    publishPaymentEvent(result.order?.branch, {
+      reason: 'payment',
+      order: String(result.order?._id || ''),
+      orderNo: result.order?.orderNo || null,
+      amount: body.amount,
+      method: body.method,
+      paidAmount: result.order?.paidAmount ?? null,
+      dueAmount: result.order?.dueAmount ?? null,
+      settled: Number(result.order?.dueAmount || 0) <= 0
+    }, {idempotencyKey: req.headers['idempotency-key']});
     if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'payment', tableIds: [String(result.order.table)]});
     // Phase 9: CRM rollups refresh after the money is committed, never inside
     // the transaction — a reporting figure must not be able to fail a sale.
@@ -100,6 +113,17 @@ r.post('/orders/:id/refunds', requirePermission('orders.refund'), async (req, re
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    publishPaymentEvent(result.order?.branch, {
+      reason: 'refund',
+      order: String(result.order?._id || ''),
+      orderNo: result.order?.orderNo || null,
+      amount: body.amount,
+      refundAmount: result.order?.refundAmount ?? null,
+      status: result.order?.status || null
+    }, {idempotencyKey: req.headers['idempotency-key']});
+    publishOrderEvent(result.order?.branch, {
+      reason: 'refund', order: String(result.order?._id || ''), status: result.order?.status || null
+    }, {idempotencyKey: req.headers['idempotency-key']});
     if (result.order?.table) {
       publishTableEvent(result.order.branch, {reason: 'refund', tableIds: [String(result.order.table)]});
     }
@@ -133,6 +157,13 @@ r.post('/payments/:id/reverse', requirePermission('payments.reverse'), async (re
       });
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    publishPaymentEvent(result.order?.branch, {
+      reason: 'reversal',
+      order: String(result.order?._id || ''),
+      orderNo: result.order?.orderNo || null,
+      payment: String(req.params.id),
+      dueAmount: result.order?.dueAmount ?? null
+    });
     await refreshCustomerStatsSafe(result.order?.customer);
     res.json(result);
   } catch (e) {
@@ -212,6 +243,11 @@ r.post('/orders/:id/split', requirePermission('orders.create'), async (req, res)
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
     await publishKitchenOrder(result.splitOrder, 'kitchen:new-order');
+    publishOrderEvent(result.order?.branch, {
+      reason: 'split',
+      order: String(result.order?._id || ''),
+      splitOrder: String(result.splitOrder?._id || '')
+    });
     if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'split', tableIds: [String(result.order.table)]});
     res.status(201).json(result);
   } catch (e) {

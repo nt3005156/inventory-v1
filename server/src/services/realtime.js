@@ -5,6 +5,9 @@ import mongoose from 'mongoose';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {Order} from '../models/operations.js';
 import {resolveCorsOptions} from './deployment.js';
+import {
+  CONTROL_EVENTS, REALTIME_EVENTS, envelope, nextSequence, recordForReplay, replaySince
+} from './realtimeEvents.js';
 
 const SOCKET_ROLES = ['owner', 'manager', 'staff', 'rider'];
 const MANAGEMENT_ROLES = new Set(['owner', 'manager']);
@@ -16,6 +19,22 @@ export const purchasingManagementRoom = id => `${branchRoom(id)}:purchasing-mana
  * rider has no business receiving.
  */
 export const riderRoom = id => 'rider:' + String(id);
+
+/**
+ * Phase 22 — restaurant and role rooms.
+ *
+ * `restaurant:<id>` carries tenant-wide signals that are not tied to one
+ * branch. `role:<restaurant>:<role>` is deliberately NAMESPACED BY TENANT: a
+ * bare `role:manager` would put every manager of every restaurant in one room,
+ * which is precisely the cross-tenant leak the rest of the system works to
+ * prevent. The brief writes `role:<role>`; scoping it is the only way to
+ * honour that safely.
+ *
+ * A rider joins neither. They are the least-privileged principal and get only
+ * their private room.
+ */
+export const restaurantRoom = id => 'restaurant:' + String(id);
+export const roleRoom = (restaurantId, role) => `role:${String(restaurantId)}:${String(role)}`;
 
 let io = null;
 
@@ -106,7 +125,11 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
       const {resolvePrincipal} = await import('./accessControl.js');
       const principal = await resolvePrincipal(payload);
       socket.user = {...payload, role: principal.baseRole, branch: principal.branch};
-      socket.data = {...(socket.data || {}), principalRole: principal.baseRole};
+      socket.data = {
+        ...(socket.data || {}),
+        principalRole: principal.baseRole,
+        restaurantId: principal.restaurantId || null
+      };
 
       // A requested initial branch is fully tenant-checked during the handshake.
       // Clients still join explicitly and reload after the join acknowledgement so
@@ -117,6 +140,19 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
         await socket.join(riderRoom(payload.id));
         socket.data = {...(socket.data || {}), rider: true};
         return next();
+      }
+
+      /**
+       * Phase 22 — tenant and role rooms.
+       *
+       * Joined from the RESOLVED principal, never from the token claim, so a
+       * forged `restaurantId` or `role` cannot place a socket in another
+       * tenant's room. Riders are excluded above: they hold only their own
+       * private room.
+       */
+      if (principal.restaurantId) {
+        await socket.join(restaurantRoom(principal.restaurantId));
+        await socket.join(roleRoom(principal.restaurantId, principal.baseRole));
       }
 
       const requested = socket.handshake.auth?.branch;
@@ -138,7 +174,49 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
     socket.on('join:branch', async (branchId, cb) => {
       try {
         const joined = await joinBranch(socket, branchId);
-        cb?.({ok: true, branch: joined});
+        // Hand back the room's current sequence so a client knows its starting
+        // point and can ask for a replay after a later reconnect.
+        const {sequence} = replaySince(branchRoom(joined), Number.POSITIVE_INFINITY);
+        cb?.({ok: true, branch: joined, sequence});
+      } catch (error) {
+        cb?.({ok: false, status: error.status || 400, message: error.message});
+      }
+    });
+
+    /**
+     * Phase 22 — reconnect recovery.
+     *
+     * Socket.IO reconnects transparently, but events published while the
+     * client was away are simply gone: rooms hold no history. The client sends
+     * the last sequence it processed and receives everything newer.
+     *
+     * Authorisation is re-checked here, not assumed from the earlier join: a
+     * socket must not be able to replay a branch it has since lost access to.
+     * When the gap is larger than the buffer the client is told `truncated`
+     * and must reload — a partial history it cannot distinguish from a
+     * complete one would be worse than none.
+     */
+    socket.on('replay:since', async ({branch, sequence} = {}, cb) => {
+      try {
+        if (!branch) throw socketError('Branch is required');
+        if (!mongoose.isValidObjectId(branch)) throw socketError('Invalid branch');
+        const room = branchRoom(branch);
+        if (!socket.rooms.has(room)) throw socketError('Socket is not joined to that branch', 403);
+        // Re-verify against storage, exactly as joinBranch does.
+        await purchaseBranchContext({user: socket.user, branchId: branch, allowInactive: true});
+        const result = replaySince(room, sequence);
+        cb?.({
+          ok: true,
+          branch: String(branch),
+          sequence: result.sequence,
+          truncated: result.truncated,
+          // Belt and braces. `replaySince()` already returns an empty list
+          // when it truncates, so this ternary is currently redundant --
+          // confirmed by mutation testing, where removing it changed nothing.
+          // It is kept so the invariant "truncated implies no events" holds at
+          // the boundary even if the buffer's contract is ever loosened.
+          events: result.truncated ? [] : result.events
+        });
       } catch (error) {
         cb?.({ok: false, status: error.status || 400, message: error.message});
       }
@@ -192,46 +270,56 @@ export async function evictStaleBranchSockets(branchId) {
   return evicted;
 }
 
-export function emitKitchenEvent(branchId, event, payload) {
+/**
+ * Phase 22 — the single emit path.
+ *
+ * Every business event goes through here so that all of them get the same
+ * treatment: a standard envelope with a deduplication id, a per-room sequence
+ * number, and a copy in the room's replay buffer for reconnecting clients.
+ * Before this, only `purchasing:update` had any of that.
+ *
+ * Publishing never throws into the caller. The business transaction is already
+ * committed by the time an event is emitted; turning a notification failure
+ * into a failed HTTP response would be strictly worse than a missed event.
+ */
+export function emitRoomEvent(room, event, payload = {}, {idempotencyKey, branch, restaurant, replay = true} = {}) {
+  if (!io || !room) return null;
+  try {
+    const sequence = nextSequence(room);
+    const message = envelope(event, payload, {branch, restaurant, idempotencyKey, sequence});
+    if (replay) recordForReplay(room, message);
+    io.to(room).emit(event, message);
+    return message;
+  } catch (error) {
+    console.error('realtime publish failed', {event, room, message: error.message});
+    return null;
+  }
+}
+
+export function emitKitchenEvent(branchId, event, payload, options = {}) {
   if (!io || !branchId) return false;
-  io.to(branchRoom(branchId)).emit(event, payload);
-  return true;
+  return Boolean(emitRoomEvent(branchRoom(branchId), event, payload, {...options, branch: branchId}));
 }
 
 /** Emits only after revalidating the room, for branch-sensitive kitchen data. */
-export async function emitKitchenEventChecked(branchId, event, payload) {
+export async function emitKitchenEventChecked(branchId, event, payload, options = {}) {
   if (!io || !branchId) return false;
   await evictStaleBranchSockets(branchId);
-  return emitKitchenEvent(branchId, event, payload);
+  return emitKitchenEvent(branchId, event, payload, options);
 }
 
-export function publishTableEvent(branchId, extra = {}) {
+export function publishTableEvent(branchId, extra = {}, {idempotencyKey} = {}) {
   if (!branchId) return false;
-  return emitKitchenEvent(branchId, 'table:update', {
-    ...extra,
-    branch: String(branchId)
-  });
+  return emitKitchenEvent(branchId, REALTIME_EVENTS.TABLE_UPDATE, extra, {idempotencyKey});
 }
 
-export function publishPurchasingEvent(branchId, extra = {}, {audience = 'branch'} = {}) {
+export function publishPurchasingEvent(branchId, extra = {}, {audience = 'branch', idempotencyKey} = {}) {
   if (!io || !branchId) return false;
   const id = String(branchId);
   const room = audience === 'management' ? purchasingManagementRoom(id) : branchRoom(id);
-  try {
-    io.to(room).emit('purchasing:update', {
-      ...extra,
-      schemaVersion: 1,
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-      branch: id
-    });
-    return true;
-  } catch (error) {
-    // The business transaction is already committed. Notification failure must
-    // never turn a successful mutation into a retryable HTTP failure.
-    console.error('purchasing realtime publish failed', error.message);
-    return false;
-  }
+  return Boolean(emitRoomEvent(room, REALTIME_EVENTS.PURCHASING_UPDATE, extra, {
+    branch: id, idempotencyKey
+  }));
 }
 
 /**
@@ -239,20 +327,25 @@ export function publishPurchasingEvent(branchId, extra = {}, {audience = 'branch
  * assigned, to that one rider's private room. A rider is never given a branch
  * room, so this is the only channel by which they can be reached.
  */
-export function publishDeliveryEvent(branchId, extra = {}, {riderId} = {}) {
+export function publishDeliveryEvent(branchId, extra = {}, {riderId, idempotencyKey} = {}) {
   if (!io || !branchId) return false;
-  const payload = {...extra, branch: String(branchId)};
-  io.to(branchRoom(branchId)).emit('delivery:update', payload);
-  if (riderId) io.to(riderRoom(riderId)).emit('delivery:update', payload);
-  return true;
+  // The rider copy reuses the SAME eventId, so a dispatcher who is also the
+  // assigned rider (or a client in both rooms) deduplicates it rather than
+  // processing the delivery twice.
+  const sent = emitRoomEvent(branchRoom(branchId), REALTIME_EVENTS.DELIVERY_UPDATE, extra, {
+    branch: branchId, idempotencyKey
+  });
+  if (riderId && sent) {
+    emitRoomEvent(riderRoom(riderId), REALTIME_EVENTS.DELIVERY_UPDATE, extra, {
+      branch: branchId, idempotencyKey: sent.eventId
+    });
+  }
+  return Boolean(sent);
 }
 
-export function publishInventoryEvent(branchId, extra = {}) {
+export function publishInventoryEvent(branchId, extra = {}, {idempotencyKey} = {}) {
   if (!branchId) return false;
-  return emitKitchenEvent(branchId, 'inventory:update', {
-    ...extra,
-    branch: String(branchId)
-  });
+  return emitKitchenEvent(branchId, REALTIME_EVENTS.INVENTORY_UPDATE, extra, {idempotencyKey});
 }
 
 /**
@@ -264,24 +357,76 @@ export function publishInventoryEvent(branchId, extra = {}) {
  * generic `inventory:update`, carrying nothing about the alert itself, so a
  * manager watching the screen learned nothing.
  */
-export function publishInventoryAlert(branchId, alert = {}) {
+export function publishInventoryAlert(branchId, alert = {}, {idempotencyKey} = {}) {
   if (!branchId) return false;
-  return emitKitchenEvent(branchId, 'inventory:alert', {
-    ...alert,
-    branch: String(branchId),
-    at: new Date().toISOString()
-  });
+  return emitKitchenEvent(branchId, REALTIME_EVENTS.INVENTORY_ALERT, alert, {idempotencyKey});
 }
 
-export async function publishKitchenOrder(order, event, extra = {}) {
+export async function publishKitchenOrder(order, event, extra = {}, {idempotencyKey} = {}) {
   try {
     if (!order?._id) return;
     const full = await Order.findById(order._id).populate('table', 'name area seats status').populate('customer', 'name phone');
     if (!full) return;
-    await emitKitchenEventChecked(full.branch, event, {order: full.toJSON(), ...extra});
+    // Goes through emitKitchenEventChecked -> emitKitchenEvent -> emitRoomEvent,
+    // so kitchen events now carry the same envelope as everything else. They
+    // previously arrived bare, which is why a reconnecting KDS could not tell
+    // a redelivered ticket from a new one.
+    await emitKitchenEventChecked(full.branch, event, {order: full.toJSON(), ...extra}, {idempotencyKey});
   } catch (error) {
     console.error('kitchen realtime publish failed', error.message);
   }
+}
+
+/**
+ * Phase 22 — payment:update.
+ *
+ * MISSING BEFORE THIS PHASE. Verified against the running server: taking a
+ * payment emitted nothing at all, so a second till or a manager's dashboard
+ * had no idea an order had been settled until it refreshed. Money moving is
+ * the single most important thing to broadcast.
+ *
+ * The amount and method are included; no card or transaction detail beyond the
+ * reference the receipt already shows, because a branch room is a broad
+ * audience.
+ */
+export function publishPaymentEvent(branchId, extra = {}, {idempotencyKey} = {}) {
+  if (!branchId) return false;
+  return emitKitchenEvent(branchId, REALTIME_EVENTS.PAYMENT_UPDATE, extra, {idempotencyKey});
+}
+
+/**
+ * Phase 22 — order:update.
+ *
+ * Also missing. `kitchen:*` covers the kitchen lifecycle, but an order can
+ * change in ways the kitchen does not care about — a discount applied, an
+ * order reopened, a bill split, a refund posted — and nothing announced those.
+ * This is the general "this order changed" channel; kitchen events stay
+ * separate so a KDS is not woken by a billing edit.
+ */
+export function publishOrderEvent(branchId, extra = {}, {idempotencyKey} = {}) {
+  if (!branchId) return false;
+  return emitKitchenEvent(branchId, REALTIME_EVENTS.ORDER_UPDATE, extra, {idempotencyKey});
+}
+
+/** Tenant-wide signal, for anything not scoped to a single branch. */
+export function publishRestaurantEvent(restaurantId, event, extra = {}, {idempotencyKey} = {}) {
+  if (!io || !restaurantId) return false;
+  return Boolean(emitRoomEvent(restaurantRoom(restaurantId), event, extra, {
+    restaurant: restaurantId, idempotencyKey
+  }));
+}
+
+/**
+ * Signal every holder of a role within ONE restaurant.
+ *
+ * The room is tenant-namespaced, so this cannot reach another restaurant's
+ * managers even if the caller passes only a role name.
+ */
+export function publishRoleEvent(restaurantId, role, event, extra = {}, {idempotencyKey} = {}) {
+  if (!io || !restaurantId || !role) return false;
+  return Boolean(emitRoomEvent(roleRoom(restaurantId, role), event, extra, {
+    restaurant: restaurantId, idempotencyKey
+  }));
 }
 
 export function getIo() {

@@ -7,7 +7,7 @@ import {Branch, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess} from '../services/kitchen.js';
 import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, reopenOrder, getTableHistory, getTableSettlement, MAX_SEATS} from '../services/tables.js';
 import {Order} from '../models/operations.js';
-import {publishKitchenOrder, publishTableEvent} from '../services/realtime.js';
+import {publishKitchenOrder, publishTableEvent, publishOrderEvent} from '../services/realtime.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -192,6 +192,9 @@ r.post('/orders/:id/reopen', requirePermission('orders.reopen'), async (req, res
       result = await reopenOrder({orderId: req.params.id, reason: body.reason, user: req.user, session});
     });
     await publishKitchenOrder(result.order, 'kitchen:status');
+    publishOrderEvent(result.order?.branch, {
+      reason: 'reopen', order: String(result.order?._id || ''), status: result.order?.status || null
+    });
     if (result.table) {
       publishTableEvent(result.table.branch, {reason: 'reopen', tableIds: [String(result.table._id)]});
     }

@@ -536,6 +536,100 @@ are refreshed. The replacement must share the outgoing role's `baseRole`, so nob
 changes tenancy regime, and can never be `owner`. Nobody is ever left pointing at a role that no
 longer resolves. The API enforces all of this independently of the UI.
 
+## Realtime platform
+
+Socket.IO carries nine business events. Every one leaves through a single
+publish path, so they all share the same envelope and the same guarantees.
+
+### Events
+
+| Event | Fired when |
+|---|---|
+| `kitchen:new-order` | an order reaches the kitchen |
+| `kitchen:status` | an order advances through the kitchen |
+| `table:update` | a table is seated, released, merged, moved |
+| `purchasing:update` | PO, receipt, supplier invoice or payment activity |
+| `inventory:update` | stock moved |
+| `inventory:alert` | reorder point, expiry or waste threshold crossed |
+| `delivery:update` | a delivery is dispatched or advances |
+| `payment:update` | payment taken, refunded or reversed |
+| `order:update` | an order changed outside the kitchen lifecycle |
+
+`payment:update` and `order:update` were added in this phase — taking a payment
+previously emitted nothing at all, so a second till learned about a settled
+order only when it refreshed.
+
+Control-plane events (`branch:revoked`, `session:revoked`,
+`permissions:changed`) are separate and are not replayed.
+
+### Envelope
+
+Every event carries:
+
+```
+{ event, schemaVersion, eventId, occurredAt, sequence, branch|restaurant, ...payload }
+```
+
+- **`eventId`** is the deduplication key. Where a mutation is idempotent the
+  request's `Idempotency-Key` becomes the event id, so a retry republishes the
+  *same* id and a client discards it. A delivery sent to both the branch room
+  and the assigned rider's room reuses one id for the same reason.
+- **`sequence`** is per room and strictly increasing, which is what makes
+  reconnect recovery possible without trusting clock skew.
+
+Before this phase only `purchasing:update` had any of this; everything else
+arrived bare, so a reconnecting client could not tell a redelivered ticket from
+a new one.
+
+### Rooms
+
+| Room | Members |
+|---|---|
+| `branch:<id>` | staff joined to that branch |
+| `branch:<id>:purchasing-management` | owners/managers of that branch |
+| `restaurant:<id>` | every non-rider principal of the tenant |
+| `role:<restaurantId>:<role>` | every holder of that role **within one tenant** |
+| `rider:<userId>` | one rider, private |
+
+The role room is deliberately namespaced by restaurant. A bare `role:manager`
+would put every tenant's managers in one room, which is exactly the
+cross-tenant leak the rest of the system prevents.
+
+Rooms are joined from the **resolved principal**, never from the token claim,
+so a forged `restaurantId` or `role` cannot place a socket anywhere. Riders
+join only their private room — branch rooms carry kitchen tickets and stock
+movements they have no business receiving.
+
+### Reconnect recovery
+
+Each room keeps a bounded in-memory buffer of its last 100 events. On rejoin a
+client sends `replay:since {branch, sequence}` and receives everything newer.
+
+Replay re-checks authorisation — room membership **and** a fresh storage
+lookup — so a socket cannot replay a branch it has since lost access to.
+
+When the gap exceeds the buffer the server answers `truncated: true` with **no
+events**, and the client must refetch. Returning a partial history would be
+worse than returning none, because the client could not tell the difference.
+
+`subscribeBranch()` in `client/src/socket.js` implements this: it dedupes on
+`eventId` with a bounded LRU, tracks the last sequence, replays on reconnect
+and calls `onReload` when told to resync.
+
+### Limitations
+
+- **The replay buffer is in-memory and per-process.** A restart clears it, and
+  with several API instances a client may reconnect to an instance holding a
+  different buffer. Both cases surface as `truncated`, so the client reloads —
+  correct, but it is a convenience, not delivery assurance.
+- **No cross-instance fan-out.** Emitting reaches only sockets held by the
+  process that published. Horizontal scaling needs a Socket.IO adapter
+  (`@socket.io/redis-adapter`, or the MongoDB adapter, which would reuse the
+  replica set already required). Not present, and not claimed.
+- Events are best-effort. A publish failure is logged and swallowed: the
+  business transaction is already committed, and turning a notification
+  failure into a failed HTTP response would be strictly worse.
+
 ## Audit log and compliance
 
 Every security- or money-relevant act writes an append-only audit record.
