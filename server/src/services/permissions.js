@@ -111,6 +111,10 @@ export const PERMISSION_CATALOG = Object.freeze([
   {key: 'expenses.manage', group: 'Reports', label: 'Manage expenses'},
   {key: 'monthclose.manage', group: 'Reports', label: 'Close and reopen accounting months'},
   {key: 'alerts.view', group: 'Reports', label: 'View operational alerts'},
+  // Phase 23: the personal notification centre. Separate from alerts.view,
+  // which is about the operational alert board -- everyone who works in the
+  // system needs their own inbox, including staff who cannot see the board.
+  {key: 'notifications.view', group: 'Reports', label: 'Use the notification centre'},
   {key: 'alerts.manage', group: 'Reports', label: 'Acknowledge and resolve alerts'},
   {key: 'audit.view', group: 'Administration', label: 'Read the system audit log'},
   {key: 'inventory.recover', group: 'Inventory', label: 'Recover stuck stock-count locks'},
@@ -192,7 +196,7 @@ export const BUILTIN_ROLES = Object.freeze({
       'customers.view', 'customers.manage', 'customers.loyalty',
       'deliveries.dispatch', 'riders.manage', 'onlineorders.manage',
       'orders.reopen',
-      'alerts.view', 'alerts.manage',
+      'alerts.view', 'alerts.manage', 'notifications.view',
       'reports.view', 'reports.export', 'expenses.manage',
       'branches.view', 'users.manage',
       'tables.configure', 'customers.merge', 'onlineorders.accept',
@@ -218,7 +222,7 @@ export const BUILTIN_ROLES = Object.freeze({
       // goods receipt, which posts stock AND supplier liability.
       'purchase.view',
       'menu.view', 'ingredients.view', 'coupons.view',
-      'alerts.view',
+      'alerts.view', 'notifications.view',
       'customers.view', 'customers.manage',
       'deliveries.dispatch', 'onlineorders.accept',
       'branches.view', 'dashboard.view'

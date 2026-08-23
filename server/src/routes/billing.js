@@ -9,6 +9,7 @@ import {refundOrder, reversePayment, summarisePayments} from '../services/refund
 import {refreshCustomerStatsSafe} from '../services/customers.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishOrderEvent, publishPaymentEvent, publishTableEvent} from '../services/realtime.js';
+import {notify} from '../services/notifications.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -85,6 +86,19 @@ r.post('/orders/:id/payments', requirePermission('payments.take'), async (req, r
       settled: Number(result.order?.dueAmount || 0) <= 0
     }, {idempotencyKey: req.headers['idempotency-key']});
     if (result.order?.table) publishTableEvent(result.order.branch, {reason: 'payment', tableIds: [String(result.order.table)]});
+    // Phase 23: notify only when the bill is actually settled. A notification
+    // per partial tender on a split bill would be noise, not information.
+    if (Number(result.order?.dueAmount || 0) <= 0) {
+      await notify({
+        type: 'payment_received',
+        restaurant: req.principal?.restaurantId,
+        branch: result.order?.branch,
+        title: `Order ${result.order?.orderNo || ''} paid`.trim(),
+        body: `${body.method} · Rs ${Number(result.order?.total || 0).toFixed(2)}`,
+        reference: result.order?.orderNo || undefined,
+        context: {order: String(result.order?._id || '')}
+      });
+    }
     // Phase 9: CRM rollups refresh after the money is committed, never inside
     // the transaction — a reporting figure must not be able to fail a sale.
     await refreshCustomerStatsSafe(result.order?.customer);
@@ -127,6 +141,15 @@ r.post('/orders/:id/refunds', requirePermission('orders.refund'), async (req, re
     if (result.order?.table) {
       publishTableEvent(result.order.branch, {reason: 'refund', tableIds: [String(result.order.table)]});
     }
+    await notify({
+      type: 'refund_issued',
+      restaurant: req.principal?.restaurantId,
+      branch: result.order?.branch,
+      title: `Refund on order ${result.order?.orderNo || ''}`.trim(),
+      body: `Rs ${Number(body.amount || 0).toFixed(2)} · ${body.reason}`,
+      reference: result.order?.orderNo || undefined,
+      context: {order: String(result.order?._id || ''), amount: body.amount}
+    });
     // A refund changes lifetime spend, so the profile must not keep showing
     // revenue the restaurant gave back.
     await refreshCustomerStatsSafe(result.order?.customer);

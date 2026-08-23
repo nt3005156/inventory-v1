@@ -7,6 +7,7 @@ import operations from '../src/routes/operations.js';
 import exportsRouter from '../src/routes/exports.js';
 import rbacRouter from '../src/routes/rbac.js';
 import auditRouter from '../src/routes/audit.js';
+import notificationsRouter from '../src/routes/notifications.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
@@ -68,6 +69,7 @@ export async function startTestApp() {
     app.use('/api', deliveriesRouter);
     app.use('/api', rbacRouter);
     app.use('/api', auditRouter);
+    app.use('/api', notificationsRouter);
     app.use('/api', exportsRouter);
     app.use('/api', operations);
     app.use('/api', supplierCatalog);

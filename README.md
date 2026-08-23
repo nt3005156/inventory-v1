@@ -536,6 +536,103 @@ are refreshed. The replacement must share the outgoing role's `baseRole`, so nob
 changes tenancy regime, and can never be `owner`. Nobody is ever left pointing at a role that no
 longer resolves. The API enforces all of this independently of the UI.
 
+## Notifications
+
+Centralised notification infrastructure, built on the existing `Notification`
+model and its alert lifecycle rather than alongside it.
+
+### Two kinds, deliberately distinct
+
+**Alerts** describe a CONDITION that is true now — "this ingredient is below
+its reorder level". They deduplicate (a unique partial index on
+`{branch, type, referenceId}` over open rows), and they have a lifecycle:
+open → acknowledged → resolved. These already existed and are unchanged.
+
+**Events** describe something that HAPPENED — "order #14 was paid". Two
+payments on one order are two notifications, so they must not collide with
+that index; they are written `status: 'resolved'` with a unique `referenceId`
+and are simply read.
+
+Conflating the two would either suppress real events or let alert spam
+through, so `listInbox()` can filter on `kind=event` or `kind=alert`.
+
+### Types
+
+| Type | Raised when |
+|---|---|
+| `low_stock`, `out_of_stock`, `expiry_approaching`, `expired`, `negative_inventory`, `high_waste` | inventory conditions (pre-existing alerts) |
+| `po_approval_required` / `po_approved` / `po_rejected` | a purchase order changes approval state |
+| `new_order` | an order is created |
+| `payment_received` | a bill is **settled** — not on each partial tender |
+| `refund_issued` | a refund is posted |
+| `delivery_update` | a delivery is created, addressed to the assigned rider personally |
+| `inventory_count_submitted` / `inventory_count_approved` | a stock count moves through approval |
+| `supplier_invoice_due` | swept: an unpaid invoice is due or overdue |
+
+`GET /api/notifications/types` returns the catalogue so the UI filter is not a
+second hard-coded copy.
+
+### Channels
+
+Only **in-app is implemented.** `email`, `sms` and `push` are declared so the
+data model and API are stable, and every notification records what was
+attempted — but there is **no email, SMS or push provider in this
+repository**, so requesting one is recorded as `skipped` with a reason. Nothing
+claims to have sent anything it did not.
+
+```
+delivery: [
+  {channel: 'in_app', status: 'delivered'},
+  {channel: 'email',  status: 'skipped', reason: 'No email provider is configured...'}
+]
+```
+
+### Notification centre
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/notifications` | inbox; filters `unread`, `type`, `kind`, `branch`, paginated |
+| `GET /api/notifications/unread-count` | badge count, cheap enough to poll |
+| `GET /api/notifications/types` | the catalogue and channel support |
+| `PATCH /api/notifications/:id/read` | mark one read (or unread) |
+| `POST /api/notifications/read-all` | mark everything in scope read |
+| `POST /api/notifications/sweep/supplier-invoices` | raise due-invoice notifications |
+
+Guarded by `notifications.view`, held by manager and staff (a rider has the
+rider app, not the staff inbox). The supplier sweep additionally needs
+`purchase.invoice` and is owner-only, because it reads supplier liability.
+
+**There is deliberately no write endpoint.** Notifications are written by the
+services that perform the underlying act; letting a client author one would
+allow forging "payment received" into somebody's inbox.
+
+### Scoping
+
+- Always the caller's own restaurant.
+- A non-owner sees only their branch, plus restaurant-wide notifications.
+- A notification addressed to one `user` is private to them — a colleague in
+  the same branch does not see it.
+- Marking read is scoped the same way: an out-of-scope id is a 404, so the
+  endpoint cannot be used to probe whether another branch's notification
+  exists.
+
+Realtime delivery follows the same rule. A branch-scoped notification is
+emitted to that **branch room**, not to tenant-wide role rooms — an earlier
+revision fanned everything out across role rooms and leaked a branch A order
+title to a branch B socket, which the Phase 22 isolation test caught.
+
+### Limitations
+
+- **Supplier-invoice-due is a manual sweep.** It is not wired into the reorder
+  scheduler's distributed lease, so nothing runs it automatically; call it from
+  cron or the API. Suppression is per unread notification, so an invoice
+  re-notifies once its previous notification has been read.
+- **No user preferences.** Audience is by role, fixed in the catalogue; a user
+  cannot mute a type or choose a channel.
+- **No digest or batching.** A busy service period produces one notification
+  per order.
+- No retention policy — the collection grows.
+
 ## Realtime platform
 
 Socket.IO carries nine business events. Every one leaves through a single

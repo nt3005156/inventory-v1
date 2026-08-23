@@ -19,6 +19,7 @@ import {Branch, Customer, DELIVERY_TRANSITIONS, Delivery, Order} from '../models
 import {assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 import {publishKitchenOrder, publishDeliveryEvent} from './realtime.js';
+import {notify} from './notifications.js';
 import {stampStage} from './kds.js';
 
 const clean = value => String(value ?? '').trim();
@@ -316,6 +317,19 @@ export async function createDelivery({user, input}) {
       {reason: 'created', deliveryId: String(created._id), status: created.status},
       {riderId: created.rider ? String(created.rider) : null}
     );
+    // Phase 23: dispatchers get a notification, and when a rider is already
+    // assigned it is addressed to THEM personally rather than the branch --
+    // a rider does not read the branch board.
+    await notify({
+      type: 'delivery_update',
+      restaurant: created.restaurant,
+      branch: created.branch,
+      user: created.rider || null,
+      title: created.rider ? 'A delivery has been assigned to you' : 'Delivery created',
+      body: created.address ? String(created.address).slice(0, 200) : undefined,
+      reference: created.deliveryNo || undefined,
+      context: {delivery: String(created._id), status: created.status}
+    });
     return created;
   } finally {
     session.endSession();

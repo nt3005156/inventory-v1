@@ -59,6 +59,7 @@ import {
 } from '../services/purchaseOrders.js';
 import {publishPurchasingEvent, publishInventoryEvent} from '../services/realtime.js';
 import {listExpenses, createExpense, updateExpense, deleteExpense} from '../services/expenses.js';
+import {notify} from '../services/notifications.js';
 
 const r = Router();
 /**
@@ -298,6 +299,23 @@ r.patch('/purchase-orders/:id/status', requirePermission('purchase.approve'), as
       });
     });
     publishPurchaseOrder(po.branch?._id || po.branch, {reason: 'po_status', poId: String(po._id), status: po.status});
+    // Phase 23. `pending` means it is sitting in somebody's approval queue,
+    // which is the state worth interrupting a manager for; approved/rejected
+    // close the loop for whoever raised it.
+    const NOTIFY_ON = {
+      pending: 'po_approval_required', approved: 'po_approved', rejected: 'po_rejected'
+    };
+    if (NOTIFY_ON[po.status]) {
+      await notify({
+        type: NOTIFY_ON[po.status],
+        restaurant: req.principal?.restaurantId,
+        branch: po.branch?._id || po.branch,
+        title: `${po.poNo} ${po.status}`,
+        body: body.notes || `Purchase order ${po.poNo} is ${po.status}`,
+        reference: po.poNo,
+        context: {purchaseOrder: String(po._id), total: po.total}
+      });
+    }
     res.json(po);
   } catch (e) {
     fail(res, e);
