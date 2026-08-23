@@ -84,7 +84,7 @@ describe('GET /api/tables', () => {
 
   it('rejects missing token, guest role, and cross-branch staff', async () => {
     assert.equal((await request('/api/tables?branch=' + world.branchA._id)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/tables?branch=' + world.branchA._id, {token: guest})).status, 403);
     assert.equal((await listTables(world.staffA, world.branchB)).status, 403);
     assert.equal((await request('/api/tables', {token: tokenFor(world.owner)})).status, 400);

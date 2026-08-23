@@ -2,7 +2,7 @@ import 'dotenv/config';import express from 'express';import mongoose from 'mongo
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth,requireStaff,requirePermission} from './middleware/auth.js';
 import onboardingRouter from './routes/onboarding.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -13,14 +13,35 @@ const app=express();
 // make a client's own X-Forwarded-For authoritative and let it forge its
 // rate-limit identity.
 app.set('trust proxy',resolveTrustProxy());
-app.use(cors({origin:corsOrigin,credentials:corsOptions.credentials}));app.use(express.json());app.use('/api',authRouter);app.use('/api',accountsRouter);app.use('/api',customersRouter);app.use('/api',deliveriesRouter);app.use('/api',rbacRouter);app.use('/api',auditRouter);app.use('/api',notificationsRouter);app.use('/api',exportsRouter);app.use('/api',operations);app.use('/api',supplierCatalog);
-const crud=(path,Model,roles=['owner','manager'])=>{app.get('/api/'+path,requireStaff(),async(req,res)=>res.json(await Model.find().sort({createdAt:-1}).populate('supplier ingredient menuItem')));app.post('/api/'+path,auth(roles),async(req,res)=>{const d=await Model.create(req.body);await audit({entity:path,entityId:d._id,action:'create',after:d,user:req.user.id});res.status(201).json(d)});app.patch('/api/'+path+'/:id',auth(roles),async(req,res)=>{const before=await Model.findById(req.params.id);const d=await Model.findByIdAndUpdate(req.params.id,req.body,{new:true});await audit({entity:path,entityId:d._id,action:'update',before,after:d,user:req.user.id});res.json(d)});app.delete('/api/'+path+'/:id',auth(['owner']),async(req,res)=>{const d=await Model.findByIdAndDelete(req.params.id);await audit({entity:path,entityId:req.params.id,action:'delete',before:d,user:req.user.id});res.status(204).end()})};
+app.use(cors({origin:corsOrigin,credentials:corsOptions.credentials}));
+// Phase 25: baseline hardening headers (see middleware/securityHeaders.js).
+app.use(securityHeaders());
+// Phase 25: an explicit body ceiling. Express's default is 100kb, which was
+// already refusing a 3MB body (verified: 413), but the limit is now stated
+// rather than inherited, so a future bump is a deliberate decision.
+app.use(express.json({limit:'256kb'}));app.use('/api',authRouter);app.use('/api',accountsRouter);app.use('/api',customersRouter);app.use('/api',deliveriesRouter);app.use('/api',rbacRouter);app.use('/api',auditRouter);app.use('/api',notificationsRouter);app.use('/api',exportsRouter);app.use('/api',operations);app.use('/api',supplierCatalog);
+/**
+ * Phase 25 — the generic `crud()` helper is REMOVED.
+ *
+ * It generated GET/POST/PATCH/DELETE for a model with:
+ *   - `Model.find()` and no tenant filter at all,
+ *   - `findByIdAndUpdate(req.params.id, req.body)` — any id, mass-assigned,
+ *   - `Model.create(req.body)` — mass-assignment on create.
+ *
+ * Its only remaining caller was `crud('expenses', Expense)`. That was already
+ * SHADOWED by the tenant-scoped `/expenses` routes in routes/purchasing.js,
+ * which are mounted first and therefore win (verified with a minimal Express
+ * probe, not by reading). So this was dead code — but it was one mount-order
+ * change away from silently replacing a hardened endpoint with an unscoped
+ * one, and it lived in index.js, outside the test harness's router set, which
+ * is exactly where the Phase 21 cross-tenant audit leak hid.
+ */
 app.use('/api', onboardingRouter);
 app.use('/api', ingredientsRouter);
 app.use('/api', recipesRouter);
 // Ingredient master now via ingredientsRouter (Phase 3A) — includes units, conversions, categories, suppliers, costs
 app.delete('/api/ingredients/:id',requirePermission('ingredients.delete'),async(_req,res)=>res.status(409).json({message:'Ingredients with inventory history cannot be deleted; deactivate the ingredient instead'}));
-crud('expenses',Expense,['owner','manager']);
+// Expenses are served by the tenant-scoped routes in routes/purchasing.js.
 // These three are PERMANENTLY retired and return 410 to every caller. They
 // carried requireStaff() only because everything else did; the guard gates
 // nothing, since the handler ignores the principal entirely. Phase 20 makes
@@ -39,7 +60,20 @@ app.all('/api/waste',(_req,res)=>res.status(410).json({message:'Legacy waste rec
 // scopes every query through userRestaurantContext().
 let startupReady=false;
 app.get('/health',(req,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting',environment:deployment.environment,cors:deployment.cors,trustProxy:String(deployment.trustProxy),rateLimit:rateLimitScope(),clientIp:req.ip,payments:describePayments()})});
-app.use((e,req,res,next)=>{console.error(e);res.status(e.status||500).json({message:e.message||'Server error'})});
+/**
+ * Global error handler.
+ *
+ * Phase 25: this echoed `e.message` for ANY unhandled error, so a driver or
+ * runtime failure that reached here shipped its internal text to the client.
+ * It now logs the real error server-side and returns the same sanitised body
+ * every route-level handler produces.
+ */
+app.use((e,req,res,next)=>{
+  console.error(e);
+  if(res.headersSent)return next(e);
+  const {status,message}=describeError(e);
+  res.status(status).json({message});
+});
 
 const httpServer=http.createServer(app);attachRealtime(httpServer,{corsOrigin});
 let shuttingDown=false;

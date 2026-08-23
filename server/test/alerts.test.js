@@ -55,7 +55,7 @@ describe('GET /api/alerts', () => {
 
   it('rejects guests, missing tokens and cross-branch managers', async () => {
     assert.equal((await request('/api/alerts')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/alerts', {token: guest})).status, 403);
     assert.equal((await request('/api/alerts?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
     const own = await request('/api/alerts', {token: tokenFor(world.staffA)});

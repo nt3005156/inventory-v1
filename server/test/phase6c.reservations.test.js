@@ -464,7 +464,7 @@ describe('Phase 6C — authorization and tenant isolation', () => {
 
   it('rejects anonymous and guest access', async () => {
     assert.equal((await request(`/api/reservations?branch=${world.branchA._id}`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(
       `/api/reservations?branch=${world.branchA._id}`, {token: guest}
     )).status, 403);

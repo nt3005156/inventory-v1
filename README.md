@@ -986,6 +986,111 @@ querying across all restaurants. A syntactically valid JWT for one restaurant is
 against another — signature validity is not authorization, and a forged `restaurantId` claim is
 overridden by the server-side lookup.
 
+## Security hardening (Phase 25)
+
+A dedicated audit of authentication, JWT handling, tenant isolation, injection,
+error leakage and socket authorization. What follows is what was **found**, not
+a list of controls that already existed.
+
+### Findings and fixes
+
+**1. A token with no `exp` was valid forever.** `jwt.verify(token, secret)`
+does not require an expiry claim. Reproduced: a token whose `iat` was a year
+old and which carried no `exp` returned 200 on `/api/branches` and opened a
+websocket. `signToken()` has always set 12h, so nothing legitimate lacked one —
+but any path that forgot would have minted a permanent credential, with session
+-version revocation as the only brake. `verifyAccessToken()` now asserts the
+claim.
+
+> `requireExp` is **not** a jsonwebtoken option. Passing it is silently
+> ignored, which is exactly how the first attempt at this fix looked applied
+> and changed nothing. The claim is checked explicitly.
+
+**2. No algorithm allowlist.** Verification accepted whatever the token header
+asked for. Now pinned to `HS256` in one place used by both the HTTP guard and
+the Socket.IO handshake — the handshake previously called a bare `jwt.verify`
+and inherited both weaknesses.
+
+**3. Unowned records were a global shared pool.** `services/recipes.js` widened
+lookups with `$or: [{restaurant: id}, {restaurant: null}, {restaurant: {$exists:
+false}}]` so pre-multi-tenancy rows stayed reachable. Reproduced: two different
+restaurants both read the same unowned menu item, and **tenant B successfully
+PATCHed its price** — a cross-tenant write. A record with no `restaurant` now
+belongs to nobody and is invisible to everybody. The correct remedy for a real
+legacy database is a backfill migration, not an authorization bypass.
+
+**4. Error responses leaked internals.** Nine routers shared
+`(res, e) => res.status(e.status || 400).json({message: e.message})`, which
+echoed any error verbatim and blamed the caller for server bugs. Real responses
+included `Cannot read properties of null (reading 'recipeVersion')` and whole
+serialised ZodErrors with internal schema paths. `services/httpErrors.js` now
+maps errors centrally: only a deliberate 4xx is shown, driver text is replaced,
+and anything else is a generic 500.
+
+Mongoose `ValidationError` is deliberately **excluded** from that suppression —
+it carries business rules authored in this repository ("a VAT-registered
+supplier requires a PAN") and is summarised to the field message instead. My
+first version swept it into "Server error"; the existing supplier tests caught
+it.
+
+**5. A tenant-blind generic CRUD generator.** `crud()` in `index.js` produced
+`Model.find()` with no tenant filter, `findByIdAndUpdate(req.params.id,
+req.body)` and `Model.create(req.body)`. Its only caller, `crud('expenses')`,
+was already shadowed by the tenant-scoped routes in `purchasing.js` (verified
+with an Express mount-order probe), so it was dead — but it was one mount-order
+change away from silently replacing a hardened endpoint, and it lived in
+`index.js`, outside the harness's router set, exactly where the Phase 21
+cross-tenant audit leak hid. Removed.
+
+**6. No security response headers.** Added `nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy`, a
+`default-src 'none'` CSP, and `Cache-Control: no-store` on `/api`. HSTS is set
+only in production over TLS — sending it from a plain-HTTP dev box pins the
+browser to `https://` and locks developers out. The receipt route sets its own
+narrower CSP because it is real HTML with an inline `<style>`.
+
+The middleware lives in `middleware/securityHeaders.js` and is installed by
+**both** the production app and the test harness. A header set that only exists
+in `index.js` is a header set nothing can test.
+
+### Verified as already sound
+
+Password hashing (bcrypt, 12 rounds), login rate limiting (10 per 15 min),
+identical answers for a bad password and an unknown email, no bcrypt hash in
+any response, CORS allowlist with no credentialed wildcard, `trust proxy` never
+`true`, a 413 on oversized bodies, escaped receipt HTML, no
+`dangerouslySetInnerHTML` in the client, and NoSQL operator injection refused in
+login and query parameters. There are **no file uploads** in this repository, so
+that item has no attack surface to audit.
+
+### The cross-tenant matrix
+
+`test/phase25.security.hardening.test.js` drives the brief's requirement as an
+executable matrix — **Restaurant A owner → Restaurant B resource → denied** —
+over 62 endpoints spanning orders, payments, refunds, menu, recipes,
+ingredients, suppliers, supplier catalogue, purchasing, tables, floor,
+customers, inventory, batches, valuation, stock counts, kitchen, KDS,
+deliveries, riders, reservations, alerts, waste, transfers, dashboard,
+accounts, RBAC and exports.
+
+An **owner** is used deliberately: they are the most privileged principal and
+`assertBranchAccess()` returns early for them, so an owner is precisely the
+account a branch-only check fails to stop. The matrix asserts three things —
+every request is denied, no response contains the rival's data, and the rival's
+records are byte-for-byte unchanged afterwards. A control test confirms the
+rival owner **can** reach their own resources, without which every 403 could be
+explained by a broken fixture.
+
+### `assertBranchAccess()` — the documented asymmetry
+
+`assertBranchAccess()` is synchronous, cannot query, and **returns early for
+any owner**. That is correct for branch-vs-branch comparison inside one
+restaurant and is not a defect — but it is not an isolation boundary on its
+own. Every HTTP-reachable path goes through `assertTenantBranchAccess()` or
+`purchaseBranchContext()`, which both confirm the branch belongs to the
+caller's restaurant. Tests cover both halves: an owner may cross branches
+inside their own tenant, and may never cross into another.
+
 ## Tables & floor (Phase 6A)
 
 A branch floor is a set of **areas**, each holding tables with a **capacity** and a **status**.

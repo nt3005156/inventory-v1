@@ -291,7 +291,7 @@ describe('Phase 6D — authorization and tenant isolation', () => {
       method: 'POST', body: {ways: 2}
     })).status, 401);
     assert.equal((await request(`/api/tables/${world.table._id}/bill`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await splitEqual(order._id, 2, guest)).status, 403);
     assert.equal((await tableBill(world.table._id, guest)).status, 403);
   });

@@ -66,7 +66,7 @@ describe('POST /api/expenses', () => {
       method: 'POST',
       body: {category: 'rent', description: 'Kalanki shop', amount: 500}
     })).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await createExpense({}, guest)).status, 403);
     assert.equal((await createExpense({amount: 0})).status, 400);
     assert.equal((await createExpense({amount: -10})).status, 400);
@@ -101,7 +101,7 @@ describe('GET /api/expenses', () => {
   it('rejects staff, guests and missing tokens', async () => {
     assert.equal((await request('/api/expenses', {token: tokenFor(world.staffA)})).status, 403);
     assert.equal((await request('/api/expenses')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/expenses', {token: guest})).status, 403);
   });
 

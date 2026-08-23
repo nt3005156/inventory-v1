@@ -6,9 +6,12 @@ import {Audit, Coupon, CouponRedemption} from '../models/index.js';
 import {normalizeCouponInput, normalizeCode, validateCoupon} from '../services/discounts.js';
 import {userRestaurantContext} from '../services/supplierCatalog.js';
 import {ORDER_TYPES} from '../services/pos.js';
+import {fail as safeFail} from '../services/httpErrors.js';
 
 const r = Router();
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 
 const couponSchema = z.object({
   code: z.string().trim().min(2).max(40),

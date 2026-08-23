@@ -88,7 +88,7 @@ describe('POST /api/transfers', () => {
       method: 'POST',
       body: {fromBranch: String(world.branchA._id), toBranch: String(world.branchB._id), ingredient: String(world.ingredient._id), qty: 1}
     })).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await createTransfer({token: guest})).status, 403);
   });
 });
@@ -184,7 +184,7 @@ describe('PATCH /api/transfers/:id/status', () => {
     const created = await createTransfer();
     assert.equal((await setStatus(created.body._id, 'approved', tokenFor(world.staffA))).status, 403);
     assert.equal((await setStatus(created.body._id, 'approved')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await setStatus(created.body._id, 'approved', guest)).status, 403);
   });
 });

@@ -343,7 +343,7 @@ describe('Phase 5D — authorization', () => {
   it('is management only', async () => {
     assert.equal((await perf('', staff())).status, 403);
     assert.equal((await request(`/api/kitchen/performance?branch=${world.branchA._id}`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await perf('', guest)).status, 403);
     assert.equal((await perf('', manager())).status, 200);
   });

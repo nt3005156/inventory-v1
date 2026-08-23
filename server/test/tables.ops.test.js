@@ -132,7 +132,7 @@ describe('POST /api/tables/:id/move', () => {
     const created = await createLinkedOrder();
     assert.equal(created.status, 201, created.body?.message);
     assert.equal((await request('/api/tables/' + world.table._id + '/move', {method: 'POST', body: {toTable: String(table2._id)}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/tables/' + world.table._id + '/move', {method: 'POST', token: guest, body: {toTable: String(table2._id)}})).status, 403);
     assert.equal((await move(world.table, table2, world.staffB)).status, 403);
   });
@@ -221,7 +221,7 @@ describe('POST /api/tables/:id/merge', () => {
     assert.equal(source.status, 201, source.body?.message);
     assert.equal(dest.status, 201, dest.body?.message);
     assert.equal((await request('/api/tables/' + world.table._id + '/merge', {method: 'POST', body: {intoTable: String(table2._id)}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/tables/' + world.table._id + '/merge', {method: 'POST', token: guest, body: {intoTable: String(table2._id)}})).status, 403);
     assert.equal((await merge(world.table, table2, world.staffB)).status, 403);
   });

@@ -303,7 +303,7 @@ describe('Phase 4E — receipt authorization', () => {
   it('requires authentication and rejects guests', async () => {
     const order = await makeOrder();
     assert.equal((await request(`/api/orders/${order._id}/receipt`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await receipt(order._id, '', guest)).status, 403);
   });
 

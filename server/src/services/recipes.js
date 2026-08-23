@@ -20,6 +20,22 @@ async function resolveRestaurant(user){
   return ctx.restaurantId;
 }
 
+/**
+ * Phase 25 — tenant scoping for menu items and ingredients.
+ *
+ * These queries used to be widened with
+ * `$or: [{restaurant: id}, {restaurant: null}, {restaurant: {$exists:false}}]`
+ * so that rows predating multi-tenancy stayed reachable. That turned every
+ * unowned row into a GLOBAL SHARED POOL: reproduced with a probe, two
+ * different restaurants both read the same `restaurant: undefined` menu item,
+ * and tenant B successfully PATCHed its price to 777 — a cross-tenant write.
+ *
+ * Legacy convenience is not worth a tenancy hole. A row with no `restaurant`
+ * now belongs to nobody and is invisible to everybody; the correct fix for a
+ * real legacy database is a backfill migration, not an authorization bypass.
+ */
+const ownedByTenant = restaurantId => ({restaurant: restaurantId});
+
 // Convert recipe qty in given unit to ingredient base unit for costing
 function toBaseQty(qty, recipeUnit, ingredient){
   const base = normalizeUnit(ingredient.unit || ingredient.baseUnit || 'g');
@@ -194,7 +210,7 @@ export async function listMenuItems({ user, q, category, active, page=1, limit=5
   const safePage = Math.max(1, Number(page)||1);
   const safeLimit = Math.min(100, Math.max(1, Number(limit)||50));
   const match = {};
-  match.$or = [{ restaurant: restaurantId }, { restaurant: null }, { restaurant: { $exists:false } }];
+  match.restaurant = restaurantId;
   if(q){
     const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i');
     match.$and = [{ $or: [{ name: regex }, { code: regex }, { category: regex }] }];
@@ -231,7 +247,7 @@ export async function listMenuItems({ user, q, category, active, page=1, limit=5
 export async function getMenuItem({ menuId, user, branchId }){
   if(!mongoose.isValidObjectId(menuId)) throw httpError('Invalid menu item',400);
   const restaurantId = await resolveRestaurant(user);
-  const row = await MenuItem.findOne({ _id: menuId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}] }).populate('recipe.ingredient','name code unit category baseUnit conversions').lean();
+  const row = await MenuItem.findOne({ _id: menuId, ...ownedByTenant(restaurantId) }).populate('recipe.ingredient','name code unit category baseUnit conversions').lean();
   if(!row) throw httpError('Menu item not found',404);
   const recipeCost = await calculateRecipeCost(row.recipe, { restaurantId, branchId });
   const packagingCost = Number(row.packagingCost||0);
@@ -271,11 +287,12 @@ export async function getRecipeVersions({ menuId, user }){
   if(!mongoose.isValidObjectId(menuId)) throw httpError('Invalid menu item',400);
   const restaurantId = await resolveRestaurant(user);
   const row = await MenuItem.findOne({ _id: menuId, restaurant: restaurantId }).select('name code recipeVersion recipe recipeCost packagingCost foodCost recipeHistory').lean();
-  if(!row) {
-    const fallback = await MenuItem.findById(menuId).lean();
-    if(!fallback) throw httpError('Menu item not found',404);
-    // allow legacy without restaurant
-  }
+  // A miss used to fall through to `MenuItem.findById()` and then carry on
+  // using the still-null `row`, throwing a raw
+  // "Cannot read properties of null (reading 'recipeVersion')" as a 400 --
+  // which both leaked an internal stack detail and told the caller the id
+  // exists somewhere. Another tenant's id is simply not found.
+  if(!row) throw httpError('Menu item not found',404);
   const current = {
     version: row.recipeVersion || 1,
     recipe: row.recipe,
@@ -324,7 +341,7 @@ export async function createMenuItem({ input, user, principal }){
       const ingId = String(line.ingredient);
       if(seen.has(ingId)) throw httpError('Duplicate ingredient in recipe',400);
       seen.add(ingId);
-      const ing = await Ingredient.findOne({ _id: ingId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}] });
+      const ing = await Ingredient.findOne({ _id: ingId, ...ownedByTenant(restaurantId) });
       if(!ing) throw httpError(`Ingredient ${ingId} not found for this restaurant`,404);
       if(ing.active===false) throw httpError(`Ingredient ${ing.name} is inactive`,400);
       const qty = Number(line.qty);
@@ -381,7 +398,7 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user, pri
   if(!mongoose.isValidObjectId(menuId)) throw httpError('Invalid menu item',400);
   const restaurantId = await resolveRestaurant(user);
   assertCapability(user, principal, 'menu.manage', 'Only owner/manager can update menu items');
-  const row = await MenuItem.findOne({ _id: menuId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}] });
+  const row = await MenuItem.findOne({ _id: menuId, ...ownedByTenant(restaurantId) });
   if(!row) throw httpError('Menu item not found',404);
   if(expectedVersion!==undefined && Number(expectedVersion)!==row.__v) throw httpError('Menu item changed since loaded; refresh',409);
   const before = row.toObject();
@@ -440,7 +457,7 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user, pri
       const ingId=String(line.ingredient);
       if(seen.has(ingId)) throw httpError('Duplicate ingredient',400);
       seen.add(ingId);
-      const ing=await Ingredient.findOne({_id:ingId, $or:[{restaurant:restaurantId},{restaurant:null},{restaurant:{$exists:false}}]});
+      const ing=await Ingredient.findOne({_id:ingId, ...ownedByTenant(restaurantId)});
       if(!ing) throw httpError('Ingredient not found',404);
       const qty=Number(line.qty);
       if(!Number.isFinite(qty)||qty<=0) throw httpError(`Invalid qty for ${ing.name}`,400);

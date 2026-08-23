@@ -98,7 +98,7 @@ describe('GET /api/dashboard', () => {
   it('lets assigned staff read their branch and blocks guests and cross-branch queries', async () => {
     assert.equal((await request('/api/dashboard', {token: tokenFor(world.staffA)})).status, 200);
     assert.equal((await request('/api/dashboard')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/dashboard', {token: guest})).status, 403);
     assert.equal((await request('/api/dashboard?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });

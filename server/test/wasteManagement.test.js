@@ -191,7 +191,7 @@ describe('Phase 2C waste management',()=>{
     assert.equal((await postWaste({user:world.staffA,branch:world.branchB._id,key:'staff-cross-branch'})).status,403);
     assert.equal((await request(`/api/waste/events?branch=${world.branchB._id}`,{token:tokenFor(world.staffA)})).status,403);
 
-    const guest=jwt.sign({id:world.owner._id,name:'Guest',role:'guest'},process.env.JWT_SECRET);
+    const guest=jwt.sign({id:world.owner._id,name:'Guest',role:'guest'},process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/waste/record',{method:'POST',token:guest,headers:{'Idempotency-Key':'guest-waste'},body:payload})).status,403);
     assert.equal((await request(`/api/waste/events?branch=${world.branchA._id}`,{token:guest})).status,403);
 

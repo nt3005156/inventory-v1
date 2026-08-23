@@ -1,4 +1,5 @@
 import {Router} from 'express';
+import {fail as safeFail} from '../services/httpErrors.js';
 import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth, requirePermission} from '../middleware/auth.js';
@@ -95,8 +96,17 @@ const supplierQuerySchema = z.object({
 }).strict();
 
 function fail(res, error) {
-  const conflict = error?.name === 'VersionError' || error?.errorLabels?.includes('TransientTransactionError');
-  res.status(error.status || (conflict ? 409 : 400)).json({message: error.message || 'Supplier catalog request failed'});
+  // A concurrent-write conflict is a real 409 the caller can act on (refresh
+  // and retry), so it keeps its own mapping. Everything else goes through the
+  // shared mapper: this used to echo any error verbatim with a 400, which
+  // dumped whole serialised ZodErrors -- internal schema paths included --
+  // and mislabelled server faults as the caller's mistake.
+  const conflict = error?.name === 'VersionError'
+    || error?.errorLabels?.includes('TransientTransactionError');
+  if (conflict && !error.status) {
+    return res.status(409).json({message: 'That record changed; refresh and try again'});
+  }
+  return safeFail(res, error);
 }
 
 async function publishRestaurantCatalogChange(restaurant, payload) {

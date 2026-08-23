@@ -258,14 +258,14 @@ describe('Phase 6A.1 — JWT validity is not authorization', () => {
     // Server-side lookup wins over whatever the token asserts.
     const forged = jwt.sign(
       {id: rival.owner._id, name: 'Rival', role: 'owner', restaurantId: world.restaurant._id, branch: world.branchA._id},
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     const res = await request(`/api/kitchen/board?branch=${OURS()}`, {token: forged});
     assert.ok(DENIED.has(res.status), `forged claim leaked: ${res.status}`);
   });
 
   it('rejects an unknown role', async () => {
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(`/api/kitchen/board?branch=${OURS()}`, {token: guest})).status, 403);
   });
 });

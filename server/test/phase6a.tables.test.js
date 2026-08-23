@@ -366,7 +366,7 @@ describe('Phase 6A — tenant isolation and RBAC', () => {
 
   it('rejects anonymous, guest and malformed requests', async () => {
     assert.equal((await request(`/api/tables?branch=${world.branchA._id}`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(`/api/tables?branch=${world.branchA._id}`, {token: guest})).status, 403);
     assert.equal((await request('/api/tables/floor', {token: owner()})).status, 400);
     assert.equal((await request('/api/tables/floor?branch=nonsense', {token: owner()})).status, 400);

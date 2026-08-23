@@ -263,7 +263,7 @@ describe('AUDIT §5 — authorization cannot be bypassed via the API', () => {
     assert.equal((await request(url)).status, 401);
     assert.equal((await request(url, {token: tokenFor(world.staffA)})).status, 403);
 
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(url, {token: guest})).status, 403);
 
     const forged = jwt.sign({id: world.owner._id, role: 'owner'}, 'attacker-secret');

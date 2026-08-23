@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import {fail as safeFail} from '../services/httpErrors.js';
 import mongoose from 'mongoose';
 import { z } from 'zod';
 import { auth, requirePermission} from '../middleware/auth.js';
@@ -12,7 +13,9 @@ import {
 } from '../services/ingredients.js';
 
 const r = Router();
-const fail = (res,e)=> res.status(e.status||400).json({message:e.message||'Failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 const parse = (s,b)=> s.parse(b);
 
 const conversionSchema = z.object({

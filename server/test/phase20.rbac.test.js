@@ -172,7 +172,7 @@ describe('Phase 20 · deactivation takes effect immediately', () => {
     // Status codes carry meaning: 401 means "your session is over, sign in
     // again", 403 means "you are who you say you are, but no". Forty-one
     // existing assertions depend on this distinction and it must not drift.
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(`/api/kitchen/board?branch=${world.branchA._id}`, {token: guest})).status, 403);
     assert.equal((await request('/api/reports/pnl', {token: staff()})).status, 403);
   });
@@ -676,7 +676,7 @@ describe('Phase 20 · guard integrity', () => {
         restaurantId: world.restaurant._id, branch: world.branchA._id,
         permissions: [...ALL_PERMISSIONS], roleKey: 'owner'
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     assert.equal((await request('/api/reports/pnl', {token: forged})).status, 403);
     assert.equal((await request('/api/roles', {method: 'POST', token: forged, body: {key: 'x', name: 'Ex'}})).status, 403);

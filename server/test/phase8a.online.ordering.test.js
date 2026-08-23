@@ -427,7 +427,7 @@ describe('Phase 8A — the branch accepts or rejects a web order', () => {
 
   it('rejects a guest token on the staff endpoints', async () => {
     const order = await webOrder();
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request(`/api/online-orders?branch=${BRANCH()}`, {token: guest})).status, 403);
     assert.equal((await request(`/api/online-orders/${order._id}/accept`, {
       method: 'POST', token: guest, body: {}

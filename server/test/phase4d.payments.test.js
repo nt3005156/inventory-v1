@@ -350,7 +350,7 @@ describe('Phase 4D — refund authorization', () => {
     assert.equal((await request(`/api/orders/${order._id}/refunds`, {
       method: 'POST', body: {amount: 10}
     })).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await refund(order._id, {amount: 10}, guest)).status, 403);
 
     assert.equal((await refund(order._id, {amount: 10}, manager())).status, 201);

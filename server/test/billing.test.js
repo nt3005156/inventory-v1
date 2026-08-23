@@ -96,7 +96,7 @@ describe('multiple and partial payments', () => {
     });
     assert.equal((await pay(created.body._id, 10)).status, 409);
     assert.equal((await request('/api/orders/' + created.body._id + '/payments', {method: 'POST', body: {amount: 10, method: 'cash'}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/orders/' + created.body._id + '/payments', {method: 'POST', token: guest, body: {amount: 10, method: 'cash'}})).status, 403);
     const other = await request('/api/orders', {
       method: 'POST',

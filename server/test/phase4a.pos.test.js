@@ -249,7 +249,7 @@ describe('Phase 4A — POST /api/orders across the four channels', () => {
 
   it('rejects unauthenticated and cross-branch order creation', async () => {
     assert.equal((await request('/api/orders', {method: 'POST', body: base({type: 'counter'})})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/orders', {method: 'POST', token: guest, body: base({type: 'counter'})})).status, 403);
     const crossBranch = {branch: String(world.branchB._id), type: 'counter', items: [{menuItem: String(world.menu._id), qty: 1}]};
     assert.equal((await post(crossBranch, world.staffA)).status, 403);

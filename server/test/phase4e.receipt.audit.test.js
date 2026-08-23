@@ -405,7 +405,7 @@ describe('AUDIT 8 — branch isolation and authorization', () => {
   it('rejects unauthenticated, guest and cross-branch access', async () => {
     const order = await makeOrder();
     assert.equal((await request(`/api/orders/${order._id}/receipt`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await receipt(order._id, '', guest)).status, 403);
 
     const otherBranch = await makeOrder({items: [{menuItem: String(world.menu._id), qty: 1}]}, world.branchB);

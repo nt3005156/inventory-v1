@@ -589,7 +589,7 @@ describe('13 — isolation and authorisation', () => {
     assert.equal((await request(`/api/orders/${order._id}/receipt`)).status, 401);
     assert.equal((await receipt(order._id, '', 'not.a.jwt')).status, 401);
 
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await receipt(order._id, '', guest)).status, 403);
 
     const intruder = tokenFor(rival.owner);

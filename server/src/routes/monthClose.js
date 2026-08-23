@@ -2,9 +2,12 @@ import {Router} from 'express';
 import {z} from 'zod';
 import {auth, requirePermission} from '../middleware/auth.js';
 import {closeMonth, listMonthCloses, previewMonthClose, reopenMonth} from '../services/monthClose.js';
+import {fail as safeFail} from '../services/httpErrors.js';
 
 const r = Router();
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 const monthSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Month must use YYYY-MM');
 
 r.get('/month-close/preview', requirePermission('reports.view'), async (req, res) => {

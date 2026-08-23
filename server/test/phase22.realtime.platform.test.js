@@ -120,7 +120,7 @@ describe('Phase 22 · socket authentication', () => {
         id: String(world.manager._id), name: 'Manager', role: 'manager',
         restaurantId: String(rival._id), branch: String(world.branchA._id), sv: 0
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     const socket = await connect(forged, world.branchA._id);
     try {

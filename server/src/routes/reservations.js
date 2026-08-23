@@ -1,4 +1,5 @@
 import {Router} from 'express';
+import {fail as safeFail} from '../services/httpErrors.js';
 import mongoose from 'mongoose';
 import {z} from 'zod';
 import {auth, requirePermission} from '../middleware/auth.js';
@@ -17,7 +18,9 @@ import {
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 
 const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must use YYYY-MM-DD');
 const TIME = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must use HH:MM (24-hour)');

@@ -81,7 +81,7 @@ describe('GET /api/inventory', () => {
     assert.equal(own.status, 200);
     assert.equal(own.body.length, 1);
     assert.equal((await request('/api/inventory')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/inventory', {token: guest})).status, 403);
     assert.equal((await request('/api/inventory?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });
@@ -115,7 +115,7 @@ describe('GET /api/inventory/transactions', () => {
   it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
     assert.equal((await request('/api/inventory/transactions?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
     assert.equal((await request('/api/inventory/transactions')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/inventory/transactions', {token: guest})).status, 403);
     assert.equal((await request('/api/inventory/transactions?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });

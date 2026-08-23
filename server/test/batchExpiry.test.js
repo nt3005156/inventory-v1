@@ -521,7 +521,7 @@ describe('durable batch and expiry inventory', () => {
     assert.equal((await request(`/api/inventory/batches?branch=${world.branchA._id}`, {token: tokenFor(world.staffA)})).status, 200);
     assert.equal((await request(`/api/inventory/batches?branch=${world.branchB._id}`, {token: tokenFor(world.manager)})).status, 403);
     assert.equal((await request(`/api/inventory/batches?branch=${world.branchA._id}`, {
-      token: jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET)
+      token: jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'})
     })).status, 403);
 
     const otherRestaurant = await Restaurant.create({name: 'Foreign Restaurant'});

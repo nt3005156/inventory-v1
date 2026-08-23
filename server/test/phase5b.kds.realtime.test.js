@@ -186,7 +186,7 @@ describe('Phase 5B — no unauthorized branch access', () => {
   });
 
   it('refuses a role outside the kitchen roles', async () => {
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     await assert.rejects(() => connect(guest), /Insufficient permission/i);
   });
 

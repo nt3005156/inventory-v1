@@ -575,7 +575,7 @@ describe('Phase 17 · JWT/session revocation', () => {
         id: String(world.manager._id), name: 'Manager', role: 'manager',
         restaurantId: String(world.restaurant._id), branch: String(world.branchA._id)
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     assert.equal((await request('/api/accounts', {token: legacy})).status, 200);
   });

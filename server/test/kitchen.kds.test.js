@@ -49,7 +49,7 @@ describe('GET /api/kitchen/orders', () => {
   });
 
   it('rejects unauthorized roles and cross-branch staff', async () => {
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     const forbiddenRole = await request('/api/kitchen/orders?branch=' + world.branchA._id, {token: guest});
     assert.equal(forbiddenRole.status, 403);
 

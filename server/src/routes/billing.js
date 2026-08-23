@@ -10,10 +10,13 @@ import {refreshCustomerStatsSafe} from '../services/customers.js';
 import {getReceipt, renderReceiptHtml} from '../services/receipts.js';
 import {publishKitchenOrder, publishOrderEvent, publishPaymentEvent, publishTableEvent} from '../services/realtime.js';
 import {notify} from '../services/notifications.js';
+import {fail as safeFail} from '../services/httpErrors.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 
 const paySchema = z.object({
   amount: z.number().positive().optional(),
@@ -225,6 +228,15 @@ r.get('/orders/:id/receipt', requirePermission('invoices.issue'), async (req, re
     }
     if (wantsHtml) {
       res.set('Content-Type', 'text/html; charset=utf-8');
+      /**
+       * The global API policy is `default-src 'none'`, which would blank this
+       * page: the receipt is a self-contained document with an inline <style>
+       * block. It gets its own policy rather than a global relaxation --
+       * inline STYLE only, no scripts, no network of any kind, so the
+       * document cannot be turned into an exfiltration channel even if a
+       * field were ever rendered unescaped. (`esc()` escapes them all.)
+       */
+      res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
       return res.send(renderReceiptHtml(receipt));
     }
     res.json(receipt);

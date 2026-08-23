@@ -2,6 +2,45 @@ import jwt from 'jsonwebtoken';
 import {resolvePrincipal} from '../services/accessControl.js';
 import {BASE_ROLES, grants} from '../services/permissions.js';
 
+/**
+ * Phase 25 — how a bearer token is verified.
+ *
+ * `jwt.verify(token, secret)` on its own is too permissive in two ways that a
+ * probe confirmed:
+ *
+ *   1. NO ALGORITHM ALLOWLIST. The library defaults to accepting whatever the
+ *      token's own header asks for. `alg: none` happens to be refused when a
+ *      secret is supplied, but an HS/RS confusion attack turns on exactly this
+ *      behaviour, and relying on a library default for it is not a control.
+ *      Pinning HS256 makes the intent explicit and version-proof.
+ *
+ *   2. `exp` WAS OPTIONAL. A token minted without an expiry verified happily
+ *      and never stopped working — reproduced: a token with a one-year-old
+ *      `iat` and no `exp` returned 200, and held a websocket open. Nothing
+ *      legitimate lacks one (`signToken()` always sets 12h), but a token
+ *      minted by any path that forgot to would have been a PERMANENT
+ *      credential that session-version revocation is the only brake on.
+ *
+ * NOTE: jsonwebtoken has no `requireExp` option — passing one is silently
+ * ignored, which is exactly how a "fix" can look applied and do nothing. The
+ * first attempt here did that and the probe still returned 200. The claim is
+ * therefore asserted explicitly below.
+ *
+ * Both rules live in ONE function so no call site (HTTP guard or Socket.IO
+ * handshake) can forget them.
+ */
+export const JWT_VERIFY_OPTIONS = Object.freeze({algorithms: ['HS256']});
+
+export function verifyAccessToken(token) {
+  const payload = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+  if (typeof payload?.exp !== 'number') {
+    // Same error type the library raises, so every existing catch that maps a
+    // JsonWebTokenError to 401 keeps working unchanged.
+    throw new jwt.JsonWebTokenError('Token must carry an expiry');
+  }
+  return payload;
+}
+
 /** Every role that is part of restaurant operations, excluding riders. */
 export const STAFF_ROLES = Object.freeze(['owner', 'manager', 'staff']);
 
@@ -27,7 +66,7 @@ export const STAFF_ROLES = Object.freeze(['owner', 'manager', 'staff']);
 function readClaim(req) {
   try {
     const token = req.headers.authorization?.split(' ')[1];
-    return jwt.verify(token, process.env.JWT_SECRET);
+    return verifyAccessToken(token);
   } catch {
     return null;
   }
@@ -35,7 +74,7 @@ function readClaim(req) {
 
 async function authenticate(req) {
   const token = req.headers.authorization?.split(' ')[1];
-  const payload = jwt.verify(token, process.env.JWT_SECRET);
+  const payload = verifyAccessToken(token);
   const principal = await resolvePrincipal(payload);
 
   req.principal = principal;

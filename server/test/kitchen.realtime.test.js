@@ -90,7 +90,7 @@ describe('socket authentication', () => {
   });
 
   it('rejects an unauthorized role', async () => {
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     await assert.rejects(() => connectSocket(guest, world.branchA._id), err => {
       assert.match(err.message, /Insufficient permission/i);
       return true;

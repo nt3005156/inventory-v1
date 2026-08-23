@@ -174,7 +174,7 @@ describe('POST /api/purchase-orders/:id/receive', () => {
     const body = {items: [{itemId: String(line._id), receivedQty: 10, damagedQty: 0}]};
     assert.equal((await receive(po.body._id, body.items, {user: world.staffA})).status, 403);
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/receive', {method: 'POST', body})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/receive', {method: 'POST', token: guest, body})).status, 403);
   });
 });
@@ -336,7 +336,7 @@ describe('supplier statement', () => {
   it('rejects staff, guests, and missing tokens', async () => {
     assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
     assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchA._id, {token: guest})).status, 403);
     assert.equal((await request('/api/suppliers/' + supplier._id + '/statement?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });
@@ -430,7 +430,7 @@ describe('GET /api/reports/purchasing', () => {
   it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
     assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
     assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/reports/purchasing?branch=' + world.branchA._id, {token: guest})).status, 403);
     assert.equal((await request('/api/reports/purchasing?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });
@@ -553,7 +553,7 @@ describe('PATCH /api/supplier-invoices/:id', () => {
     const inv = await createInvoice({invoiceNo: 'INV-ACL'});
     assert.equal((await patchInvoice(inv.body._id, {notes: 'x'}, {user: world.staffA})).status, 403);
     assert.equal((await request('/api/supplier-invoices/' + inv.body._id, {method: 'PATCH', body: {notes: 'x'}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/supplier-invoices/' + inv.body._id, {method: 'PATCH', token: guest, body: {notes: 'x'}})).status, 403);
 
     const other = await request('/api/supplier-invoices', {
@@ -684,7 +684,7 @@ describe('PATCH /api/purchase-orders/:id/status', () => {
     const po = await createPo(50, {draft: true});
     assert.equal((await patchPoStatus(po.body._id, 'pending', {user: world.staffA})).status, 403);
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/status', {method: 'PATCH', body: {status: 'pending'}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/purchase-orders/' + po.body._id + '/status', {method: 'PATCH', token: guest, body: {status: 'pending'}})).status, 403);
 
     const other = await request('/api/purchase-orders', {

@@ -290,7 +290,7 @@ describe('production API process lifecycle', () => {
       assert.equal(untrusted.status, 200);
       assert.equal(untrusted.headers.get('access-control-allow-origin'), null);
 
-      const token = jwt.sign({id: '507f1f77bcf86cd799439011', role: 'owner'}, productionSecret);
+      const token = jwt.sign({id: '507f1f77bcf86cd799439011', role: 'owner'}, productionSecret, {expiresIn: '1h'});
       for (const path of ['/api/purchases', '/api/sales', '/api/waste']) {
         const retired = await fetch(`http://127.0.0.1:${port}${path}`, {
           method: 'POST',

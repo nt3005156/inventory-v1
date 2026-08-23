@@ -122,7 +122,7 @@ describe('GET /api/analytics/menu-engineering', () => {
   it('rejects staff, guests, missing tokens and cross-branch managers', async () => {
     assert.equal((await request('/api/analytics/menu-engineering?branch=' + world.branchA._id, {token: tokenFor(world.staffA)})).status, 403);
     assert.equal((await request('/api/analytics/menu-engineering?branch=' + world.branchA._id)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/analytics/menu-engineering?branch=' + world.branchA._id, {token: guest})).status, 403);
     assert.equal((await request('/api/analytics/menu-engineering?branch=' + world.branchB._id, {token: tokenFor(world.manager)})).status, 403);
   });

@@ -17,6 +17,7 @@ import deliveriesRouter from '../src/routes/deliveries.js';
 import authRouter from '../src/routes/auth.js';
 import accountsRouter from '../src/routes/accounts.js';
 import {attachRealtime, closeRealtime} from '../src/services/realtime.js';
+import {securityHeaders} from '../src/middleware/securityHeaders.js';
 import {User} from '../src/models/index.js';
 import {Restaurant, Branch, InventoryBalance, RestaurantTable, Order} from '../src/models/operations.js';
 import {Ingredient, MenuItem} from '../src/models/index.js';
@@ -62,7 +63,12 @@ export async function startTestApp() {
   }
   if (!server) {
     const app = express();
-    app.use(express.json());
+    // Phase 25: the harness installs the SAME security-header middleware as
+    // production. Headers that only exist in index.js are headers no test can
+    // assert -- which is how the unscoped crud() block in index.js went
+    // unnoticed for so long.
+    app.use(securityHeaders());
+    app.use(express.json({limit: '256kb'}));
     // Mounted so login is exercised by tests, exactly as production does it.
     app.use('/api', authRouter);
     app.use('/api', accountsRouter);
@@ -106,7 +112,7 @@ export async function clearDb() {
   for (const collection of collections) await collection.deleteMany({});
 }
 
-export async function request(path, {method = 'GET', token, body, headers = {}} = {}) {
+export async function request(path, {method = 'GET', token, body, headers = {}, raw = false} = {}) {
   const res = await fetch(baseUrl + path, {
     method,
     headers: {
@@ -119,7 +125,11 @@ export async function request(path, {method = 'GET', token, body, headers = {}} 
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  return {status: res.status, body: data};
+  // `raw` exposes the response headers, which the Phase 25 header assertions
+  // need. The default shape is unchanged so no existing caller is affected.
+  return raw
+    ? {status: res.status, body: data, headers: res.headers}
+    : {status: res.status, body: data};
 }
 
 export async function seedWorld() {
@@ -132,6 +142,11 @@ export async function seedWorld() {
   const staffB = await User.create({name: 'Staff B', email: 'staffb@test.com', password: 'hashed', role: 'staff', restaurant: 'Mittho Test', restaurantId: restaurant._id, branch: branchB._id});
   const ingredient = await Ingredient.create({restaurant: restaurant._id, code: 'ING-T1', name: 'Basmati Rice', unit: 'g', minimumStock: 2000});
   const menu = await MenuItem.create({
+    // Phase 25: the fixture used to omit `restaurant`, which only worked
+    // because recipes.js widened every lookup to also match unowned rows --
+    // a cross-tenant shared pool. Production has always set it (createMenuItem
+    // writes `restaurant: restaurantId`), so the fixture was the outlier.
+    restaurant: restaurant._id,
     name: 'Chicken Biryani',
     price: 350,
     vatInclusive: false,

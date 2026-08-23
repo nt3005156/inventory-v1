@@ -339,7 +339,7 @@ describe('Phase 5C — menu assignment and authorization', () => {
 
   it('rejects unauthenticated and guest access', async () => {
     assert.equal((await request('/api/kitchen/stations')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await stations('', guest)).status, 403);
   });
 });

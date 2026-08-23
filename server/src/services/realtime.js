@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {Server} from 'socket.io';
 import jwt from 'jsonwebtoken';
+import {verifyAccessToken} from '../middleware/auth.js';
 import mongoose from 'mongoose';
 import {purchaseBranchContext} from './purchaseOrders.js';
 import {Order} from '../models/operations.js';
@@ -129,7 +130,11 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
     try {
       const token = readToken(socket);
       if (!token) return next(new Error('Authentication required'));
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      // Phase 25: the same verification rules as the HTTP guard -- pinned
+      // algorithm and a mandatory `exp`. The handshake previously called a
+      // bare `jwt.verify`, so a token with no expiry could hold a socket open
+      // indefinitely; confirmed by probe (CONNECTED).
+      const payload = verifyAccessToken(token);
       if (!SOCKET_ROLES.includes(payload.role)) return next(new Error('Insufficient permission'));
 
       /**

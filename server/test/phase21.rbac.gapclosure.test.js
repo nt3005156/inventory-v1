@@ -312,7 +312,7 @@ describe('Gap closure · per-device logout', () => {
         restaurantId: String(world.restaurant._id), branch: String(world.branchA._id),
         sv: 0, sid: 'deadbeef'.repeat(8)
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     assert.equal((await request('/api/me/permissions', {token: forged})).status, 401);
   });
@@ -336,7 +336,7 @@ describe('Gap closure · per-device logout', () => {
         id: String(world.manager._id), name: 'Manager', role: 'manager',
         restaurantId: String(world.restaurant._id), branch: String(world.branchA._id), sv: 0
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     assert.equal((await request('/api/accounts', {token: legacy})).status, 200);
     // And logging that token out falls back to a global sign-out rather than
@@ -851,7 +851,7 @@ describe('Gap closure · password reset revocation policy', () => {
         id: String(account._id), name: 'Account', role: 'staff',
         restaurantId: String(world.restaurant._id), branch: String(world.branchA._id), sv: 0
       },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET, {expiresIn: '1h'}
     );
     assert.equal((await request('/api/me/permissions', {token: legacy})).status, 200);
     await request(`/api/accounts/${account._id}/password`, {

@@ -150,7 +150,7 @@ describe('Phase 5A — branch filtering', () => {
   it('stops staff reading another branch board', async () => {
     assert.equal((await request(`/api/kitchen/board?branch=${world.branchB._id}`, {token: staff()})).status, 403);
     assert.equal((await request(`/api/kitchen/board?branch=${world.branchA._id}`)).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await board('', guest)).status, 403);
   });
 });

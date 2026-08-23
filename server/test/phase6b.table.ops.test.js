@@ -251,7 +251,7 @@ describe('Phase 6B — reopen a settled check', () => {
     await settle(order);
     assert.equal((await reopen(order._id, {}, staff())).status, 403);
     assert.equal((await request(`/api/orders/${order._id}/reopen`, {method: 'POST', body: {}})).status, 401);
-    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await reopen(order._id, {}, guest)).status, 403);
   });
 

@@ -378,7 +378,7 @@ describe('Phase 4C — authorization', () => {
 
   it('rejects unauthenticated and guest access', async () => {
     assert.equal((await request('/api/coupons')).status, 401);
-    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET);
+    const guest = jwt.sign({id: world.owner._id, name: 'Guest', role: 'guest'}, process.env.JWT_SECRET, {expiresIn: '1h'});
     assert.equal((await request('/api/coupons', {token: guest})).status, 403);
     assert.equal((await makeCoupon({code: 'GUESTMADE', kind: 'fixed', value: 5}, guest)).status, 403);
   });

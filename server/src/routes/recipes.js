@@ -3,9 +3,12 @@ import mongoose from 'mongoose';
 import { z } from 'zod';
 import { auth, requirePermission} from '../middleware/auth.js';
 import { listMenuItems, getMenuItem, createMenuItem, updateMenuItem, getRecipeVersions, getFoodCosting } from '../services/recipes.js';
+import {fail as safeFail} from '../services/httpErrors.js';
 
 const r = Router();
-const fail = (res,e)=> res.status(e.status||400).json({message:e.message||'Failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 const parse = (s,b)=> s.parse(b);
 
 const recipeLine = z.object({

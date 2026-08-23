@@ -8,10 +8,13 @@ import {assertBranchAccess} from '../services/kitchen.js';
 import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrders, assertTableBranchAccess, normalizeArea, buildFloorPlan, archiveTable, reopenOrder, getTableHistory, getTableSettlement, MAX_SEATS} from '../services/tables.js';
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent, publishOrderEvent} from '../services/realtime.js';
+import {fail as safeFail} from '../services/httpErrors.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
-const fail = (res, e) => res.status(e.status || 400).json({message: e.message || 'Request failed'});
+// Phase 25: shared safe error mapper. The local one echoed any error
+// verbatim with a 400, leaking driver text and mislabelling server faults.
+const fail = safeFail;
 
 const createSchema = z.object({
   branch: z.string(),
