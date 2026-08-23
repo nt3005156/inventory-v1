@@ -1166,6 +1166,127 @@ is never fabricated or silently omitted, and the invoice sequence is not spent o
 would be invalid. A read-only preview still works and reports `taxConfigured: false` so the till
 can warn before printing. A branch PAN overrides the restaurant's.
 
+## Demo data and onboarding
+
+### Seeding the demo dataset
+
+```bash
+npm run seed              # wipe and seed the demo tenant
+npm run seed -- --keep    # seed only if no restaurant exists yet
+```
+
+The dataset is deliberately large enough to evaluate the system against, not
+just large enough to render a screen:
+
+| | |
+|---|---|
+| Restaurant | Mittho Biryani House (NPR, 13% VAT, PAN set) |
+| Branches | 3 — Kathmandu (KTM), Lalitpur (LTP), Bhaktapur (BKT) |
+| Users | 10 — owner, 2 managers, 4 staff, 3 riders |
+| Ingredients | 60, across grains, meat, dairy, vegetables, spices, oils, packaging |
+| Suppliers | 16, each with catalogue lines and price history |
+| Menu | 65 items with costed recipes (biryani, momo, thali, curry, grill, noodles, breads, beverages) |
+| Tables | 26 across the three branches |
+| Customers | 20 with addresses, preferences and loyalty tiers |
+| Purchasing | 8 purchase orders, 6 received into stock, with supplier invoices |
+| Trading | 60 orders, 56 payments, 15 deliveries |
+| Inventory | 180 balances and 200 tracked batches |
+
+**The data reconciles.** Stock arrives through `moveStock()`, so balances, the
+ledger, batches and weighted-average cost genuinely agree — a test asserts the
+sum of ledger movements equals every balance. Orders are priced by the real
+`priceOrder()` engine, so VAT, service charge and rounding match what the POS
+would produce; a test re-prices every seeded order and compares. Hand-written
+collections would look right on screen and reconcile wrong, and would silently
+stop matching the system the first time a pricing rule moved.
+
+Food costs land between 10% and 40% of menu price. A demo where every dish
+shows a 95% margin teaches an operator nothing.
+
+### Demo credentials — DEVELOPMENT ONLY
+
+Every account uses the password **`MitthoDemo2026`**.
+
+| Email | Role | Branch |
+|---|---|---|
+| `owner@mittho.demo` | owner | all |
+| `manager.ktm@mittho.demo` | manager | KTM |
+| `manager.ltp@mittho.demo` | manager | LTP |
+| `cashier.ktm@mittho.demo` | staff | KTM |
+| `kitchen.ktm@mittho.demo` | staff | KTM |
+| `cashier.ltp@mittho.demo` | staff | LTP |
+| `cashier.bkt@mittho.demo` | staff | BKT |
+| `rider1@mittho.demo` | rider | KTM |
+| `rider2@mittho.demo` | rider | KTM |
+| `rider3@mittho.demo` | rider | LTP |
+
+> **NEVER use these in production.** They are published here, so they are
+> public. Two guards enforce this rather than relying on operator discipline:
+> the seed refuses to run when `NODE_ENV=production`, and `ALLOW_DEMO_SEED=false`
+> disables it in any environment. Both are covered by tests. The script also
+> DELETES the collections it manages, so running it against live data would
+> destroy a real restaurant's inventory.
+
+### Onboarding a new restaurant
+
+The brief's chain, and the order the API enforces:
+
+```
+Restaurant -> Branch -> Users -> Ingredients -> Suppliers -> Menu -> Tables
+```
+
+The order is not decorative. A menu recipe references ingredients, an
+ingredient's catalogue entry references a supplier, a user references a branch,
+and a branch references a restaurant. Out of order you get a dangling reference
+or a confusing validation error three screens later.
+
+| Endpoint | Step | Permission |
+|---|---|---|
+| `GET /api/onboarding/steps` | the canonical order | `branches.view` |
+| `GET /api/onboarding/status` | progress, derived by counting | `branches.view` |
+| `POST /api/onboarding/branch` | 2 | `branches.manage` |
+| `POST /api/onboarding/users` | 3 | `users.create` |
+| `POST /api/onboarding/ingredients` | 4 | `ingredients.manage` |
+| `POST /api/onboarding/suppliers` | 5 | `suppliers.manage` |
+| `POST /api/onboarding/menu` | 6 | `menu.manage` |
+| `POST /api/onboarding/tables` | 7 | `tables.configure` |
+
+Onboarding is a **sequence over existing capabilities**, not a second
+authorisation system: each step reuses the permission that already guards the
+equivalent operation, and accounts go through the existing
+`createStaffAccount()` so the password policy, tenant pin and safe projection
+still apply.
+
+`GET /onboarding/status` derives progress by COUNTING rather than from a stored
+`onboarding_state` flag, so it cannot drift from reality. Each step reports
+`blocked: true` while its prerequisite is unmet, which is what makes the chain
+visible in the UI rather than merely implied.
+
+**Step 1 has no HTTP route, deliberately.** Creating a restaurant and its first
+owner is a bootstrap: there is no authenticated principal inside a tenant that
+does not exist yet, so an endpoint for it would be an unauthenticated
+tenant-minting route. It lives in `services/onboarding.js` as
+`provisionRestaurant()` and is reached through the seed script. The bootstrap
+owner's password goes through the same policy as every other account, so the
+first account in a tenant cannot be the one weak credential.
+
+### Tenancy fixes found while building this
+
+Two cross-tenant defects in the branch endpoints, both reproduced by probe
+before being fixed:
+
+- **`GET /api/branches` listed every tenant's branches.** It ran
+  `Branch.find({active:true})` with no restaurant filter.
+- **`POST /api/branches` took `restaurant` from the request body**, so an owner
+  could create a branch inside another restaurant. Confirmed: the row landed in
+  the rival tenant with a 201.
+
+Both now take the tenant from the authenticated principal. A `restaurant` in
+the body must match the caller's own tenant or the request is refused — and a
+malformed id answers 400 while a well-formed foreign one answers 403, so a typo
+never reads as a permission failure and a permission regression never hides
+behind a validation message.
+
 ## Test dates
 
 The API validates against the real Asia/Kathmandu clock: statement and report windows may not end
@@ -1198,9 +1319,11 @@ Load demo data only on a disposable/demo database:
 docker compose exec -T api npm run seed
 ```
 
-**Demo credentials:** `owner@mittho.com` / `mittho123`
+**Demo credentials:** `owner@mittho.demo` / `MitthoDemo2026` — see
+[Demo data and onboarding](#demo-data-and-onboarding) for the full account list.
 
-> `npm run seed` resets the demo dataset. Do not run it against operational data.
+> `npm run seed` DELETES the collections it manages and creates accounts with
+> published passwords. It refuses to run with `NODE_ENV=production`.
 
 Stop or inspect the stack with:
 

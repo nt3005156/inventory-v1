@@ -22,7 +22,26 @@ async function tenantBranchScope(user, requestedBranch){
   const ids=await Branch.find({restaurant:restaurantId}).distinct('_id');
   return ids.map(id=>new mongoose.Types.ObjectId(String(id)));
 }
-r.get('/branches',requirePermission('branches.view'),async(req,res)=>res.json(await Branch.find({active:true})));r.post('/branches',requirePermission('branches.manage'),async(req,res)=>{try{res.status(201).json(await Branch.create(parse(z.object({restaurant:z.string(),name:z.string().min(2),code:z.string().min(2),address:z.string().optional()}),req.body)))}catch(e){fail(res,e)}});
+/**
+ * TENANCY FIX (Phase 24 onboarding audit).
+ *
+ * `GET /branches` ran `Branch.find({active:true})` with NO restaurant filter,
+ * so every tenant saw every other tenant's branch list. `POST /branches` took
+ * `restaurant` FROM THE REQUEST BODY, so an owner could plant a branch inside
+ * another restaurant -- both reproduced with a probe before this change.
+ *
+ * The tenant now comes from the authenticated principal in both cases. A
+ * `restaurant` in the body is still accepted for backwards compatibility but
+ * must match the caller's own tenant; anything else is refused rather than
+ * silently honoured.
+ */
+r.get('/branches',requirePermission('branches.view'),async(req,res)=>{try{const {restaurantId}=await userRestaurantContext(req.user);const filter={restaurant:restaurantId};if(req.query.includeInactive!=='true')filter.active=true;res.json(await Branch.find(filter).sort({createdAt:1}))}catch(e){fail(res,e)}});
+r.post('/branches',requirePermission('branches.manage'),async(req,res)=>{try{const b=parse(z.object({restaurant:z.string().optional(),name:z.string().min(2),code:z.string().min(2),address:z.string().optional(),phone:z.string().max(30).optional()}).strict(),req.body);const {restaurantId}=await userRestaurantContext(req.user);
+// A malformed id is a validation fault (400); a well-formed id belonging to
+// ANOTHER tenant is a permission fault (403). Collapsing the two would answer
+// 403 to a typo and, worse, make a permission regression look like a typo.
+if(b.restaurant!==undefined&&!mongoose.isValidObjectId(b.restaurant))throw Object.assign(new Error('Invalid restaurant'),{status:400});
+if(b.restaurant&&String(b.restaurant)!==String(restaurantId))throw Object.assign(new Error('A branch can only be created in your own restaurant'),{status:403});res.status(201).json(await Branch.create({restaurant:restaurantId,name:b.name,code:b.code,address:b.address,phone:b.phone}))}catch(e){fail(res,e)}});
 r.get('/inventory/balances',requirePermission('inventory.view'),async(req,res)=>{try{res.json(await listInventoryBalanceDocuments({branchId:req.query.branch,user:req.user}))}catch(e){fail(res,e)}});r.get('/inventory/transactions',requirePermission('reports.view'),async(req,res)=>{try{res.json(await listInventoryLedger({branchId:req.query.branch,user:req.user,type:req.query.type,limit:req.query.limit}))}catch(e){fail(res,e)}});r.get('/inventory/batches',requirePermission('inventory.view'),async(req,res)=>{try{res.json(await listInventoryBatches({branchId:req.query.branch,user:req.user,status:req.query.status,ingredient:req.query.ingredient,q:req.query.q,expiringDays:req.query.days,page:req.query.page,limit:req.query.limit}))}catch(e){fail(res,e)}});
 r.get('/inventory/valuation',requirePermission('inventory.view'),async(req,res)=>{try{const ingredient=req.query.ingredient;if(ingredient){res.json(await getIngredientValuation({branchId:req.query.branch,ingredientId:ingredient,user:req.user,method:req.query.method}));}else{res.json(await getBranchValuation({branchId:req.query.branch,user:req.user,method:req.query.method}));}}catch(e){fail(res,e)}});
 r.get('/inventory/valuation/history',requirePermission('reports.view'),async(req,res)=>{try{res.json(await getValuationHistory({branchId:req.query.branch,ingredientId:req.query.ingredient,user:req.user,from:req.query.from,to:req.query.to,method:req.query.method,granularity:req.query.granularity}))}catch(e){fail(res,e)}});

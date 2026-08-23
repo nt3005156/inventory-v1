@@ -8,6 +8,7 @@ import exportsRouter from '../src/routes/exports.js';
 import rbacRouter from '../src/routes/rbac.js';
 import auditRouter from '../src/routes/audit.js';
 import notificationsRouter from '../src/routes/notifications.js';
+import onboardingRouter from '../src/routes/onboarding.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
@@ -67,6 +68,7 @@ export async function startTestApp() {
     app.use('/api', accountsRouter);
     app.use('/api', customersRouter);
     app.use('/api', deliveriesRouter);
+    app.use('/api', onboardingRouter);
     app.use('/api', rbacRouter);
     app.use('/api', auditRouter);
     app.use('/api', notificationsRouter);
