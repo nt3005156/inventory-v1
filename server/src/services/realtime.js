@@ -21,6 +21,23 @@ export const purchasingManagementRoom = id => `${branchRoom(id)}:purchasing-mana
 export const riderRoom = id => 'rider:' + String(id);
 
 /**
+ * A private room per USER, joined by every authenticated socket regardless of
+ * role.
+ *
+ * Needed because a notification addressed to one person previously went out on
+ * the RESTAURANT room with a `user` field for the client to filter on. That
+ * delivered the payload to every staff socket in the tenant (client-side
+ * filtering is not an authorisation boundary) and, worse, never reached a
+ * rider at all — riders deliberately do not join the restaurant room. A
+ * dedicated per-user room fixes both directions at once.
+ *
+ * Distinct from `riderRoom` on purpose: `rider:<id>` carries delivery
+ * dispatch, `user:<id>` carries anything addressed to that person whatever
+ * their role.
+ */
+export const userRoom = id => 'user:' + String(id);
+
+/**
  * Phase 22 — restaurant and role rooms.
  *
  * `restaurant:<id>` carries tenant-wide signals that are not tied to one
@@ -136,6 +153,10 @@ export function attachRealtime(httpServer, {corsOrigin} = {}) {
       // mutations that happen during connection setup cannot be missed.
       // A rider is not a branch participant: they join only their own private
       // room, and any branch they ask for is ignored rather than honoured.
+      // Everybody, every role, joins their own private room. It is keyed by
+      // the RESOLVED principal id, not a token claim.
+      await socket.join(userRoom(payload.id));
+
       if (principal.baseRole === 'rider') {
         await socket.join(riderRoom(payload.id));
         socket.data = {...(socket.data || {}), rider: true};
@@ -525,6 +546,9 @@ export async function refreshUserSockets(userId, reason = 'role_changed') {
       }
       socket.data = {...(socket.data || {}), branchId: null, role: 'rider', rider: true};
       socket.join(riderRoom(userId));
+      // Demoted to rider: they keep their own private room, having lost the
+      // branch rooms above.
+      socket.join(userRoom(userId));
       socket.emit('branch:revoked', {reason: 'Role changed', branch: null});
       changed += 1;
       continue;

@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import {Notification} from '../models/operations.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 import {purchaseBranchContext} from './purchaseOrders.js';
-import {branchRoom, emitRoomEvent, publishRoleEvent, publishRestaurantEvent} from './realtime.js';
+import {branchRoom, emitRoomEvent, publishRoleEvent, userRoom} from './realtime.js';
 import {REALTIME_EVENTS} from './realtimeEvents.js';
 
 /**
@@ -187,11 +187,25 @@ function publishNotification(row, definition) {
   };
   try {
     if (row.user) {
-      // Targeted at one person. The restaurant room is the only channel that
-      // reaches them wherever they are; the client filters on `user`.
-      publishRestaurantEvent(row.restaurant, REALTIME_EVENTS.INVENTORY_ALERT, {
+      /**
+       * ADDRESSED TO ONE PERSON -> ONE ROOM.
+       *
+       * This used to emit to the RESTAURANT room and rely on the client to
+       * filter on `user`. That was a leak, not a filter: every staff socket in
+       * the tenant received the payload — title, body, branch and the target's
+       * user id — and client-side filtering is not an authorisation boundary.
+       * Reproduced directly before the fix: a private "PRIVATE-RIDER-A-JOB"
+       * delivery notification arrived on a branch staff socket, while the
+       * rider it was addressed to received NOTHING, because riders never join
+       * the restaurant room.
+       *
+       * `user:<id>` is joined by every authenticated socket including riders
+       * (who also hold `rider:<id>`), so the intended recipient — and only
+       * them — receives it.
+       */
+      emitRoomEvent(userRoom(row.user), REALTIME_EVENTS.INVENTORY_ALERT, {
         ...payload, user: String(row.user)
-      }, {idempotencyKey: String(row._id)});
+      }, {branch: row.branch || null, idempotencyKey: String(row._id)});
       return;
     }
 
@@ -332,6 +346,124 @@ function view(row) {
     // working for data written before the key was renamed.
     delivery: row.context?.channels || row.context?.delivery || [{channel: 'in_app', status: 'delivered'}],
     createdAt: row.createdAt
+  };
+}
+
+// ── self-scoped inbox (riders) ───────────────────────────────────────────────
+
+/**
+ * The SELF-SCOPED inbox.
+ *
+ * A rider is addressed `delivery_update` notifications personally, but must
+ * never read the branch board: `notifications.view` returns the branch's
+ * payment, refund, purchasing and inventory notifications, so granting it to a
+ * courier would be a privilege escalation. This is the separate, narrower
+ * capability behind `notifications.mine`.
+ *
+ * THE SCOPE IS NOT A FILTER THE CALLER CAN INFLUENCE. It is built from the
+ * authenticated identity only:
+ *
+ *   {restaurant: <caller's restaurant>, user: <caller's own id>}
+ *
+ * There is no branch parameter, no user parameter and no way to widen it. A
+ * client-supplied `userId`/`riderId`/`recipientId` is not read anywhere in this
+ * file — the query is constructed from `userRestaurantContext(user)`, which
+ * resolves the row from storage using the id in the verified token. Rows with
+ * no `user` (branch and restaurant-wide audiences) can never match, because
+ * `user` is matched by equality against a concrete ObjectId.
+ *
+ * `restaurant` is redundant given that a notification's `user` already implies
+ * its tenant, but it is kept as defence in depth: if a user were ever moved
+ * between restaurants, their old inbox must not follow them.
+ */
+async function selfScope(user) {
+  const identity = await userRestaurantContext(user);
+  if (!identity.userId) throw httpError('Authentication required', 401);
+  return {
+    restaurantId: identity.restaurantId,
+    userId: new mongoose.Types.ObjectId(String(identity.userId))
+  };
+}
+
+function selfMatch(scope, {unread, type} = {}) {
+  const match = {restaurant: scope.restaurantId, user: scope.userId};
+  if (unread === true) match.read = false;
+  if (unread === false) match.read = true;
+  if (type) {
+    const types = Array.isArray(type) ? type : String(type).split(',').map(clean).filter(Boolean);
+    if (types.length) match.type = {$in: types};
+  }
+  return match;
+}
+
+/** Notifications addressed to the caller personally, and nothing else. */
+export async function listOwnInbox({user, unread, type, page = 1, limit = 25}) {
+  const scope = await selfScope(user);
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 25));
+  const safePage = Math.max(1, Number(page) || 1);
+  const match = selfMatch(scope, {unread, type});
+
+  const [rows, total, unread_] = await Promise.all([
+    Notification.find(match)
+      .sort({createdAt: -1, _id: -1})
+      .skip((safePage - 1) * safeLimit)
+      .limit(safeLimit)
+      .populate('branch', 'name code')
+      .lean(),
+    Notification.countDocuments(match),
+    Notification.countDocuments(selfMatch(scope, {unread: true}))
+  ]);
+
+  return {
+    notifications: rows.map(view),
+    unreadCount: unread_,
+    pagination: {
+      page: safePage, limit: safeLimit, total,
+      pages: Math.max(1, Math.ceil(total / safeLimit))
+    },
+    scope: 'self'
+  };
+}
+
+/** Badge count for the rider shell. */
+export async function ownUnreadCount({user}) {
+  const scope = await selfScope(user);
+  return {unread: await Notification.countDocuments(selfMatch(scope, {unread: true}))};
+}
+
+/**
+ * Mark one of the caller's OWN notifications read.
+ *
+ * IDOR/BOLA: the id from the URL is only ever used as an ADDITIONAL narrowing
+ * term on a query already pinned to the caller's own user id. Somebody else's
+ * notification id therefore matches nothing and reads as 404 — the same answer
+ * as an id that does not exist, so the endpoint cannot be used to discover
+ * whether another user's notification exists.
+ */
+export async function markOwnRead({user, notificationId, read = true}) {
+  if (!mongoose.isValidObjectId(notificationId)) throw httpError('Invalid notification', 400);
+  const scope = await selfScope(user);
+  const row = await Notification.findOne({
+    ...selfMatch(scope),
+    _id: new mongoose.Types.ObjectId(String(notificationId))
+  });
+  if (!row) throw httpError('Notification not found', 404);
+  if (Boolean(row.read) === Boolean(read)) return view(row.toObject());
+  row.read = Boolean(read);
+  await row.save();
+  return view(row.toObject());
+}
+
+/** Mark everything addressed to the caller read. */
+export async function markAllOwnRead({user}) {
+  const scope = await selfScope(user);
+  const result = await Notification.updateMany(
+    selfMatch(scope, {unread: true}),
+    {$set: {read: true}}
+  );
+  return {
+    updated: result.modifiedCount || 0,
+    unread: await Notification.countDocuments(selfMatch(scope, {unread: true}))
   };
 }
 

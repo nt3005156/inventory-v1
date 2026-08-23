@@ -2,7 +2,8 @@ import {Router} from 'express';
 import {z} from 'zod';
 import {requirePermission} from '../middleware/auth.js';
 import {
-  describeTypes, listInbox, markAllRead, markRead, sweepSupplierInvoicesDue, unreadCount
+  describeTypes, listInbox, listOwnInbox, markAllOwnRead, markAllRead, markOwnRead, markRead,
+  ownUnreadCount, sweepSupplierInvoicesDue, unreadCount
 } from '../services/notifications.js';
 
 /**
@@ -21,9 +22,20 @@ import {
 const r = Router();
 
 function fail(res, error) {
-  const status = error?.status || 500;
-  const message = status >= 500 ? 'Server error' : String(error?.message || 'Request failed');
-  return res.status(status).json({message: message.slice(0, 300)});
+  // A schema rejection is a 400, not a 500. This router previously mapped a
+  // ZodError to "Server error" with a 500, so a `.strict()` body carrying an
+  // unexpected key -- exactly what a caller probing for a `userId` override
+  // sends -- looked like a server fault. Same shape as the deliveries router.
+  const status = error?.status || (error?.name === 'ZodError' ? 400 : 500);
+  let message = error?.message || 'Request failed';
+  if (error?.name === 'ZodError') {
+    const issue = Array.isArray(error.issues) ? error.issues[0] : null;
+    const field = issue?.path?.length ? issue.path.join('.') : null;
+    message = field ? `Invalid ${field}` : 'Some details are missing or invalid';
+  } else if (status >= 500) {
+    message = 'Server error';
+  }
+  return res.status(status).json({message: String(message).slice(0, 300)});
 }
 
 const boolish = value => {
@@ -32,6 +44,57 @@ const boolish = value => {
   if (value === 'false' || value === false) return false;
   return undefined;
 };
+
+/**
+ * SELF-SCOPED INBOX.
+ *
+ * Declared BEFORE `/notifications/:id/read` so Express cannot parse "mine" as
+ * an id, and kept as a separate route tree rather than a mode of the branch
+ * inbox: a flag on a shared endpoint is one refactor away from being widened
+ * by accident, whereas these handlers have no code path that can return a row
+ * belonging to anyone else.
+ *
+ * Guarded by `notifications.mine`, which the rider bundle holds. It is NOT
+ * `notifications.view` — that is branch-scoped and would hand a courier the
+ * branch's payment, refund, purchasing and inventory notifications.
+ *
+ * IDENTITY COMES FROM THE TOKEN, ALWAYS. `userId`, `riderId` and
+ * `recipientId` in the query or body are ignored: nothing in this handler or
+ * in `listOwnInbox`/`markOwnRead` reads them. A caller cannot name a
+ * different subject.
+ */
+r.get('/notifications/mine', requirePermission('notifications.mine'), async (req, res) => {
+  try {
+    res.json(await listOwnInbox({
+      user: req.user,
+      unread: boolish(req.query.unread),
+      type: req.query.type,
+      page: req.query.page,
+      limit: req.query.limit
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+r.get('/notifications/mine/unread-count', requirePermission('notifications.mine'), async (req, res) => {
+  try {
+    res.json(await ownUnreadCount({user: req.user}));
+  } catch (e) { fail(res, e); }
+});
+
+r.post('/notifications/mine/read-all', requirePermission('notifications.mine'), async (req, res) => {
+  try {
+    res.json(await markAllOwnRead({user: req.user}));
+  } catch (e) { fail(res, e); }
+});
+
+r.patch('/notifications/mine/:id/read', requirePermission('notifications.mine'), async (req, res) => {
+  try {
+    const body = z.object({read: z.boolean().optional()}).strict().parse(req.body ?? {});
+    res.json(await markOwnRead({
+      user: req.user, notificationId: req.params.id, read: body.read ?? true
+    }));
+  } catch (e) { fail(res, e); }
+});
 
 r.get('/notifications', requirePermission('notifications.view'), async (req, res) => {
   try {

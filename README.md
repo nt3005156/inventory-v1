@@ -606,9 +606,44 @@ clients see the same field.
 | `POST /api/notifications/read-all` | mark everything in scope read |
 | `POST /api/notifications/sweep/supplier-invoices` | raise due-invoice notifications |
 
-Guarded by `notifications.view`, held by manager and staff (a rider has the
-rider app, not the staff inbox). The supplier sweep additionally needs
-`purchase.invoice` and is owner-only, because it reads supplier liability.
+Guarded by `notifications.view`, held by manager and staff. The supplier sweep
+additionally needs `purchase.invoice` and is owner-only, because it reads
+supplier liability.
+
+### The rider inbox is a separate, narrower capability
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/notifications/mine` | rows addressed to the caller personally; filters `unread`, `type`, paginated |
+| `GET /api/notifications/mine/unread-count` | badge count |
+| `POST /api/notifications/mine/read-all` | mark the caller's own read |
+| `PATCH /api/notifications/mine/:id/read` | mark one of the caller's own read/unread |
+
+Guarded by **`notifications.mine`**, which the built-in `rider` bundle holds
+alongside `deliveries.ride`. **Riders are deliberately NOT granted
+`notifications.view`.** That permission is branch-scoped: it returns the
+branch's payment, refund, purchasing, inventory and stock-count notifications,
+so handing it to a courier to make a UI work would be a privilege escalation.
+The self-scoped route returns only rows whose `user` is the caller, which for a
+rider means their own `delivery_update` assignments and nothing else.
+
+The scope is not a filter the caller can influence. It is built as
+`{restaurant: <caller's restaurant>, user: <caller's own id>}` from
+`userRestaurantContext()`, which resolves the row from storage using the id in
+the verified token. A `userId`, `riderId` or `recipientId` in the query, the
+body **or the JWT itself** is never read — tested with forged claims for each.
+Branch-audience rows (no `user`) can never match, because `user` is compared by
+equality against a concrete ObjectId. The `restaurant` term is defence in depth
+for a user moved between tenants; a test proves it load-bearing.
+
+IDOR/BOLA: another user's notification id is an additional narrowing term on a
+query already pinned to the caller, so it matches nothing and answers **404 —
+byte-identical to the answer for an id that does not exist**, so the endpoint is
+not an existence oracle.
+
+Riders reach this through an Alerts tab in the rider workspace
+(`client/src/RiderApp.jsx`), which reads `/notifications/mine` only and never
+sends an identifier of its own.
 
 **There is deliberately no write endpoint.** Notifications are written by the
 services that perform the underlying act; letting a client author one would
@@ -629,6 +664,16 @@ emitted to that **branch room**, not to tenant-wide role rooms — an earlier
 revision fanned everything out across role rooms and leaked a branch A order
 title to a branch B socket, which the Phase 22 isolation test caught.
 
+A notification addressed to ONE person goes to that person's private
+**`user:<id>`** room, joined by every authenticated socket regardless of role.
+This too was a leak: it previously went out on the tenant-wide `restaurant:<id>`
+room with a `user` field for the client to filter on. Reproduced before the fix
+— a private rider job arrived on a branch staff socket, while the rider it was
+addressed to received nothing at all, because riders deliberately never join
+the restaurant room. Client-side filtering is not an authorisation boundary.
+`user:<id>` is distinct from `rider:<id>`: the latter carries delivery dispatch,
+the former anything addressed to that person whatever their role.
+
 ### Limitations
 
 - **Supplier-invoice-due is a manual sweep.** It is not wired into the reorder
@@ -640,14 +685,16 @@ title to a branch B socket, which the Phase 22 isolation test caught.
 - **No digest or batching.** A busy service period produces one notification
   per order.
 - No retention policy — the collection grows.
-- **A rider cannot open the notification centre.** A `delivery_update` is
-  addressed to the assigned rider personally and is private to them (not even
-  the owner reads it), but the built-in `rider` bundle holds only
-  `deliveries.ride`. `notifications.view` is branch-scoped, so granting it to a
-  courier would also hand them the branch's payment and refund notifications.
-  Riders therefore receive the assignment through the delivery screens and the
-  `rider:<userId>` socket room, not through `/api/notifications`. Closing this
-  properly needs a self-scoped notification permission, which is not built.
+- **Realtime notification delivery is per-instance.** The `user:<id>`,
+  `branch:<id>` and role rooms live in one process's Socket.IO adapter. Behind
+  more than one API instance a notification is only pushed to the sockets held
+  by the instance that wrote it; the others see it on their next poll or
+  reload. Fixing it needs `@socket.io/redis-adapter` or the Mongo adapter,
+  which is deliberately out of scope here. The REST inbox is unaffected — it
+  reads the database.
+- Riders can read their own inbox but have no notification types other than
+  `delivery_update` addressed to them, so the Alerts tab is a delivery log in
+  practice.
 
 ## Realtime platform
 

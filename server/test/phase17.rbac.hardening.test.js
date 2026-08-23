@@ -890,7 +890,19 @@ describe('Phase 17 · built-in bundle integrity', () => {
     }
   });
 
-  it('gives a rider exactly one capability', () => {
-    assert.deepEqual(permissionsForBuiltin('rider'), ['deliveries.ride']);
+  it('gives a rider only self-scoped capabilities', () => {
+    /**
+     * Phase 24 added `notifications.mine`. The assertion stays exhaustive --
+     * a rider's bundle is still pinned to an exact list, because the value of
+     * this test is that nothing can be added to it silently.
+     *
+     * `notifications.mine` is SELF-scoped: it can only ever return rows whose
+     * `user` is the caller. The branch-scoped `notifications.view`, which
+     * carries the branch's payment, refund, purchasing and inventory rows,
+     * must never appear here.
+     */
+    assert.deepEqual(permissionsForBuiltin('rider'), ['deliveries.ride', 'notifications.mine']);
+    assert.ok(!permissionsForBuiltin('rider').includes('notifications.view'),
+      'a rider must never hold the branch-scoped notification permission');
   });
 });

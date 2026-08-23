@@ -98,8 +98,11 @@ describe('Phase 20 · permission catalogue', () => {
     assert.ok(!stf.includes('orders.refund'), 'staff must not gain refunds');
     assert.ok(!stf.includes('purchase.approve'), 'staff must not gain PO approval');
     assert.ok(!stf.includes('users.manage'), 'staff must not gain user admin');
-    // A rider is the least-privileged principal in the system.
-    assert.deepEqual(permissionsForBuiltin('rider'), ['deliveries.ride']);
+    // A rider is the least-privileged principal in the system. Phase 24 added
+    // `notifications.mine`, which is self-scoped and grants no branch reach.
+    assert.deepEqual(permissionsForBuiltin('rider'), ['deliveries.ride', 'notifications.mine']);
+    assert.ok(!permissionsForBuiltin('rider').includes('notifications.view'),
+      'a rider must never hold the branch-scoped notification permission');
   });
 });
 
@@ -629,7 +632,9 @@ describe('Phase 20 · /me/permissions', () => {
     });
     const res = await request('/api/me/permissions', {token: tokenFor(rider)});
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.permissions, ['deliveries.ride']);
+    assert.deepEqual(res.body.permissions, ['deliveries.ride', 'notifications.mine']);
+    assert.ok(!res.body.permissions.includes('notifications.view'),
+      'a rider must never be told they hold the branch-scoped notification permission');
   });
 
   it('ends the session for a rider stood down on the profile flag alone', async () => {

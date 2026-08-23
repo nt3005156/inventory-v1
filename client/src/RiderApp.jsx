@@ -49,7 +49,22 @@ export default function RiderApp({call, user, token, onLogout}) {
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState('offline');
   const [expired, setExpired] = useState(false);
+  /**
+   * Notification centre (self-scoped).
+   *
+   * Reads `/notifications/mine`, NOT `/notifications`. The rider bundle holds
+   * `notifications.mine`, a capability that can only ever return rows
+   * addressed to this rider personally; `notifications.view` is branch-scoped
+   * and would expose the branch's payment, refund, purchasing and inventory
+   * notifications to a courier. The server is authoritative either way — this
+   * component never sends a user id, and could not widen the scope if it did.
+   */
+  const [inbox, setInbox] = useState({notifications: [], unreadCount: 0});
+  const [inboxState, setInboxState] = useState('loading');
+  const [inboxError, setInboxError] = useState('');
+  const [inboxBusy, setInboxBusy] = useState(false);
   const loadRef = useRef(() => {});
+  const loadInboxRef = useRef(() => {});
 
   const load = useCallback(async () => {
     try {
@@ -67,9 +82,29 @@ export default function RiderApp({call, user, token, onLogout}) {
     }
   }, [call]);
 
+  const loadInbox = useCallback(async () => {
+    try {
+      const res = await call('/notifications/mine?limit=25');
+      setInbox({
+        notifications: Array.isArray(res?.notifications) ? res.notifications : [],
+        unreadCount: Number(res?.unreadCount || 0)
+      });
+      setInboxError('');
+      setInboxState('ready');
+    } catch (e) {
+      if (/Authentication required/i.test(e.message)) setExpired(true);
+      // The inbox failing must never take the delivery screen down with it: a
+      // rider mid-job needs the address far more than the badge.
+      setInboxError(e.message || 'Could not load notifications');
+      setInboxState('error');
+    }
+  }, [call]);
+
   loadRef.current = load;
+  loadInboxRef.current = loadInbox;
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadInbox(); }, [loadInbox]);
 
   useEffect(() => {
     if (tab !== 'done') return;
@@ -93,8 +128,16 @@ export default function RiderApp({call, user, token, onLogout}) {
       if (payload?.reason === 'assigned') setNotice('New delivery assigned to you');
       else if (payload?.status === 'cancelled') setNotice('A delivery was cancelled');
     });
+    /**
+     * A notification addressed to this rider arrives on their private
+     * `user:<id>` room. Nothing here filters on the payload's `user` field --
+     * the room IS the boundary, because client-side filtering is not an
+     * authorisation control. Anything that arrives is already ours.
+     */
+    socket.on('inventory:alert', () => { loadInboxRef.current(); });
     return () => {
       socket.off('delivery:update');
+      socket.off('inventory:alert');
       socket.disconnect();
     };
   }, [token]);
@@ -163,6 +206,38 @@ export default function RiderApp({call, user, token, onLogout}) {
       }),
       'Delivery reported as failed'
     );
+  };
+
+  const markNotificationRead = async (id, read = true) => {
+    if (inboxBusy) return;
+    setInboxBusy(true);
+    try {
+      await call(`/notifications/mine/${id}/read`, {
+        method: 'PATCH', body: JSON.stringify({read})
+      });
+      await loadInbox();
+    } catch (e) {
+      if (/Authentication required/i.test(e.message)) setExpired(true);
+      else setInboxError(e.message);
+    } finally {
+      setInboxBusy(false);
+    }
+  };
+
+  const markAllNotificationsRead = async () => {
+    if (inboxBusy || !inbox.unreadCount) return;
+    setInboxBusy(true);
+    try {
+      // Safe: the server marks only rows addressed to this rider. It cannot
+      // reach a colleague's or the branch's notifications.
+      await call('/notifications/mine/read-all', {method: 'POST', body: JSON.stringify({})});
+      await loadInbox();
+    } catch (e) {
+      if (/Authentication required/i.test(e.message)) setExpired(true);
+      else setInboxError(e.message);
+    } finally {
+      setInboxBusy(false);
+    }
   };
 
   const toggleShift = () => act(
@@ -248,9 +323,29 @@ export default function RiderApp({call, user, token, onLogout}) {
         <button className={tab === 'done' ? 'is-active' : ''} onClick={() => setTab('done')}>
           Finished
         </button>
+        <button
+          className={tab === 'alerts' ? 'is-active' : ''}
+          onClick={() => setTab('alerts')}
+          data-testid="rider-notifications-tab"
+        >
+          Alerts{inbox.unreadCount > 0 ? ` (${inbox.unreadCount})` : ''}
+        </button>
       </nav>
 
-      {!shown.length && (
+      {tab === 'alerts' && (
+        <RiderNotifications
+          inbox={inbox}
+          state={inboxState}
+          error={inboxError}
+          busy={inboxBusy}
+          live={live}
+          onRetry={loadInbox}
+          onMarkRead={markNotificationRead}
+          onMarkAllRead={markAllNotificationsRead}
+        />
+      )}
+
+      {tab !== 'alerts' && !shown.length && (
         <p className="rider-empty">
           {tab === 'active'
             ? data?.rider?.available
@@ -260,7 +355,7 @@ export default function RiderApp({call, user, token, onLogout}) {
         </p>
       )}
 
-      {shown.map(delivery => {
+      {tab !== 'alerts' && shown.map(delivery => {
         const step = NEXT_STEP[delivery.status];
         const isOpen = String(delivery._id) === String(openId);
         return (
@@ -445,6 +540,107 @@ export default function RiderApp({call, user, token, onLogout}) {
     </div>
   );
 }
+
+/**
+ * The rider notification centre.
+ *
+ * Renders only what `/notifications/mine` returned, which by construction is
+ * only this rider's own rows. There is no branch filter, no audience list and
+ * no other-user data to render, because none is ever fetched.
+ */
+function RiderNotifications({
+  inbox, state, error, busy, live, onRetry, onMarkRead, onMarkAllRead
+}) {
+  const rows = inbox.notifications || [];
+
+  if (state === 'loading') {
+    return <p className="rider-empty" data-testid="rider-inbox-loading">Loading your notifications…</p>;
+  }
+
+  if (state === 'error') {
+    return (
+      <div className="rider-panel" data-testid="rider-inbox-error">
+        <p className="rider-alert rider-error">{error || 'Could not load notifications'}</p>
+        {live !== 'live' && (
+          <p className="rider-muted">
+            {live === 'reconnecting' ? 'Reconnecting…' : 'You appear to be offline.'}
+          </p>
+        )}
+        <button className="rider-ghost" onClick={onRetry}>Try again</button>
+      </div>
+    );
+  }
+
+  return (
+    <section className="rider-inbox" data-testid="rider-inbox">
+      <div className="rider-inbox-head">
+        <b>{inbox.unreadCount ? `${inbox.unreadCount} unread` : 'All caught up'}</b>
+        <button
+          className="rider-ghost"
+          disabled={busy || !inbox.unreadCount}
+          onClick={onMarkAllRead}
+          data-testid="rider-mark-all"
+        >
+          Mark all read
+        </button>
+      </div>
+
+      {live !== 'live' && (
+        <p className="rider-muted" data-testid="rider-inbox-live">
+          {live === 'reconnecting'
+            ? 'Reconnecting — new notifications may be delayed.'
+            : 'Offline — showing the last notifications loaded.'}
+        </p>
+      )}
+
+      {!rows.length && (
+        <p className="rider-empty" data-testid="rider-inbox-empty">
+          No notifications yet. You will see your delivery assignments here.
+        </p>
+      )}
+
+      {rows.map(row => (
+        <article
+          key={row._id}
+          className={'rider-notification' + (row.read ? '' : ' is-unread')}
+          data-testid="rider-notification"
+        >
+          <div className="rider-notification-head">
+            <span className={'rider-chip is-' + (row.severity || 'info')}>
+              {NOTIFICATION_LABEL[row.type] || row.type}
+            </span>
+            <span className="rider-muted">{stamp(row.createdAt)}</span>
+          </div>
+          <b>{row.title}</b>
+          {row.body && <p className="rider-note">{row.body}</p>}
+          {row.reference && <p className="rider-muted">Ref {row.reference}</p>}
+          <button
+            className="rider-ghost"
+            disabled={busy}
+            onClick={() => onMarkRead(row._id, !row.read)}
+          >
+            {row.read ? 'Mark unread' : 'Mark read'}
+          </button>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+/** Only the types a rider can actually be addressed; anything else falls back. */
+const NOTIFICATION_LABEL = {
+  delivery_update: 'Delivery'
+};
+
+const stamp = value => {
+  if (!value) return '';
+  const date = new Date(value);
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  return sameDay
+    ? date.toLocaleTimeString('en-GB', {hour: '2-digit', minute: '2-digit'})
+    : date.toLocaleString('en-GB', {day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'});
+};
 
 function Stat({label, value}) {
   return (

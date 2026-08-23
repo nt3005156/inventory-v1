@@ -115,6 +115,20 @@ export const PERMISSION_CATALOG = Object.freeze([
   // which is about the operational alert board -- everyone who works in the
   // system needs their own inbox, including staff who cannot see the board.
   {key: 'notifications.view', group: 'Reports', label: 'Use the notification centre'},
+  /**
+   * SELF-SCOPED inbox. Deliberately NOT `notifications.view`.
+   *
+   * `notifications.view` is BRANCH-scoped: it returns the branch's payment,
+   * refund, purchasing and inventory notifications. A rider must never read
+   * those, so granting it to the rider bundle would have been a privilege
+   * escalation dressed up as a UI fix. `notifications.mine` returns ONLY rows
+   * addressed to the caller personally (`Notification.user === caller`), and
+   * the caller is always taken from the verified token.
+   *
+   * Two segments, matching the `resource.action` convention the catalogue test
+   * enforces (`notifications.self.view` would have three and fail it).
+   */
+  {key: 'notifications.mine', group: 'Reports', label: 'Read notifications addressed to me'},
   {key: 'alerts.manage', group: 'Reports', label: 'Acknowledge and resolve alerts'},
   {key: 'audit.view', group: 'Administration', label: 'Read the system audit log'},
   {key: 'inventory.recover', group: 'Inventory', label: 'Recover stuck stock-count locks'},
@@ -233,7 +247,10 @@ export const BUILTIN_ROLES = Object.freeze({
     name: 'Rider',
     description: 'Delivery courier. Sees only their own assigned deliveries.',
     baseRole: 'rider',
-    permissions: Object.freeze(['deliveries.ride'])
+    // `notifications.mine` is self-scoped: it can only ever return rows whose
+    // `user` is the caller. It is NOT `notifications.view`, which would expose
+    // the whole branch's money notifications to a courier.
+    permissions: Object.freeze(['deliveries.ride', 'notifications.mine'])
   }
 });
 
