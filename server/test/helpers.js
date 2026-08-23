@@ -6,6 +6,7 @@ import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import operations from '../src/routes/operations.js';
 import exportsRouter from '../src/routes/exports.js';
 import rbacRouter from '../src/routes/rbac.js';
+import auditRouter from '../src/routes/audit.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
@@ -52,6 +53,9 @@ export async function startTestApp() {
       // Per-device sessions need the unique sessionHash index in tests too.
       const {ensureSessionIndexes} = await import('../src/services/sessionMigration.js');
       await ensureSessionIndexes();
+      // Audit chain hook must be installed before any row is written.
+      const {ensureAuditIndexes} = await import('../src/services/auditMigration.js');
+      await ensureAuditIndexes();
     } catch {}
   }
   if (!server) {
@@ -63,6 +67,7 @@ export async function startTestApp() {
     app.use('/api', customersRouter);
     app.use('/api', deliveriesRouter);
     app.use('/api', rbacRouter);
+    app.use('/api', auditRouter);
     app.use('/api', exportsRouter);
     app.use('/api', operations);
     app.use('/api', supplierCatalog);

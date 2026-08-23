@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -13,6 +13,7 @@ import SupplierPerformance from './SupplierPerformance.jsx';
 import AnalyticsReports from './AnalyticsReports.jsx';
 import Exports from './Exports.jsx';
 import AccessControl from './AccessControl.jsx';
+import AuditLog from './AuditLog.jsx';
 import Dashboard from './Dashboard.jsx';
 import Ingredients from './Ingredients.jsx';
 import Recipes from './Recipes.jsx';
@@ -130,6 +131,7 @@ function App() {
     ['KDS', UtensilsCrossed],
     ...(can('monthclose.manage') ? [['Month Close', CalendarCheck2]] : []),
     ...(can('users.manage') || can('roles.manage') ? [['Access Control', ShieldCheck]] : []),
+    ...(can('audit.view') ? [['Audit Log', ScrollText]] : []),
     ['Analytics', BarChart3]
   ];
 
@@ -213,6 +215,9 @@ function Page({page, data, call, user, token, permissions = []}) {
   if (page === 'Supplier Performance') return <SupplierPerformance call={call} branches={branches} user={user}/>;
   if (page === 'Reports') return <AnalyticsReports call={call} branches={branches} user={user}/>;
   if (page === 'Exports') return <Exports call={call} token={token} user={user} apiBase={API}/>;
+  if (page === 'Audit Log') {
+    return <AuditLog call={call} user={user} permissions={permissions} branches={branches}/>;
+  }
   if (page === 'Access Control') {
     const effective = user?.role === 'owner' && permissions.length === 0
       ? ['users.manage', 'roles.manage']

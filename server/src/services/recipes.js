@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {recordAudit} from './auditTrail.js';
 import {assertCapability} from './capabilities.js';
 import { Ingredient, MenuItem, Audit } from '../models/index.js';
 import { Branch, InventoryBalance } from '../models/operations.js';
@@ -492,7 +493,30 @@ export async function updateMenuItem({ menuId, patch, expectedVersion, user, pri
     if(e?.code===11000) throw httpError('Menu code/name already exists',409);
     throw e;
   }
-  await Audit.create({ entity:'menu_items', entityId: row._id, restaurant: restaurantId, action:'update', before, after: row.toObject(), user: (await userRestaurantContext(user)).userId });
+  const updated = row.toObject();
+  await Audit.create({ entity:'menu_items', entityId: row._id, restaurant: restaurantId, action:'update', before, after: updated, user: (await userRestaurantContext(user)).userId });
+
+  /**
+   * Phase 21: a PRICE change gets its own audit row.
+   *
+   * The generic 'update' row above already contains the old and new document,
+   * but a compliance search for "who changed prices last month" cannot find it
+   * without diffing every menu update. Price is the field most worth watching
+   * -- it is how margin quietly disappears -- so it is recorded as a distinct,
+   * searchable action carrying only the two numbers that changed.
+   */
+  if (Number(before?.price) !== Number(updated?.price)) {
+    await recordAudit({
+      user,
+      entity: 'menu_items',
+      entityId: row._id,
+      restaurant: restaurantId,
+      action: 'menu_price_changed',
+      before: {price: Number(before?.price ?? 0)},
+      after: {price: Number(updated?.price ?? 0)},
+      reference: updated?.name || undefined
+    });
+  }
   return getMenuItem({ menuId: row._id, user });
 }
 

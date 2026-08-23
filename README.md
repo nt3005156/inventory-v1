@@ -536,6 +536,81 @@ are refreshed. The replacement must share the outgoing role's `baseRole`, so nob
 changes tenancy regime, and can never be `owner`. Nobody is ever left pointing at a role that no
 longer resolves. The API enforces all of this independently of the UI.
 
+## Audit log and compliance
+
+Every security- or money-relevant act writes an append-only audit record.
+
+### What is recorded
+
+| Column | Field(s) |
+|---|---|
+| **Who** | `user`, plus `userName` / `userRole` frozen at write time so the row stays readable after a rename, demotion or deletion |
+| **What** | `entity`, `entityId`, `action`, `before`, `after`, `reason` |
+| **When** | `at` |
+| **Where** | `restaurant`, `branch`, `ip`, `userAgent` |
+| **Reference** | `reference` — the human-facing document number (invoice, PO, ingredient code) |
+| **Integrity** | `sequence`, `prevHash`, `hash` |
+
+Covered events include: login, failed login (with the address attempted and
+the source IP), logout, price changes, stock adjustments, inventory counts,
+approvals, refunds, payments, invoice creation, invoice reprint, PO changes and
+user/role/permission changes. `GET /api/audit/actions` returns the full
+vocabulary, grouped, so the UI filter is not a second hard-coded copy.
+
+A failed login on a real account links the user; a failed login for an unknown
+address deliberately does **not**, so the trail cannot be used to enumerate
+which addresses exist.
+
+### Tamper resistance, and its honest limit
+
+Two layers:
+
+1. **Append-only through the application.** Every field is `immutable`, and
+   Mongoose `pre` hooks refuse `save()` on an existing document, all four
+   update forms and all four delete forms. There is no write endpoint — the
+   audit router exposes only `GET`.
+2. **Hash chain.** `hash = SHA256(canonical(row) || prevHash)`, per restaurant,
+   with a contiguous `sequence`. Editing a row breaks its own hash; deleting
+   one breaks the following row's link and leaves a sequence gap.
+
+`GET /api/audit/verify` (owner only) walks the chain and reports each break as
+`content` (row edited), `link` (row deleted or inserted) or `sequence` (rows
+removed).
+
+**The limit, stated plainly:** the chain makes tampering *detectable*, not
+*impossible*. Anyone with direct database access can still run
+`db.audits.updateOne(...)` — the application cannot stop that. Preventing it
+requires an append-only store or shipping the log off the host (WORM storage,
+an external SIEM, or MongoDB queryable-encryption/immutable collections). None
+of that exists in this repository and none is implied.
+
+The per-restaurant chain head is serialised with an in-process lock, so two
+concurrent writes on one instance cannot fork the chain. Across multiple API
+instances two rows can share a `prevHash`; verification walks in `sequence`
+order and reports the fork rather than silently accepting it.
+
+### Search
+
+`GET /api/audit` — permission `audit.view`, owner-only in the built-in bundles.
+Filters: `user`, `action` (comma-separated), `entity`, `entityId`, `branch`,
+`reference`, `from`, `to`, `page`, `limit` (max 200).
+
+Scoping is enforced server-side: results are always confined to the caller's
+restaurant, and a non-owner holding `audit.view` through a custom role is
+further pinned to their own branch — asking for another branch is a 403, not a
+silently-ignored parameter. The audit log must not become a side channel for
+reading another branch's refunds.
+
+### Operational notes
+
+- Audit writes never throw into the caller's path. A failed audit write is
+  logged but does not roll back the business operation it describes — losing a
+  log line is bad, failing a completed refund because of it is worse. This is a
+  deliberate trade-off: under database pressure the trail can have gaps, which
+  chain verification will surface as sequence breaks.
+- The collection has no TTL and grows without bound. Retention/archival is not
+  implemented.
+
 ## Production runbook — sessions, cache and realtime
 
 Operational reference for the RBAC/session subsystem. Everything here is

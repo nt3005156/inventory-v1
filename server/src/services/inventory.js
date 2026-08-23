@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import {recordAudit} from './auditTrail.js';
 import {Ingredient} from '../models/index.js';
 import {Branch, InventoryBalance, InventoryBatch, InventoryTransaction} from '../models/operations.js';
 import {inventoryMovementId, moveStock} from './inventoryLedger.js';
@@ -270,7 +271,7 @@ export async function listInventoryBatches({
   };
 }
 
-export async function adjustStock({branch, ingredient, qty, reason, unit, user, session, idempotencyKey, batchNumber, expiryDate}) {
+export async function adjustStock({branch, ingredient, qty, reason, unit, user, req, session, idempotencyKey, batchNumber, expiryDate}) {
   if (!mongoose.isValidObjectId(branch) || !mongoose.isValidObjectId(ingredient)) {
     throw httpError('Invalid branch or ingredient', 400);
   }
@@ -283,7 +284,7 @@ export async function adjustStock({branch, ingredient, qty, reason, unit, user, 
   if (!item) throw httpError('Ingredient not found', 404);
   if (expiryDate && !clean(batchNumber)) throw httpError('Batch number is required when an expiry date is recorded', 400);
 
-  return moveStock({
+  const movement = await moveStock({
     branch,
     ingredient,
     qty: amount,
@@ -298,4 +299,38 @@ export async function adjustStock({branch, ingredient, qty, reason, unit, user, 
       incomingBatches: [{quantity: amount, batchNumber: clean(batchNumber) || undefined, expiryDate: expiryDate || undefined, sourceType: 'adjustment'}]
     } : {batchNumber: clean(batchNumber) || undefined})
   }, session);
+
+  /**
+   * Phase 21: a manual stock adjustment is now audited.
+   *
+   * The inventory LEDGER already recorded the movement, but the ledger is a
+   * stock record, not a compliance record: it does not carry the actor's name
+   * or the request IP, and a compliance search by user or by date cannot read
+   * it. An adjustment is the single easiest way to make stock discrepancies
+   * disappear, so it belongs in the audit trail as well as the ledger.
+   *
+   * Before/after are the real balances taken from the movement, so the row
+   * answers "what did this change" without a join.
+   */
+  await recordAudit({
+    req,
+    user,
+    entity: 'inventory',
+    entityId: item._id,
+    restaurant: context.restaurantId,
+    branch: context.branch?._id || branch,
+    action: 'stock_adjustment',
+    before: {quantity: movement?.previousQty ?? null},
+    after: {
+      quantity: movement?.newQty ?? null,
+      changeQty: amount,
+      unit: unit || item.unit || 'g',
+      batchNumber: clean(batchNumber) || null
+    },
+    reason: note,
+    reference: item.code || item.name,
+    session
+  });
+
+  return movement;
 }

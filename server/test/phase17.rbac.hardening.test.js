@@ -142,7 +142,12 @@ describe('Phase 17 · built-in role regression matrix', () => {
     ['reports pnl',        'GET',  () => '/api/reports/pnl', null, 200, 200, 403],
     ['dashboard',          'GET',  () => `/api/dashboard?branch=${world.branchA._id}`, null, 200, 200, 200],
     ['table create',       'POST', () => '/api/tables', {branch: null, name: 'T1'}, 400, 400, 403],
-    ['audit log',          'GET',  () => '/api/audit', null, 404, 404, 404],
+    // Phase 21: /api/audit is now a mounted, tenant-scoped route guarded by
+    // `audit.view` (owner-only). It previously answered 404 for everyone
+    // because the handler lived in index.js, outside the harness's routers --
+    // which is also why its missing tenant filter went unnoticed. Owner reads
+    // it; manager and staff are refused.
+    ['audit log',          'GET',  () => '/api/audit', null, 200, 403, 403],
     ['roster read',        'GET',  () => '/api/accounts', null, 200, 200, 403],
     ['account create',     'POST', () => '/api/accounts', {}, 400, 403, 403]
   ];

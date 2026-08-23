@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import {ensureSessionIndexes} from './sessionMigration.js';
+import {ensureAuditIndexes} from './auditMigration.js';
 import {resolveCorsPolicy, resolveTrustProxy} from './deployment.js';
 import {paymentMode, requireProductionPaymentConfig} from './paymentConfig.js';
 import {ensureMonthCloseIndexes} from './monthCloseMigration.js';
@@ -23,6 +24,8 @@ import {ensureAlertIndexes} from './alertMigration.js';
 const OPERATIONAL_MIGRATIONS = [
   // Per-device sessions: unique sessionHash + TTL. Both are load-bearing.
   ensureSessionIndexes,
+  // Audit chain hook + indexes. Must run before anything can write a row.
+  ensureAuditIndexes,
   ensureMonthCloseIndexes,
   ensureSupplierCatalogIndexes,
   ensurePurchaseOrderIndexes,

@@ -19,6 +19,7 @@ import {createStaffAccount} from '../services/staffAccounts.js';
 import {
   createDeviceSession, listUserSessions, revokeDeviceSession, revokeUserSessions
 } from '../services/sessions.js';
+import {recordAuthEvent} from '../services/auditTrail.js';
 
 const r = Router();
 
@@ -54,6 +55,14 @@ r.post('/auth/login', authLimit, async (req, res) => {
   // One answer for "no such account" and "wrong password", so the endpoint
   // cannot be used to discover which email addresses exist.
   if (!user || !await bcrypt.compare(String(req.body.password || ''), user.password)) {
+    // Audited with the address attempted and the source IP: a burst of these
+    // from one IP is exactly what credential stuffing looks like. The row
+    // carries no user id when the account is unknown, so the log cannot be
+    // used to enumerate which addresses exist.
+    await recordAuthEvent({
+      req, action: 'login_failed', user: user || null, email: req.body.email,
+      reason: user ? 'Incorrect password' : 'Unknown account'
+    });
     return res.status(401).json({message: 'Invalid email or password'});
   }
   // Phase 12: a deactivated account must not be able to authenticate, even
@@ -61,8 +70,12 @@ r.post('/auth/login', authLimit, async (req, res) => {
   // credential -- the person is a real employee who needs to know why, and
   // they have already proved they hold the password.
   if (user.active === false || (user.role === 'rider' && user.rider?.active === false)) {
+    await recordAuthEvent({
+      req, action: 'login_failed', user, email: req.body.email, reason: 'Account deactivated'
+    });
     return res.status(403).json({message: 'This account is deactivated. Contact your manager.'});
   }
+  await recordAuthEvent({req, action: 'login', user, email: user.email});
   const {sessionId} = await createDeviceSession({
     user,
     label: String(req.body?.deviceLabel || '').trim() || 'Web session',
@@ -120,6 +133,7 @@ r.post('/auth/logout', authenticated(), async (req, res) => {
     // running. `allDevices: true` bumps the version and ends everything.
     if (req.body?.allDevices === true) {
       const result = await revokeUserSessions({userId: req.user.id, reason: 'logout'});
+      await recordAuthEvent({req, action: 'logout', user: {_id: req.user.id, name: req.user.name, role: req.user.role, restaurantId: req.user.restaurantId, branch: req.user.branch}, email: req.user.email, reason: 'All devices'});
       return res.json({ok: true, scope: 'all', sessionVersion: result.sessionVersion});
     }
     if (!req.principal?.sessionId) {
@@ -133,6 +147,7 @@ r.post('/auth/logout', authenticated(), async (req, res) => {
       sessionRowId: req.principal.sessionId, ownerId: req.user.id,
       actor: req.user, reason: 'logout'
     });
+    await recordAuthEvent({req, action: 'logout', user: {_id: req.user.id, name: req.user.name, role: req.user.role, restaurantId: req.user.restaurantId, branch: req.user.branch}, email: req.user.email, reason: 'This device'});
     res.json({ok: true, scope: 'device'});
   } catch (error) {
     res.status(error?.status || 500).json({

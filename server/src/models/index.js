@@ -1,7 +1,104 @@
 import mongoose from 'mongoose';
 const {Schema,model}=mongoose; const money={type:Number,default:0};
-const auditSchema=new Schema({entity:String,entityId:Schema.Types.ObjectId,restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant'},branch:{type:Schema.Types.ObjectId,ref:'Branch'},action:String,before:Schema.Types.Mixed,after:Schema.Types.Mixed,reason:String,user:{type:Schema.Types.ObjectId,ref:'User'},at:{type:Date,default:Date.now}});
+/**
+ * Phase 21 — immutable audit record.
+ *
+ * The existing shape (entity/entityId/action/before/after/reason/user/at) is
+ * PRESERVED: ~90 call sites already write it and none of them change. What is
+ * added is the compliance surface the brief asks for and the tamper
+ * resistance that makes any of it worth having.
+ *
+ * WHO   user (+ userName/userRole captured at write time)
+ * WHAT  entity, entityId, action, before, after, reason
+ * WHEN  at
+ * WHERE restaurant, branch, ip, userAgent
+ * REF   reference (human-facing document number: invoice, PO, order)
+ *
+ * `userName`/`userRole` are denormalised deliberately. An audit row must stay
+ * readable after the account is renamed, demoted or deleted — resolving the
+ * actor by join would silently rewrite history when a user record changes.
+ *
+ * TAMPER RESISTANCE. Every field is `immutable`, and update/delete hooks below
+ * refuse the operation outright. Combined with the hash chain, an edit made
+ * around Mongoose (mongo shell, another driver) is still *detectable* even
+ * though it cannot be prevented at the application layer — that honesty
+ * matters: only a WORM store or an external log can truly prevent it.
+ */
+const auditSchema=new Schema({
+  entity:{type:String,immutable:true},
+  entityId:{type:Schema.Types.ObjectId,immutable:true},
+  restaurant:{type:Schema.Types.ObjectId,ref:'Restaurant',immutable:true,index:true},
+  branch:{type:Schema.Types.ObjectId,ref:'Branch',immutable:true,index:true},
+  action:{type:String,immutable:true,index:true},
+  before:{type:Schema.Types.Mixed,immutable:true},
+  after:{type:Schema.Types.Mixed,immutable:true},
+  reason:{type:String,immutable:true},
+  user:{type:Schema.Types.ObjectId,ref:'User',immutable:true,index:true},
+  // Denormalised actor identity, frozen at write time.
+  userName:{type:String,trim:true,maxlength:120,immutable:true},
+  userRole:{type:String,trim:true,maxlength:40,immutable:true},
+  // WHERE the action came from.
+  ip:{type:String,trim:true,maxlength:60,immutable:true},
+  userAgent:{type:String,trim:true,maxlength:300,immutable:true},
+  // Human-facing document reference: INV-2026-0001, PO-KTM-0007, order no.
+  reference:{type:String,trim:true,maxlength:120,immutable:true,index:true},
+  at:{type:Date,default:Date.now,immutable:true,index:true},
+  // Hash chain. `hash` covers this row's content plus `prevHash`, so altering
+  // any earlier row breaks verification from that point onward.
+  prevHash:{type:String,immutable:true},
+  hash:{type:String,immutable:true,index:true},
+  sequence:{type:Number,immutable:true}
+},{minimize:false});
 auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{name:'audit_entity_timeline'});
+// Search paths the compliance UI actually uses.
+auditSchema.index({restaurant:1,at:-1},{name:'audit_restaurant_recent'});
+auditSchema.index({restaurant:1,user:1,at:-1},{name:'audit_actor_recent'});
+auditSchema.index({restaurant:1,action:1,at:-1},{name:'audit_action_recent'});
+// The chain is per restaurant, so each tenant verifies independently.
+auditSchema.index({restaurant:1,sequence:1},{name:'audit_chain_sequence'});
+
+/**
+ * Append-only enforcement.
+ *
+ * An audit trail that the application can rewrite is decoration. These hooks
+ * make every mutation path through Mongoose fail loudly rather than silently
+ * succeeding: a document re-save, a query-level update, and any delete.
+ */
+/**
+ * Hash-chain stamping.
+ *
+ * MUST be declared here, on the schema, before `model()` compiles it: a hook
+ * attached to `Model.schema` afterwards never fires. That was verified the
+ * hard way — the first implementation installed this from a startup migration
+ * and every row came out with no `sequence` and no `hash`.
+ *
+ * The chain logic itself lives in services/auditTrail.js; it is injected here
+ * to keep the model free of service imports (auditTrail imports the model, so
+ * a static import would be circular).
+ */
+let auditChainStamper=null;
+export function setAuditChainStamper(fn){auditChainStamper=fn;}
+auditSchema.pre('validate',async function stampAuditChain(){
+  if(!this.isNew||this.hash||!auditChainStamper)return;
+  await auditChainStamper(this);
+});
+
+auditSchema.pre('save',function refuseAuditRewrite(next){
+  if(!this.isNew){
+    return next(Object.assign(new Error('Audit records are append-only and cannot be modified'),{status:409}));
+  }
+  next();
+});
+for(const hook of ['updateOne','updateMany','findOneAndUpdate','replaceOne','findOneAndReplace']){
+  auditSchema.pre(hook,function refuseAuditUpdate(next){
+    next(Object.assign(new Error('Audit records are append-only and cannot be modified'),{status:409}));
+  });
+}
+for(const hook of ['deleteOne','deleteMany','findOneAndDelete','findOneAndRemove']){
+  auditSchema.pre(hook,function refuseAuditDelete(next){
+    next(Object.assign(new Error('Audit records are append-only and cannot be deleted'),{status:409}));
+  });
+}
 /**
  * Phase 10 adds the 'rider' role.
  *
