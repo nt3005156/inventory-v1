@@ -34,7 +34,12 @@ export default function POS({menu = [], branches = [], user, call}) {
     setTableId('');
     setPosError('');
     call('/tables?branch=' + branchId).then(setTables).catch(e => setPosError(e.message));
-    call('/customers?branch=' + branchId).then(r => setCustomers(Array.isArray(r) ? r : [])).catch(() => setCustomers([]));
+    // Phase 26: the customer list is paginated and returns
+    // `{customers, pagination}`. The bare-array shape is still accepted so an
+    // older server keeps working.
+    call('/customers?branch=' + branchId + '&limit=200')
+      .then(r => setCustomers(Array.isArray(r) ? r : r?.customers || []))
+      .catch(() => setCustomers([]));
   }, [branchId]);
 
   const [configuring, setConfiguring] = useState(null);

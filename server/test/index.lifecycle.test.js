@@ -275,6 +275,15 @@ describe('production API process lifecycle', () => {
           esewa: {configured: false, productCode: null},
           khalti: {configured: false},
           methods: ['cod']
+        },
+        // Phase 26: connection-pool posture is reported too, so pool pressure
+        // is visible from outside the container before it becomes an outage.
+        // These are the explicit defaults from services/dbConnection.js, not
+        // driver defaults -- asserting the values keeps that deliberate.
+        pool: {
+          readyState: 1,
+          maxPoolSize: 10,
+          minPoolSize: 2
         }
       });
 

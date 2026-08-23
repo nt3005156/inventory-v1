@@ -93,7 +93,8 @@ describe('14 — workspace data', () => {
     const res = await request(`/api/orders?branch=${BRANCH()}`, {token: manager()});
     assert.equal(res.status, 200);
 
-    const row = (Array.isArray(res.body) ? res.body : res.body.items)
+    // Phase 26: the list is paginated and returns `{orders, pagination}`.
+    const row = (Array.isArray(res.body) ? res.body : res.body.orders || res.body.items)
       .find(o => String(o._id) === String(order._id));
     assert.ok(row, 'the order must appear in its own branch');
     for (const field of ['orderNo', 'status', 'type', 'total', 'vat', 'dueAmount', 'createdAt']) {
@@ -408,7 +409,7 @@ describe('14 — authorisation and tenancy', () => {
     await settledOrder(1);
     const theirs = await request(`/api/orders?branch=${BRANCH()}`, {token: tokenFor(rival.owner)});
     if (theirs.status === 200) {
-      const rows = Array.isArray(theirs.body) ? theirs.body : theirs.body.items || [];
+      const rows = Array.isArray(theirs.body) ? theirs.body : theirs.body.orders || theirs.body.items || [];
       assert.equal(rows.length, 0, 'a rival must see none of our orders');
     } else {
       assert.ok([403, 404].includes(theirs.status));

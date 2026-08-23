@@ -1487,10 +1487,84 @@ Open `http://localhost:5173`. Vite proxies `/api` and `/socket.io` to the API on
 | `ESEWA_MERCHANT_CODE` | eSewa product code. Falls back to the vendor sandbox code (`EPAYTEST`) in sandbox only. |
 | `ESEWA_SECRET_KEY` | eSewa HMAC secret. Falls back to eSewa's published sandbox secret in sandbox only; refused in production. |
 | `KHALTI_SECRET_KEY` | Khalti secret key. Khalti is not offered to guests until this is set. |
+| `MONGO_MAX_POOL_SIZE` | Sockets per API instance, default **10**. See [Performance](#performance-and-database-phase-26). |
+| `MONGO_MIN_POOL_SIZE` | Warm sockets kept open, default 2. |
+| `MONGO_MAX_IDLE_MS` | Idle socket recycle, default 60000. |
+| `MONGO_SERVER_SELECTION_TIMEOUT_MS` | Fail fast with no primary, default 8000. |
+| `MONGO_SOCKET_TIMEOUT_MS` | Single-operation ceiling, default 45000. |
+| `MONGO_CONNECT_TIMEOUT_MS` | TCP connect deadline, default 10000. |
+| `MONGO_WAIT_QUEUE_TIMEOUT_MS` | Max wait for a pooled socket, default 10000. |
 
 For the default Docker endpoint, keep `http://localhost:8080` in `CLIENT_URL`. For public deployment, replace local values with the exact TLS origin, such as `https://ops.example.com`.
 
 The API refuses to listen until configuration is valid, MongoDB reports transaction capability and a writable primary, and all operational migrations complete.
+
+## Performance and database (Phase 26)
+
+Audited against a production-shaped dataset: **120 ingredients, 120 menu items,
+1,200 orders, 6,000 inventory transactions, 1,200 customers, 1,160 payments,
+360 balances**. Every number below was measured, not estimated.
+
+### What was found and fixed
+
+| | Before | After |
+|---|---|---|
+| `GET /orders` | 921 KB, 336 ms | 33 KB, 25 ms |
+| `GET /orders?limit=25` | **921 KB** (limit ignored) | 16 KB |
+| `GET /menu-items?limit=100` | 300 ms | 24 ms |
+| `GET /analytics/menu-engineering` | 157 ms | 37 ms |
+| `GET /customers` | 155 KB | 13 KB |
+| `GET /inventory/transactions` | 160 KB | 40 KB |
+| `Order.find({customer})` | COLLSCAN, 1,200 docs examined | IXSCAN, 1 |
+
+**1. The order list ignored its own `limit`.** It was
+`.limit(300).populate('customer table')` with no pagination and no projection,
+so `?limit=25` returned the same 921 KB body as no limit at all. Every row
+carried its full `items[]` array — modifiers, per-line inventory requirements,
+recipe versions — none of which a list renders. Now `page`/`limit`
+(default 50, max 200), a projection, `.lean()`, and a `pagination` envelope,
+with a server-derived `itemCount`.
+
+**2. `Order.find({customer})` had no index.** It examined all 1,200 documents
+to return one — and it is not a rare query: `recalculateCustomerStats()` runs
+it on **every settlement and every refund**, so the cost grew with the order
+table on the hot write path. Added `{customer: 1, createdAt: -1}`, sparse
+because most orders are walk-ins.
+
+**3. Two N+1 loops.** `listMenuItems()` called `calculateRecipeCost()` per row,
+and that helper issues three queries of its own — several hundred round trips
+to cost one page. `buildMenuEngineeringReport()` did the same with
+`recipeCost()` inside a `for` loop. Both now load one costing context per page
+and do the arithmetic in memory. A test asserts query count does **not** grow
+with catalogue size.
+
+**4. `mongoose.connect(uri)` was called with no options at all**, so the pool
+size, every timeout and the write concern were inherited driver defaults
+rather than decisions — including `maxPoolSize: 100` per instance, far more
+than one Node event loop uses and a good way to exhaust connection slots once
+several instances start. All are now explicit in `services/dbConnection.js`
+and tunable by environment variable. `writeConcern: majority` is deliberate:
+this system posts stock and money through transactions, and an acknowledged
+write that a failover can lose is not acceptable for a ledger.
+
+`/health` now reports pool posture (`readyState`, `maxPoolSize`,
+`minPoolSize`) so pressure is visible before it becomes an outage.
+
+### Breaking change: list response envelopes
+
+`GET /orders` and `GET /customers` now return `{orders|customers, pagination}`
+instead of a bare array. Both accept `?legacy=true` to return the old array
+shape, and the bundled client handles both.
+
+### How this is protected
+
+`test/phase26.performance.test.js` asserts **properties, not milliseconds** —
+wall-clock numbers on CI hardware are noise. It checks that hot queries use an
+index (via `explain()`), that list endpoints are bounded and paginated, that
+payloads stay proportionate to a page, and that query count does not scale with
+row count. Correctness controls sit alongside each optimisation: the batched
+menu costing is asserted to produce the **same** figures as the single-item
+path, so the list and the detail screen cannot quietly disagree about margin.
 
 ## Health and shutdown behavior
 

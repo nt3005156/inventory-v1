@@ -162,23 +162,31 @@ describe('Phase 6A.1 — list endpoints without a branch parameter', () => {
     await Customer.create({branch: world.branchA._id, name: 'Our Guest', phone: '9800000001'});
     await Customer.create({branch: rival.branch._id, name: 'Their Guest', phone: '9800000002'});
 
+    // Phase 26: the customer list is paginated -> `{customers, pagination}`.
+    // The tenancy assertions are unchanged; only the unwrapping moved.
+    const rows = res => (Array.isArray(res.body) ? res.body : res.body.customers || []);
+
     const ours = await request('/api/customers', {token: tokenFor(world.owner)});
     assert.equal(ours.status, 200);
-    assert.ok(ours.body.every(c => c.name !== 'Their Guest'), 'must not see the rival customer');
-    assert.ok(ours.body.some(c => c.name === 'Our Guest'));
+    assert.ok(rows(ours).every(c => c.name !== 'Their Guest'), 'must not see the rival customer');
+    assert.ok(rows(ours).some(c => c.name === 'Our Guest'));
 
     const theirs = await request('/api/customers', {token: tokenFor(rival.owner)});
     assert.equal(theirs.status, 200);
-    assert.ok(theirs.body.every(c => c.name !== 'Our Guest'), 'rival must not see ours');
+    assert.ok(rows(theirs).every(c => c.name !== 'Our Guest'), 'rival must not see ours');
   });
 
   it('scopes orders and deliveries to the caller’s restaurant', async () => {
+    // Phase 26: the order list is paginated -> `{orders, pagination}`. The
+    // tenancy assertions below are unchanged; only the unwrapping moved.
+    const orderRows = res => (Array.isArray(res.body) ? res.body : res.body.orders || []);
+
     const rivalOrders = await request('/api/orders', {token: tokenFor(rival.owner)});
     assert.equal(rivalOrders.status, 200);
-    assert.equal(rivalOrders.body.length, 0, 'rival has no orders of their own');
+    assert.equal(orderRows(rivalOrders).length, 0, 'rival has no orders of their own');
 
     const ourOrders = await request('/api/orders', {token: tokenFor(world.owner)});
-    assert.ok(ourOrders.body.length >= 1);
+    assert.ok(orderRows(ourOrders).length >= 1);
 
     const rivalDeliveries = await request('/api/deliveries', {token: tokenFor(rival.owner)});
     assert.equal(rivalDeliveries.status, 200);
@@ -188,7 +196,9 @@ describe('Phase 6A.1 — list endpoints without a branch parameter', () => {
   it('confines a non-owner to their assigned branch', async () => {
     const staffOrders = await request('/api/orders', {token: tokenFor(world.staffA)});
     assert.equal(staffOrders.status, 200);
-    assert.ok(staffOrders.body.every(o => String(o.branch) === String(world.branchA._id)));
+    const rows = Array.isArray(staffOrders.body) ? staffOrders.body : staffOrders.body.orders;
+    assert.ok(rows.length >= 1, 'the control: staff do see their own branch');
+    assert.ok(rows.every(o => String(o.branch) === String(world.branchA._id)));
   });
 });
 

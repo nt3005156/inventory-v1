@@ -2,7 +2,7 @@ import 'dotenv/config';import express from 'express';import mongoose from 'mongo
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth,requireStaff,requirePermission} from './middleware/auth.js';
 import onboardingRouter from './routes/onboarding.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {mongoConnectionOptions,poolStats} from './services/dbConnection.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -59,7 +59,7 @@ app.all('/api/waste',(_req,res)=>res.status(410).json({message:'Legacy waste rec
 // by routes/audit.js, which is mounted in BOTH production and the harness and
 // scopes every query through userRestaurantContext().
 let startupReady=false;
-app.get('/health',(req,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting',environment:deployment.environment,cors:deployment.cors,trustProxy:String(deployment.trustProxy),rateLimit:rateLimitScope(),clientIp:req.ip,payments:describePayments()})});
+app.get('/health',(req,res)=>{const database=mongoose.connection.readyState===1?'connected':'unavailable';const ok=startupReady&&database==='connected';res.status(ok?200:503).json({ok,database,startup:startupReady?'ready':'starting',environment:deployment.environment,cors:deployment.cors,trustProxy:String(deployment.trustProxy),rateLimit:rateLimitScope(),clientIp:req.ip,payments:describePayments(),pool:poolStats(mongoose.connection)})});
 /**
  * Global error handler.
  *
@@ -96,7 +96,8 @@ process.once('SIGTERM',()=>shutdown('SIGTERM'));process.once('SIGINT',()=>shutdo
 
 async function start(){
   validateRuntimeEnvironment();
-  await mongoose.connect(process.env.MONGODB_URI);
+  // Phase 26: explicit pool and timeout settings instead of driver defaults.
+  await mongoose.connect(process.env.MONGODB_URI, mongoConnectionOptions());
   await verifyTransactionCapableDatabase();
   await ensureOperationalIndexes();
   // Phase 16A: opt-in scheduled reorder sweep. Disabled unless

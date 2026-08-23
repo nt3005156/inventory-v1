@@ -117,16 +117,32 @@ const LEDGER_POPULATE = [
   {path: 'user', select: 'name role'}
 ];
 
-export async function listInventoryLedger({branchId, user, type, limit = 200}) {
+/**
+ * Phase 26 — the ledger is paged and read lean.
+ *
+ * The default page was 200 hydrated Mongoose documents with two populates,
+ * measured at 160 KB and ~70ms. The projection below was already hand-built,
+ * so hydration bought nothing: `.lean()` skips constructing a full document
+ * per row, and `page` makes the history walkable instead of truncated at an
+ * arbitrary ceiling.
+ *
+ * The default page size drops from 200 to 50. Callers that want more can ask;
+ * the 500 hard ceiling is unchanged.
+ */
+export async function listInventoryLedger({branchId, user, type, limit = 50, page = 1}) {
   const scope = await inventoryScope({branchId, user});
   const allowedTypes = InventoryTransaction.schema.path('type').enumValues;
   if (type && !allowedTypes.includes(type)) throw httpError('Invalid inventory transaction type', 400);
   const match = {restaurant:scope.restaurantId,...branchMatch(scope), ...(type ? {type} : {})};
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50));
+  const safePage = Math.max(1, Number(page) || 1);
   const rows = await InventoryTransaction.find(match)
     .populate(LEDGER_POPULATE)
     .populate('batchMovements.batch', 'batchNumber expiryDate')
-    .sort({createdAt: -1})
-    .limit(Math.min(500, Math.max(1, Number(limit) || 200)));
+    .sort({createdAt: -1, _id: -1})
+    .skip((safePage - 1) * safeLimit)
+    .limit(safeLimit)
+    .lean();
 
   return rows.filter(row => row.ingredient && row.branch).map(t => ({
     _id: t._id,

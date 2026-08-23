@@ -69,8 +69,11 @@ export default function PosAdmin({call, branches = [], user}) {
     if (!branchId) return;
     setLoading(true);
     try {
-      const rows = await call(`/orders?branch=${branchId}`);
-      setOrders(Array.isArray(rows) ? rows : rows.items || []);
+      // Phase 26: the order list is paginated and returns
+      // `{orders, pagination}`. The array and `items` shapes are still handled
+      // so this keeps working against an older server.
+      const rows = await call(`/orders?branch=${branchId}&limit=200`);
+      setOrders(Array.isArray(rows) ? rows : rows.orders || rows.items || []);
       setError('');
     } catch (e) {
       setError(e.message);

@@ -1,6 +1,5 @@
 import {Ingredient, MenuItem} from '../models/index.js';
-import {Order} from '../models/operations.js';
-import {recipeCost} from './engine.js';
+import {InventoryBalance, Order} from '../models/operations.js';
 import {resolveExpenseContext} from './expenses.js';
 import {money} from './statements.js';
 
@@ -129,8 +128,10 @@ export async function buildMenuEngineeringReport({branchId, user, from, to, targ
     ...createdAtRange(from, to)
   };
   const [orders, menu] = await Promise.all([
-    Order.find(match).select('items'),
-    MenuItem.find({active: {$ne: false}, 'recipe.ingredient': {$in: ingredientIds}}).sort({name: 1})
+    // Phase 26: both are only read, never saved -- `.lean()` skips building
+    // a Mongoose document per row (1,200 orders and the full menu here).
+    Order.find(match).select('items').lean(),
+    MenuItem.find({active: {$ne: false}, 'recipe.ingredient': {$in: ingredientIds}}).sort({name: 1}).lean()
   ]);
 
   const sold = {};
@@ -147,11 +148,48 @@ export async function buildMenuEngineeringReport({branchId, user, from, to, targ
     }
   }
 
-  // Live recipe cost only for items with no sold line to price them from.
+  /**
+   * Live recipe cost, only for items with no sold line to price them from.
+   *
+   * Phase 26: this was `await recipeCost(item, ...)` inside the loop, and
+   * `recipeCost()` itself does a populate plus an InventoryBalance query --
+   * so an unsold catalogue of 120 dishes cost ~240 sequential round trips and
+   * dominated the report (measured 157ms). The balances for every unpriced
+   * item are now loaded once and the arithmetic done in memory.
+   */
+  const unpriced = menu.filter(item => !(sold[String(item._id)]?.qty > 0));
   const costs = new Map();
-  for (const item of menu) {
-    if (sold[String(item._id)]?.qty > 0) continue;
-    costs.set(String(item._id), await recipeCost(item, {branches: scope.branchIds}));
+  if (unpriced.length) {
+    const neededIngredients = [...new Set(
+      unpriced.flatMap(item => (item.recipe || [])
+        .map(line => String(line.ingredient?._id || line.ingredient || '')))
+        .filter(Boolean)
+    )];
+    const balances = neededIngredients.length
+      ? await InventoryBalance.find({
+        ingredient: {$in: neededIngredients}, branch: {$in: scope.branchIds}
+      }).select('ingredient quantity averageCost').lean()
+      : [];
+    // Same weighted-average-across-branches rule recipeCost() applies.
+    const unitCosts = new Map();
+    for (const balance of balances) {
+      const key = String(balance.ingredient);
+      const current = unitCosts.get(key) || {quantity: 0, value: 0, fallback: 0};
+      const quantity = Math.max(0, Number(balance.quantity || 0));
+      const averageCost = Math.max(0, Number(balance.averageCost || 0));
+      current.quantity += quantity;
+      current.value += quantity * averageCost;
+      current.fallback = averageCost;
+      unitCosts.set(key, current);
+    }
+    for (const item of unpriced) {
+      const total = (item.recipe || []).reduce((sum, line) => {
+        const cost = unitCosts.get(String(line.ingredient?._id || line.ingredient));
+        const unitCost = cost ? (cost.quantity > 0 ? cost.value / cost.quantity : cost.fallback) : 0;
+        return sum + Number(line.qty || 0) * unitCost;
+      }, 0);
+      costs.set(String(item._id), total);
+    }
   }
 
   const rows = buildRows({menu, sold, totalQty, costs});

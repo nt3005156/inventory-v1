@@ -508,6 +508,19 @@ Order.schema.index({inventorySourceOrders:1},{name:'order_inventory_source_order
 Order.schema.index({branch:1,status:1,createdAt:1},{name:'order_branch_status_created'});
 // Completion-time reporting scans settled tickets by branch over a period.
 Order.schema.index({branch:1,completedAt:1},{name:'order_branch_completed',sparse:true});
+/**
+ * Phase 26 — customer order history.
+ *
+ * `Order.find({customer})` was a COLLSCAN. Measured at 1,200 orders it
+ * examined every document to return one. It is not a rare query either:
+ * `recalculateCustomerStats()` runs it on every settlement and every refund,
+ * and the CRM history screen runs it per customer, so the cost grows with the
+ * order table on the hot write path.
+ *
+ * Sparse because most orders are walk-ins with no customer attached; there is
+ * no reason to index a null for them.
+ */
+Order.schema.index({customer:1,createdAt:-1},{name:'order_customer_recent',sparse:true});
 // Phase 8A.5 — one public order per idempotency key. Enforced by the database
 // so a double-click cannot win a race between two application-level checks.
 Order.schema.index({publicRequestKey:1},{unique:true,name:'order_public_request_key',partialFilterExpression:{publicRequestKey:{$type:'string'}}});
