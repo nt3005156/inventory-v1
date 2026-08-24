@@ -32,7 +32,7 @@ import {SupplierIngredient, SupplierPriceHistory} from './models/supplierCatalog
 import {
   Branch, Customer, Delivery, InventoryBalance, InventoryBatch, InventoryTransaction, Notification,
   Order, Payment, PurchaseOrder, PurchaseOrderCounter, Restaurant, RestaurantTable,
-  SalesInvoiceCounter, SupplierInvoice
+  SalesInvoiceCounter, SupplierInvoice, SupplierPayment, SupplierPaymentCounter
 } from './models/operations.js';
 import {moveStock} from './services/inventoryLedger.js';
 import {priceOrder} from './services/pos.js';
@@ -127,6 +127,24 @@ export async function seedDemoData({log = console.log} = {}) {
     Delivery.deleteMany({}), Notification.deleteMany({}),
     PurchaseOrder.deleteMany({}), PurchaseOrderCounter.deleteMany({}),
     SupplierInvoice.deleteMany({}), SalesInvoiceCounter.deleteMany({}),
+    /**
+     * Phase 28: SupplierPayment and its counter MUST be cleared with the
+     * invoices they belong to.
+     *
+     * Found by re-seeding a live Docker stack and restarting: the startup
+     * migration `ensureSupplierPaymentIndexes()` synthesises a payment row for
+     * every invoice carrying a `paidAmount`, and re-seeding then deleted those
+     * invoices while leaving the payments behind. On the next boot the
+     * migration found payments pointing at invoices that no longer exist,
+     * refused to guess their ownership, and threw --
+     *
+     *   "Supplier payment migration cannot safely migrate ownership or
+     *    financial data for: <ids>"
+     *
+     * -- which made the API crash-loop and never become healthy. The migration
+     * was right to refuse; the seed was wrong to orphan the rows.
+     */
+    SupplierPayment.deleteMany({}), SupplierPaymentCounter.deleteMany({}),
     InventoryBalance.collection.deleteMany({}),
     InventoryBatch.collection.deleteMany({}),
     InventoryTransaction.collection.deleteMany({})

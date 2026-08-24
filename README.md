@@ -1439,6 +1439,128 @@ docker compose logs -f api mongo-init web
 
 Use `docker compose down -v` only when you intentionally want to delete the local MongoDB volume.
 
+## Docker productionization (Phase 28)
+
+**This stack was actually built, started and exercised — not just designed.**
+Earlier phases reported `DOCKER UNVERIFIED` because no container runtime was
+available. Docker 26.1.5 + Compose v2.26.1 were installed for this phase and
+every claim below was checked against a running stack.
+
+### Services
+
+| Service | Image | Network | Exposed |
+|---|---|---|---|
+| `mongo` | `mongo:7` (replica set `rs0`) | `backend` only | **never** |
+| `mongo-init` | `mongo:7` (one-shot) | `backend` | – |
+| `api` | built from `server/Dockerfile` | `backend` + `frontend` | `127.0.0.1:4000` (diagnostics) |
+| `web` | nginx-unprivileged, built SPA | `frontend` only | `0.0.0.0:8080` |
+
+**No Redis.** The brief said to include it only if required, and it is not:
+neither `package.json` declares a redis dependency, rate limiting uses an
+in-process store behind a pluggable factory, and the Socket.IO adapter is
+per-instance. Adding it would be an unused service to secure, back up and
+monitor. A test asserts it stays absent.
+
+### Verified, with evidence
+
+```
+docker compose build      # production Vite build runs inside the image
+docker compose up -d
+docker compose ps         # mongo, api, web all (healthy)
+```
+
+| Requirement | How it was verified |
+|---|---|
+| Web → Nginx → API → MongoDB | `curl localhost:8080/health` → `{"ok":true,"database":"connected"}` |
+| SPA + assets | `GET /` 200, hashed JS bundle 641 KB served by nginx |
+| **Network isolation** | `docker compose exec web nc -z mongo 27017` → *cannot resolve host*; API reports `connected` |
+| **Persistent volume** | 43 orders survived `docker compose down` → `up -d` |
+| **Replica set** | `rs.status()` → `set=rs0 state=PRIMARY`; a real transaction committed |
+| **Health checks** | all three containers report `(healthy)`; `web` waits on `service_healthy` |
+| **Restart policies** | `unless-stopped` on mongo, api, web |
+| **Socket.IO** | client negotiated `transport: websocket` **through nginx**, received `kitchen:new-order`, `payment:update`, `inventory:update` |
+| **POS** | order created `201`, priced 587.60 |
+| **Payments** | settled `201`, `dueAmount: 0`; tax invoice `INV-KTM-2026-000001` |
+| **KDS** | `pending → accepted → preparing → ready → completed`, all `200` |
+| **Inventory** | stock deducted 81000 → 80700 on sale |
+| **Purchasing** | POs, suppliers, catalogue and supplier invoices all `200` |
+
+### Hardening applied in this phase
+
+- **Two networks.** `backend` is `internal: true` (no route off the host) and
+  carries only MongoDB and the API. `web` is frontend-only, so an nginx
+  compromise has no path to the database.
+- **Compose-level healthcheck for the API.** It existed only in the Dockerfile;
+  `depends_on: service_healthy` is only honoured when Compose can see it, and a
+  Dockerfile `HEALTHCHECK` is lost the moment the image is swapped for a
+  prebuilt one.
+- **nginx runs unprivileged** (uid 101, `nginxinc/nginx-unprivileged`,
+  listening on 8080). Before this it ran as root — verified with
+  `docker compose exec web id -u` returning `0`.
+- **`web`'s healthcheck tests nginx itself.** It used to proxy `/health` to the
+  API, so it could not distinguish "nginx is broken" from "the API is down",
+  and marked nginx unhealthy during an API restart.
+- **Bounded logging** (`10m` × 3) on every service — unbounded container logs
+  can fill the host disk and take the stack down.
+- **File-mounted secrets** via the `*_FILE` convention (see below).
+
+### Secrets
+
+An environment-variable secret is printed in full by `docker inspect` to anyone
+with socket access — confirmed during this phase for `JWT_SECRET`,
+`ESEWA_SECRET_KEY` and `KHALTI_SECRET_KEY`. Docker and Kubernetes both mount
+secrets as *files*, so the API now reads them that way:
+
+```yaml
+services:
+  api:
+    environment:
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+    secrets: [jwt_secret]
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret
+```
+
+Supported: `JWT_SECRET`, `ESEWA_SECRET_KEY`, `KHALTI_SECRET_KEY`, `MONGODB_URI`.
+The file wins over an inline value, a trailing newline is stripped, and a
+`_FILE` pointing at a missing or empty file is a **startup failure** — a silent
+fallback is how a deployment ends up running on a placeholder while the
+operator believes a real secret is mounted. Secrets are *not* baked into image
+layers and do not appear in the client bundle (both checked).
+
+### Defect found by running the stack
+
+Re-seeding and then restarting the API made it **crash-loop**:
+
+```
+Supplier payment migration cannot safely migrate ownership or financial
+data for: 6106ebec..., ba72d060...
+```
+
+`ensureSupplierPaymentIndexes()` synthesises a `SupplierPayment` for every
+invoice with a `paidAmount` at startup. The seed deleted `SupplierInvoice` but
+**not** `SupplierPayment`, so a re-seed orphaned those rows; on the next boot
+the migration refused to guess their ownership and threw. The migration was
+right to refuse — the seed was wrong to orphan them. Fixed by clearing
+`SupplierPayment` and `SupplierPaymentCounter` with the invoices, and covered
+by a test that reproduces the exact sequence.
+
+This was only findable by restarting a real container against seeded data.
+
+### Not verified
+
+- **TLS terminates outside this stack.** nginx serves plain HTTP on 8080; HSTS
+  is emitted by the API only when `NODE_ENV=production` *and* the request is
+  secure. A production deployment needs a TLS terminator in front.
+- **Single-node replica set**, on one host. No failover, multi-node or
+  multi-instance behaviour was exercised.
+- **MongoDB runs unauthenticated** on the internal network. Acceptable only
+  because `backend` is internal and Mongo is never published; enabling
+  `--auth` with a keyfile is a real remaining hardening step.
+- No resource (CPU/memory) limits are set — they need a load profile to size.
+- Verified on Linux with the Compose plugin; not on Docker Desktop.
+
 ## Windows + Docker Desktop
 
 1. Install and open [Docker Desktop](https://www.docker.com/products/docker-desktop/) and wait for the engine to become ready.

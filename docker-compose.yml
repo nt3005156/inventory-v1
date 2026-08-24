@@ -5,6 +5,19 @@ services:
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo_data:/data/db
+    # Phase 28 — network isolation. Mongo sits on the BACKEND network only, so
+    # the public-facing `web` container has no route to it at all: an nginx
+    # compromise cannot reach the database directly. It is also never published
+    # to the host. Verified by asserting `web` cannot resolve/connect to mongo.
+    networks:
+      - backend
+    # Without a cap a single container can fill the host disk with logs and
+    # take the whole stack down. Applied to every long-running service.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "mongosh", "--host", "localhost", "--quiet", "--eval", "quit(db.adminCommand({ping:1}).ok ? 0 : 2)"]
       interval: 5s
@@ -15,6 +28,8 @@ services:
   mongo-init:
     image: mongo:7
     restart: "no"
+    networks:
+      - backend
     depends_on:
       mongo:
         condition: service_healthy
@@ -53,14 +68,45 @@ services:
       ESEWA_MERCHANT_CODE: ${ESEWA_MERCHANT_CODE:-}
       ESEWA_SECRET_KEY: ${ESEWA_SECRET_KEY:-}
       KHALTI_SECRET_KEY: ${KHALTI_SECRET_KEY:-}
+      # Phase 28 — Docker secrets. Point these at a mounted secret FILE instead
+      # of passing the value inline; the app reads the file at startup (see
+      # services/secrets.js). An env-var secret is printed in full by
+      # `docker inspect` to anyone with socket access on the host, so a file is
+      # strictly better in production. Left empty by default so a plain
+      # `docker compose up` still works with .env.
+      JWT_SECRET_FILE: ${JWT_SECRET_FILE:-}
+      ESEWA_SECRET_KEY_FILE: ${ESEWA_SECRET_KEY_FILE:-}
+      KHALTI_SECRET_KEY_FILE: ${KHALTI_SECRET_KEY_FILE:-}
     depends_on:
       mongo-init:
         condition: service_completed_successfully
+    # The API bridges the two networks: it is the ONLY service that can reach
+    # MongoDB, and the only backend `web` is allowed to proxy to.
+    networks:
+      - backend
+      - frontend
     ports:
+      # Loopback only: direct API access is for host-side diagnostics. All real
+      # traffic arrives through nginx on :8080.
       - "127.0.0.1:4000:4000"
     stop_grace_period: 15s
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Declared in compose as well as the Dockerfile. `web` depends on
+    # `service_healthy`, and Compose can only honour that if the healthcheck is
+    # visible HERE -- a Dockerfile HEALTHCHECK is inherited but is easy to lose
+    # when an image is swapped for a prebuilt one.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>r.json()).then(j=>process.exit(j.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
 
   web:
     build:
@@ -70,10 +116,40 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # FRONTEND ONLY. nginx can reach the API and nothing else; it has no route
+    # to MongoDB even if the container is compromised.
+    networks:
+      - frontend
     ports:
-      - "8080:80"
+      # Container listens on 8080 (non-root cannot bind :80).
+      - "8080:8080"
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Tests NGINX ITSELF by serving the SPA shell from local disk. The image's
+    # own healthcheck proxies /health to the API, which cannot distinguish
+    # "nginx is broken" from "the API is down" -- and would mark nginx
+    # unhealthy during an API restart even though it is serving correctly.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/index.html"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+# Two networks, so a compromise of the public-facing container does not put it
+# on the same segment as the database. `backend` is marked internal: it has no
+# route off the host at all.
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
 
 volumes:
   mongo_data:

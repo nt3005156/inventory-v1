@@ -2,7 +2,7 @@ import 'dotenv/config';import express from 'express';import mongoose from 'mongo
 import {User,Ingredient,MenuItem,Expense,Audit} from './models/index.js';import {auth,requireStaff,requirePermission} from './middleware/auth.js';
 import onboardingRouter from './routes/onboarding.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {mongoConnectionOptions,poolStats} from './services/dbConnection.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {mongoConnectionOptions,poolStats} from './services/dbConnection.js';import {loadFileBackedSecrets} from './services/secrets.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -95,6 +95,14 @@ async function shutdown(signal){
 process.once('SIGTERM',()=>shutdown('SIGTERM'));process.once('SIGINT',()=>shutdown('SIGINT'));
 
 async function start(){
+  /**
+   * Phase 28: resolve Docker/Kubernetes `*_FILE` secrets BEFORE validation, so
+   * a file-mounted JWT_SECRET satisfies the same length and placeholder rules
+   * an inline one does. Loading after validation would let a deployment pass
+   * the check on a placeholder and then swap in the real value.
+   */
+  const fileSecrets = loadFileBackedSecrets();
+  if (fileSecrets.length) console.log(`Loaded from secret files: ${fileSecrets.join(', ')}`);
   validateRuntimeEnvironment();
   // Phase 26: explicit pool and timeout settings instead of driver defaults.
   await mongoose.connect(process.env.MONGODB_URI, mongoConnectionOptions());
