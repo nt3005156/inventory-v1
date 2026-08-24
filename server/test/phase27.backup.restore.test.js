@@ -14,7 +14,9 @@ import {
   DEFAULT_KEEP_DAYS, applyRetention, backupName, createBackup, databaseFromUri, listBackups,
   parseArgs, verifyBackup
 } from '../scripts/backup.js';
-import {assertRestoreAllowed, resolveDumpSource, restoreBackup, verifyRestore} from '../scripts/restore.js';
+import {
+  assertRestoreAllowed, assertRestoreProducedData, resolveDumpSource, restoreBackup, verifyRestore
+} from '../scripts/restore.js';
 
 /**
  * Phase 27 — backup and disaster recovery.
@@ -213,6 +215,52 @@ describe('Phase 27 · backup plumbing', () => {
     assert.equal(assertRestoreAllowed({env: {NODE_ENV: 'production'}, collectionCount: 3, acknowledged: true}), true);
   });
 
+  it('treats a zero-document restore as a failure, not a success', () => {
+    /**
+     * DEFECT FOUND IN THE PHASE 30 AUDIT.
+     *
+     * `mongorestore` EXITS 0 even when it restores nothing. Against the
+     * containerised MongoDB (mongodb-database-tools 100.18.0) the old
+     * `--nsFrom/--nsTo` + database-level `--dir` combination made it skip every
+     * file, print "0 document(s) restored successfully" and exit 0 — after
+     * `--drop` had already emptied the target. The identical arguments worked
+     * on 100.9.4, the version this suite runs against, so exit status alone
+     * could never have caught it.
+     *
+     * The guard is tested as a pure function precisely BECAUSE the failure is
+     * version-specific: this assertion holds on any machine.
+     */
+    const skipped = [
+      "don't know what to do with file `/tmp/dr/mittho_ops/orders.bson.gz`, skipping...",
+      '0 document(s) restored successfully. 0 document(s) failed to restore.'
+    ].join('\n');
+    assert.throws(
+      () => assertRestoreProducedData(skipped, {drop: true}),
+      /skipped files in the dump/
+    );
+
+    // Zero documents after --drop means the target was emptied and not refilled.
+    assert.throws(
+      () => assertRestoreProducedData('0 document(s) restored successfully.', {drop: true}),
+      /0 documents restored after --drop/
+    );
+
+    // A healthy restore returns its count.
+    assert.equal(
+      assertRestoreProducedData('1115 document(s) restored successfully. 0 document(s) failed to restore.', {drop: true}),
+      1115
+    );
+
+    /**
+     * WITHOUT --drop, zero is legitimate: mongorestore merges and skips
+     * duplicate _ids, so re-restoring an unchanged backup reports 0. Treating
+     * that as a failure would break the documented merge path — which is
+     * exactly what my first version of this guard did, caught by the existing
+     * merge test.
+     */
+    assert.equal(assertRestoreProducedData('0 document(s) restored successfully.', {drop: false}), 0);
+  });
+
   it('reports a missing or corrupt backup rather than trusting it', async () => {
     const empty = path.join(workDir, 'not-a-backup');
     await fs.mkdir(empty, {recursive: true});
@@ -340,6 +388,38 @@ describe('Phase 27 · backup, destroy, restore, verify', {skip: !TOOLS_AVAILABLE
       /duplicate key|E11000/i,
       'the unique phone index must be enforced after restore'
     );
+  });
+
+  it('reports how many documents it actually restored', async () => {
+    /**
+     * DEFECT FOUND IN THE PHASE 30 AUDIT, and the assertion that would have
+     * caught it.
+     *
+     * `mongorestore` EXITS 0 even when it restores nothing. Against the
+     * containerised MongoDB (tools 100.18.0) the old `--nsFrom/--nsTo` +
+     * database-level `--dir` combination made it skip every file, print
+     * "0 document(s) restored successfully", and exit 0 — after `--drop` had
+     * emptied the target. The same arguments restored correctly on 100.9.4,
+     * which is the version this suite runs against, so a green suite hid a
+     * broken production restore.
+     *
+     * Exit status is therefore no longer treated as proof. This asserts the
+     * COUNT, which is version-independent.
+     */
+    const {path: backupPath} = await createBackup({uri, outDir: backupDir, log: () => {}});
+    await mongoose.connection.db.dropDatabase();
+
+    const result = await restoreBackup({backupPath, uri, drop: true, log: () => {}});
+    assert.ok(
+      result.restoredDocuments > 0,
+      `restore reported ${result.restoredDocuments} documents — a silent empty restore`
+    );
+    // Sanity: the number must match what is actually in the database.
+    const counts = await snapshotCounts();
+    const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    assert.equal(result.restoredDocuments, total,
+      'the reported count must match the documents present');
+    assert.ok(total >= 300, `expected a substantial restore, got ${total}`);
   });
 
   it('restores an intact audit hash chain', async () => {
@@ -483,18 +563,26 @@ describe('Phase 27 · backup, destroy, restore, verify', {skip: !TOOLS_AVAILABLE
      * scratch database and inspect it, leaving the live one untouched. This is
      * the procedure the runbook tells operators to use.
      */
+    const liveOrdersAtBackup = await Order.countDocuments();
     const {path: backupPath} = await createBackup({uri, outDir: backupDir, log: () => {}});
     const drillUri = replset.getUri('mittho_dr_drill');
 
     await restoreBackup({backupPath, uri: drillUri, drop: true, targetDatabase: 'mittho_dr_drill', log: () => {}});
 
+    /**
+     * Compared against the LIVE count taken just before the backup, not
+     * against the block-level `before_` snapshot: earlier tests in this block
+     * legitimately add orders, so a fixed number would make this test depend
+     * on execution order rather than on the restore working.
+     */
     const drill = await verifyRestore({uri: drillUri});
     assert.ok(drill.counts.orders > 0, 'the drill copy has the data');
-    assert.equal(drill.counts.orders, before_.orders);
+    assert.equal(drill.counts.orders, liveOrdersAtBackup,
+      'the drill copy matches the source at backup time');
 
     // ...and the source database is untouched by the drill.
     const live = await verifyRestore({uri});
-    assert.equal(live.counts.orders, before_.orders);
+    assert.equal(live.counts.orders, liveOrdersAtBackup);
   });
 });
 

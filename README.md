@@ -2,6 +2,20 @@
 
 Mittho OPS is a full-stack restaurant operations platform for Nepal. Purchasing receipts and returns update lot-aware inventory and weighted cost, recipes drive stock consumption and historical COGS, and supplier liabilities reconcile invoices, payments, reversals, and statements. Money is recorded in NPR and purchasing supports Nepal's 13% VAT convention.
 
+## Production readiness
+
+A full audit — architecture, security, operations, inventory, financial,
+testing, deployment and performance — is in
+**[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md)**, including the gates
+that were actually run and the limitations that remain.
+
+Re-run the live end-to-end gate against a running Docker stack at any time:
+
+```bash
+docker compose up -d
+npm run audit:production      # 50 checks through nginx; exits non-zero on failure
+```
+
 ## Modules
 
 - JWT authentication with **Owner / Manager / Staff** authorization
@@ -1783,12 +1797,23 @@ as local time.
    `docker compose stop api`
 2. **Pick a backup** and confirm it is healthy: `npm run backup:list`
 3. **Restore**: `npm run restore -w api -- --latest --drop`
-4. **Verify** — the script prints per-collection counts and exits non-zero if
-   verification fails. Then, as the owner, call `GET /api/audit/verify` to
+4. **Verify** — the script prints per-collection counts, refuses to report
+   success if zero documents were restored, and exits non-zero if verification
+   fails. Then, as the owner, call `GET /api/audit/verify` to
    confirm the audit hash chain is intact end to end.
 5. **Start the API**: `docker compose start api`
 
-Three guards, each protecting against an unrecoverable mistake:
+> **A successful exit code is not proof of a restore.** `mongorestore` exits 0
+> even when it restores nothing. Found in the Phase 30 audit: passing
+> `--nsFrom/--nsTo` alongside a database-level `--dir` works on
+> mongodb-database-tools **100.9.4** but makes **100.18.0** (shipped in
+> `mongo:7`) skip every file, print `0 document(s) restored successfully`, and
+> exit 0 — after `--drop` had already emptied the target. The script now uses
+> the version-independent `-d <database>` form, parses the restored document
+> count out of the tool's own summary, and **fails loudly** on a zero-document
+> restore or any skipped file. Verified against both tool versions.
+
+Four guards, each protecting against an unrecoverable mistake:
 
 - **The backup is verified before anything is dropped.** Restoring an
   unverified dump turns a recoverable outage into permanent loss. `--force`

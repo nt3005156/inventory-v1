@@ -105,6 +105,43 @@ export function assertRestoreAllowed({env = process.env, collectionCount = 0, ac
   return true;
 }
 
+/**
+ * Turn mongorestore's own output into a pass/fail decision.
+ *
+ * Pure and exported so the guard is testable without needing a specific
+ * mongodb-database-tools version installed — which matters, because the
+ * failure it defends against only reproduces on 100.18.0.
+ *
+ * Returns the restored document count, or throws when the restore did not
+ * actually put data back.
+ */
+export function assertRestoreProducedData(stderr, {drop = false} = {}) {
+  const text = String(stderr || '');
+  const summary = /(\d+) document\(s\) restored successfully/.exec(text);
+  const restoredDocuments = summary ? Number(summary[1]) : null;
+
+  if (text.includes("don't know what to do with file")) {
+    throw new Error(
+      'mongorestore skipped files in the dump — the arguments do not match this ' +
+      'tool version. Nothing was restored; the target may now be empty.'
+    );
+  }
+  /**
+   * A zero-document restore is only a FAILURE when the target was dropped
+   * first. Without `--drop`, mongorestore merges and legitimately reports 0
+   * when every document already exists (duplicate `_id`s are skipped) — that
+   * is a no-op re-restore, not a broken one. With `--drop` the target was
+   * emptied moments ago, so zero means nothing came back.
+   */
+  if (drop && restoredDocuments === 0) {
+    throw new Error(
+      'mongorestore reported 0 documents restored after --drop. Refusing to ' +
+      'report success: the target has been emptied and not repopulated.'
+    );
+  }
+  return restoredDocuments;
+}
+
 export async function restoreBackup({
   backupPath,
   uri = process.env.MONGODB_URI,
@@ -142,11 +179,33 @@ export async function restoreBackup({
 
   log(`  restoring ${sourceDatabase} -> ${destination} (drop=${drop}, existing collections=${existing.length})`);
 
+  /**
+   * DEFECT FOUND IN THE PHASE 30 AUDIT, against a real containerised MongoDB.
+   *
+   * This used to pass `--nsFrom <db>.* --nsTo <db>.*` alongside a `--dir` that
+   * already points AT the database directory. On mongodb-database-tools
+   * 100.9.4 (the version the Phase 27 tests run against) that works. On
+   * 100.18.0 (shipped in the `mongo:7` image) the same arguments make
+   * mongorestore skip every file --
+   *
+   *   don't know what to do with file `.../orders.bson.gz`, skipping...
+   *   0 document(s) restored successfully.
+   *
+   * -- and still EXIT 0. Combined with `--drop`, that is the worst possible
+   * outcome: the target is emptied and the "successful" restore puts nothing
+   * back. Reproduced both ways: identical arguments restored 3/3 documents on
+   * 100.9.4 and 0 on 100.18.0.
+   *
+   * The version-independent form is `-d <database>` with a database-level
+   * `--dir`, which is also what the MongoDB documentation shows. `--nsFrom`
+   * and `--nsTo` are namespace REWRITE options meant for a full-dump restore;
+   * they were never needed here, because renaming the target database is what
+   * `-d` does.
+   */
   const args = [
     '--uri', uri,
     '--gzip',
-    '--nsFrom', `${sourceDatabase}.*`,
-    '--nsTo', `${destination}.*`,
+    '-d', destination,
     '--dir', sourcePath
   ];
   if (drop) args.push('--drop');
@@ -164,12 +223,29 @@ export async function restoreBackup({
   }
 
   const started = Date.now();
-  await run('mongorestore', args);
+  const {stderr} = await run('mongorestore', args);
+
+  /**
+   * mongorestore EXITS 0 EVEN WHEN IT RESTORES NOTHING.
+   *
+   * Found in the Phase 30 audit: with the wrong argument shape it printed
+   * "don't know what to do with file ... skipping" for every collection,
+   * reported "0 document(s) restored successfully", and exited 0 — after
+   * `--drop` had already emptied the target. The operator sees a clean exit
+   * and an empty database.
+   *
+   * So a successful exit code is not accepted as proof. The restored document
+   * count is parsed from the tool's own summary and a zero-document restore of
+   * a non-empty backup is raised as a failure.
+   */
+  const restoredDocuments = assertRestoreProducedData(stderr, {drop});
+
   return {
     database: destination,
     sourceDatabase,
     durationMs: Date.now() - started,
-    verifiedBackup: verification.ok
+    verifiedBackup: verification.ok,
+    restoredDocuments
   };
 }
 
