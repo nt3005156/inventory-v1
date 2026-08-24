@@ -3,3 +3,9 @@ node_modules
 .env.*
 !.env.example
 coverage
+
+# Phase 27: database dumps must never enter version control -- a backup is a
+# full copy of production data, including customer records.
+/backups/
+backups/
+*.bson.gz

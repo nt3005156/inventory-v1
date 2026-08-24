@@ -1566,6 +1566,171 @@ row count. Correctness controls sit alongside each optimisation: the batched
 menu costing is asserted to produce the **same** figures as the single-item
 path, so the list and the detail screen cannot quietly disagree about margin.
 
+## Backup and disaster recovery (Phase 27)
+
+```
+MongoDB  ->  mongodump (BSON + gzip + oplog)  ->  storage directory  ->  retention sweep
+                                    |
+                          verify (SHA-256 manifest)
+                                    |
+                    restore -> verify counts, indexes, audit chain
+```
+
+**Restoration has been tested, not just designed.** The suite in
+`server/test/phase27.backup.restore.test.js` stands up a real replica set,
+writes data through the application's own models, runs the real `mongodump`,
+**drops the database**, runs the real `mongorestore`, and proves the data came
+back — by document count, by field-level comparison, by index presence, by
+unique-constraint enforcement, and by re-verifying the audit hash chain.
+
+### Commands
+
+```bash
+npm run backup                                   # backup + verify + retention sweep
+npm run backup -w api -- --out /var/backups/mittho --keep-days 30
+npm run backup:list                              # every backup with its health
+node server/scripts/backup.js --verify-only <dir>
+
+npm run restore -w api -- --latest --drop        # newest verified backup
+npm run restore -w api -- --from <dir> --drop
+npm run restore -w api -- --from <dir> --database mittho_drill --uri <scratch-uri>
+```
+
+### Requirement: MongoDB Database Tools
+
+`mongodump` and `mongorestore` are **not** part of the server or of npm. Install
+the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/) on
+whichever host runs the backup. Without them the scripts fail with a clear
+message and the DR tests **skip with a loud warning** rather than passing —
+a green suite that silently skipped the only thing it exists to prove would be
+worse than no suite.
+
+### Backup strategy
+
+| Decision | Why |
+|---|---|
+| `mongodump`, not a filesystem copy | Copying `/data/db` under a running `mongod` gives a torn snapshot unless the filesystem can take an atomic volume snapshot. `mongodump` reads through the server. |
+| `--oplog` | Point-in-time consistency **across** collections. An order, its payment and its inventory ledger rows are written in one transaction; a backup holding the payment but not the stock movement restores a database that does not balance. |
+| Full-cluster dump | `--oplog` is only accepted on a full dump — a URI carrying a database name makes `mongodump` reject it with *"--oplog mode only supported on full dumps"*. The backup therefore connects with the database stripped from the URI. |
+| `--gzip` | Backups are copied off-host; smaller is cheaper and faster. |
+| SHA-256 manifest | A backup nobody can verify is a hope. Every file is digested at write time so corruption is detectable later. |
+| `.env` **not** captured | It holds JWT and payment secrets. Writing them into a tarball spreads them to wherever backups are copied. Secrets are an operator step below. |
+
+There are **no uploaded files** in this system (verified in Phase 25 — no
+upload endpoints exist), so MongoDB plus `.env` is the entire durable state.
+
+### Storage and scheduling
+
+Nothing here schedules itself. Run it from cron or a systemd timer on the
+database host:
+
+```cron
+# 02:15 Kathmandu, daily
+15 2 * * *  cd /srv/mittho && BACKUP_DIR=/var/backups/mittho npm run backup >> /var/log/mittho-backup.log 2>&1
+```
+
+**A backup on the same disk as the database is not a backup.** Copy
+`$BACKUP_DIR` off-host — object storage, a different volume, another machine —
+as a second step. That copy is deliberately left to the operator's own
+tooling rather than baked in: hard-coding one vendor's CLI would be
+untestable here and wrong for most deployments.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BACKUP_DIR` | `./backups` | Where backups are written |
+| `BACKUP_KEEP_DAYS` | 14 | Retention window |
+| `BACKUP_KEEP_MINIMUM` | 3 | Verified copies that survive regardless of age |
+
+### Retention
+
+Age-based, with two safety rules that exist because of specific failure modes:
+
+1. **`BACKUP_KEEP_MINIMUM` verified copies always survive**, however old. A
+   stopped backup job plus a retention sweep is how an organisation discovers
+   it has no backups at all.
+2. **A backup that fails verification never counts toward that minimum.**
+   Otherwise three corrupt copies "satisfy" a minimum of three and the sweep
+   deletes the one good older copy.
+
+Backup labels are **UTC**, so string sort matches time order. Do not read them
+as local time.
+
+### Restore procedure
+
+1. **Stop the API** so nothing writes during the restore:
+   `docker compose stop api`
+2. **Pick a backup** and confirm it is healthy: `npm run backup:list`
+3. **Restore**: `npm run restore -w api -- --latest --drop`
+4. **Verify** — the script prints per-collection counts and exits non-zero if
+   verification fails. Then, as the owner, call `GET /api/audit/verify` to
+   confirm the audit hash chain is intact end to end.
+5. **Start the API**: `docker compose start api`
+
+Three guards, each protecting against an unrecoverable mistake:
+
+- **The backup is verified before anything is dropped.** Restoring an
+  unverified dump turns a recoverable outage into permanent loss. `--force`
+  overrides, and has to be typed.
+- **`--drop` is opt-in.** Without it `mongorestore` **merges**, silently mixing
+  two datasets — rows deleted after the backup come back. Neither behaviour is
+  safe as an unconsidered default, so the operator chooses and the choice is
+  echoed before it runs.
+- **Restoring over a non-empty production database needs
+  `--i-understand-this-overwrites`.** `APP_ENV=production` plus existing
+  collections is exactly the shape of "somebody ran the DR drill against the
+  live cluster".
+
+### Rehearsing recovery without touching production
+
+Restore the production dump into a scratch database and inspect it:
+
+```bash
+npm run restore -w api -- --from <backup> --database mittho_drill \
+  --uri 'mongodb://mongo:27017/mittho_drill?replicaSet=rs0' --drop
+```
+
+A test covers this path and asserts the source database is untouched.
+
+### Full environment recovery
+
+Recovering the database is not the same as recovering the service.
+
+1. **Provision the host** and install Docker + the MongoDB Database Tools.
+2. **Restore the repository**: `git clone` at the deployed tag.
+3. **Restore `.env` from the secret store** — it is *not* in the backup. The
+   API refuses to start without a valid `JWT_SECRET`, `MONGODB_URI` and
+   `CLIENT_URL`, so a wrong or missing file fails fast rather than booting
+   insecurely.
+   > Rotating `JWT_SECRET` during recovery invalidates every live session.
+   > That is usually correct after an incident, but it signs everyone out.
+4. **Start MongoDB and initialise the replica set**: `docker compose up -d mongo mongo-init`.
+   A replica set is mandatory — the application requires transactions and
+   refuses to start without them.
+5. **Restore the data** with the procedure above.
+6. **Start the stack**: `docker compose up -d`.
+7. **Confirm**: `/health` must report `ok:true`, `database:connected`,
+   `startup:ready`. Operational migrations rebuild indexes on boot, so a
+   restore that lost an index is repaired here.
+8. **Verify the audit chain** as the owner before trading resumes.
+
+### What is NOT claimed
+
+- **No off-host replication is implemented.** Copying backups off the machine
+  is a documented operator step, not code.
+- **No point-in-time recovery between backups.** The oplog is captured
+  *within* each dump, giving a consistent snapshot at backup time; continuous
+  oplog tailing for arbitrary-second recovery is not built. Worst-case data
+  loss is the interval between backups.
+- **`--oplogReplay` is not used on the single-database restore path.**
+  `mongorestore` rejects the combination with a `--dir` restore. The oplog is
+  still captured and preserved for a full-cluster recovery; the
+  single-database path does not replay it.
+- **No automated restore drill.** Nothing runs the DR test on a schedule
+  against real backups; the tests prove the mechanism, not that your latest
+  production backup restores. Run the drill yourself, on a schedule.
+- **Not tested against a multi-node replica set, a sharded cluster, or
+  Atlas.** Verified on a single-node replica set only.
+
 ## Health and shutdown behavior
 
 `GET /health` returns HTTP 200 only when startup has completed and Mongoose is connected. The Docker web container proxies the same endpoint:

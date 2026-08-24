@@ -1,5 +1,21 @@
 {
-  "name":"mittho-ops","version":"1.0.0","private":true,"workspaces":["client","server"],
-  "scripts":{"dev":"concurrently \"npm run dev -w server\" \"npm run dev -w client\"","seed":"npm run seed -w server","start":"npm run start -w server","test":"npm run test -w api","build":"npm run build -w web"},
-  "devDependencies":{"concurrently":"^9.1.0"}
+  "name": "mittho-ops",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "seed": "npm run seed -w server",
+    "start": "npm run start -w server",
+    "test": "npm run test -w api",
+    "build": "npm run build -w web",
+    "backup": "npm run backup -w api",
+    "restore": "npm run restore -w api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
 }
