@@ -14,7 +14,8 @@
     "build": "npm run build -w web",
     "backup": "npm run backup -w api",
     "restore": "npm run restore -w api",
-    "audit:production": "node scripts/production-audit.mjs"
+    "audit:production": "node scripts/production-audit.mjs",
+    "audit:verify": "npm run audit:verify -w api"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

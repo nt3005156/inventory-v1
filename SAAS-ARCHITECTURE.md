@@ -1,4 +1,4 @@
-# SaaS architecture — P1 · P2A · P2B · P2C · P2D
+# SaaS architecture — P1 · P2A · P2B · P2C · P2D · P2D.1
 
 How this single-restaurant ERP becomes a multi-tenant platform for ~100
 restaurants on one codebase. Written at the end of Phase P1; sections marked
@@ -719,6 +719,82 @@ against an old restaurant with no `branding` key, a partially configured one
 and a fully configured one: all three render correctly, legacy `settings` keys
 survive, and no default is written back.
 
+## 3E. Audit-chain canonicalisation — P2D.1
+
+### The contract
+
+`services/auditCanonical.js` is the **single** canonicaliser, used by audit
+creation, verification and the CLI tool. Duplicating it is how the three drift
+apart and a chain starts reporting phantom tampering.
+
+**Hash what will be STORED, not what was passed in.** The hash is stamped in
+`pre('validate')`, before MongoDB writes the document; MongoDB then omits keys
+whose value is `undefined`. Hashing the pre-write object therefore produced a
+hash the stored row could never reproduce.
+
+| Value | Canonical form | Note |
+|---|---|---|
+| `undefined` (object value) | key **omitted** | matches what MongoDB stores |
+| `null` | `null` | distinct from undefined |
+| missing key | absent | identical to undefined — they store identically |
+| `undefined` (array element) | `null` | dropping it would shift indices |
+| `Date` | ISO-8601 | invalid → `[invalid-date]` |
+| `ObjectId` | 24-char hex | |
+| `NaN` / `±Infinity` | `[number:NaN]` etc. | JSON would silently emit `null` |
+| object keys | sorted | insertion order cannot change a hash |
+| cycles / depth > 12 | `[circular]` / `[depth]` | |
+
+### Versioning
+
+`Audit.hashVersion` records which rules produced the hash. Absent means v1.
+Verification applies the rules a row declares, so a pre-fix row is reported as
+**legacy**, not as tampering.
+
+### Row classification
+
+| Class | Meaning |
+|---|---|
+| valid | hash verifies |
+| `legacy_canonicalisation` | verifies under v1; intact, predates the fix |
+| `legacy_unverifiable` | v1 row whose hashed payload MongoDB discarded — unverifiable either way, **not** evidence of tampering |
+| `content` | matches no known ruleset. **The real alarm.** A row declaring v2 always lands here |
+| `malformed` | no hash or no sequence |
+| `link` / `sequence` | broken parent, or a gap from a deleted row |
+
+`verified` excludes the legacy classes. A deployment with pre-P2D.1 history
+would otherwise report a permanent breach, and operators would learn to ignore
+the alarm — destroying the value of the check.
+
+### Verification tool
+
+```bash
+npm run audit:verify                          # all chains, read-only
+npm run audit:verify -- --json                # machine-readable
+npm run audit:verify -- --restaurant <id>     # one tenant
+```
+
+Exit `0` intact, `1` integrity problem, `2` tool failure. **CLI only, never an
+HTTP endpoint**: it walks every tenant's chain, and the per-tenant HTTP case is
+already served by the owner-scoped `verifyAuditChain()`.
+
+### Concurrency
+
+`withChainLock()` serialises stamping per chain. Because the insert lands after
+the lock releases, `pendingHeads` tracks the head this process just stamped —
+without it, 30 concurrent writes produced only 21 distinct sequence numbers.
+The stored head wins whenever it is further along, so a stale entry cannot move
+the sequence backwards.
+
+**Across instances** two processes can still stamp the same `prevHash`. That is
+unchanged, detected as a `link` problem, and fixing it needs a database-side
+counter — out of scope here.
+
+### No repair tool, deliberately
+
+Two different pre-write objects store identically, and the dropped key *names*
+are unrecoverable. Any repair would be inventing evidence, which is worse than
+an honest gap in an audit trail.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -853,7 +929,7 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 
 ---
 
-## 8. Honest limitations after P1 / P2A / P2B / P2C / P2D
+## 8. Honest limitations after P1 / P2A / P2B / P2C / P2D / P2D.1
 
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
@@ -895,16 +971,15 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
   no per-tenant email templates; no localisation beyond a stored preference —
   the `ne` locale is selectable but no translations ship; POS/KDS remain
   deliberately un-themed so operational readability cannot be degraded.
-- **KNOWN PRE-EXISTING DEFECT, found during P2D and reported, not silently
-  redesigned:** `verifyAuditChain()` reports a false `content` mismatch on any
-  audit row whose `before`/`after` held an `undefined` value at write time.
-  `auditPayload()` hashes it as `null`; MongoDB then drops the key, so the
-  recomputed hash differs. Nothing is actually tampered, but a tamper-evidence
-  mechanism that cries wolf trains investigators to ignore it. Reproduces
-  identically on the P2C commit `164b108`, so it predates P2D. P2D's own
-  writers coerce with `?? null` and are unaffected, which is asserted. Fixing
-  it needs a decision about existing rows, which cannot be re-hashed without
-  destroying the evidence the chain exists to provide.
+- **FIXED IN P2D.1** — the audit-chain `undefined` defect reported at the end
+  of P2D. Canonicalisation now hashes what will be STORED, so the false
+  `content` alarms are gone. A duplicate-sequence race under concurrent writes
+  was found and fixed in the same phase. Historical rows that carried an
+  `undefined` remain **unverifiable** (their hashed payload no longer exists)
+  and are reported as `legacy_unverifiable` rather than as tampering — see
+  §3E. Content tampering with one of those specific rows cannot be detected by
+  its own hash, though the chain link still detects insertion, deletion and
+  re-parenting.
 - **Single-instance only** — see §6.1.
 - **Rate limits are per-IP, not per-tenant.**
 - **The three production preconditions still stand**: terminate TLS, enable

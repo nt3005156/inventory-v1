@@ -213,6 +213,64 @@ artefact rather than a convenient stand-in.
 
 ---
 
+## Audit-chain integrity (P2D.1)
+
+The audit trail is a per-restaurant SHA-256 hash chain. Two integrity defects
+were found and fixed in P2D.1; both **predated** the phase that found them.
+
+### 1. False tamper alarms (fixed)
+
+The hash was computed on the pre-write document while MongoDB drops keys whose
+value is `undefined`, so any row containing one verified as `content` — the
+signature of tampering — when nothing had been altered. Canonicalisation now
+hashes what will be stored. `Audit.hashVersion` records which ruleset produced
+a hash.
+
+### 2. Duplicate sequence numbers under concurrency (fixed)
+
+30 concurrent writes to one chain produced only 21 distinct sequence numbers:
+the stamping lock released before the insert landed, so the next writer re-read
+a stale head. Fixed by tracking the in-flight head per chain.
+
+**Still true across instances:** two processes can stamp the same `prevHash`.
+Detected as a `link` problem; a database-side counter would be needed to
+prevent it.
+
+### Operational procedure
+
+```bash
+npm run audit:verify                        # read-only; exit 1 if broken
+npm run audit:verify -- --json              # for monitoring
+npm run audit:verify -- --restaurant <id>
+```
+
+Run it after any restore, before any compliance review, and on a schedule if
+audit integrity is being monitored. It never writes.
+
+### Historical rows
+
+Rows written before P2D.1 that carried an `undefined` are **unverifiable** —
+the payload that was hashed no longer exists, so no ruleset can reproduce it.
+They are reported as `legacy_unverifiable`, not as tampering, and are **not**
+repaired: the dropped key names are unrecoverable, so any repair would be
+inventing evidence.
+
+Measured on a realistic mixed dataset, **68% of historical rows verify cleanly**
+under the new rules; only rows that actually carried an `undefined` are
+affected.
+
+**Limitation, stated plainly:** content tampering with one of those specific
+legacy rows cannot be detected by its own hash. It could not be detected before
+this phase either — the difference is that it is now reported honestly instead
+of being buried among false alarms. The chain link still detects insertion,
+deletion and re-parenting around them.
+
+### No migration required
+
+The only schema change is an additive, optional `hashVersion`. New writes are
+correct from deployment; existing rows are left untouched. Nothing to roll
+back.
+
 ## Operational preconditions (unmet by default)
 
 These must be handled before taking real orders:

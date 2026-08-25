@@ -1,4 +1,7 @@
 import {createHash} from 'node:crypto';
+import {
+  AUDIT_HASH_VERSION, auditPayloadForVersion, canonicalAuditPayload
+} from './auditCanonical.js';
 import mongoose from 'mongoose';
 import {Audit, setAuditChainStamper, User} from '../models/index.js';
 import {Branch} from '../models/operations.js';
@@ -80,61 +83,31 @@ export const AUDIT_ACTIONS = Object.freeze(
  * way the substituted marker still hashes deterministically, so tamper
  * detection is unaffected.
  */
-const MAX_CANONICAL_DEPTH = 12;
-
-function canonicaliseSafe(value, seen, depth) {
-  if (value === null || value === undefined) return null;
-  if (depth > MAX_CANONICAL_DEPTH) return '[depth]';
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === 'object') {
-    // A hydrated document or subdocument: reduce to its plain form first.
-    if (typeof value.toObject === 'function') {
-      try { value = value.toObject({depopulate: true, virtuals: false}); } catch { return String(value); }
-    } else if (typeof value.toJSON === 'function' && value._bsontype) {
-      return String(value);
-    }
-    if (value === null) return null;
-    if (typeof value !== 'object') return value;
-    if (seen.has(value)) return '[circular]';
-    seen.add(value);
-    const result = Array.isArray(value)
-      ? value.map(item => canonicaliseSafe(item, seen, depth + 1))
-      : Object.keys(value).sort().reduce((acc, key) => {
-        if (key.startsWith('$') || key === '__parentArray' || key === '__index') return acc;
-        acc[key] = canonicaliseSafe(value[key], seen, depth + 1);
-        return acc;
-      }, {});
-    seen.delete(value);
-    return result;
-  }
-  return value;
-}
-
+/**
+ * P2D.1 — canonicalisation now lives in services/auditCanonical.js.
+ *
+ * It was inlined here and mapped both `null` and `undefined` to `null`. Since
+ * the hash is stamped on the PRE-WRITE document and MongoDB then omits
+ * undefined keys, every row containing one verified as `content` — the
+ * signature of tampering — when nothing had been tampered with. It also made
+ * `{a: undefined}` and `{a: null}` hash identically.
+ *
+ * Extracted so audit creation, audit verification and the CLI verifier share
+ * ONE implementation and cannot drift. See auditCanonical.js for the contract.
+ */
 export function auditPayload(row) {
-  const seen = new WeakSet();
-  const canonicalise = value => canonicaliseSafe(value, seen, 0);
-  return JSON.stringify(canonicalise({
-    entity: row.entity ?? null,
-    entityId: row.entityId ? String(row.entityId) : null,
-    restaurant: row.restaurant ? String(row.restaurant) : null,
-    branch: row.branch ? String(row.branch) : null,
-    action: row.action ?? null,
-    before: row.before ?? null,
-    after: row.after ?? null,
-    reason: row.reason ?? null,
-    user: row.user ? String(row.user) : null,
-    userName: row.userName ?? null,
-    userRole: row.userRole ?? null,
-    ip: row.ip ?? null,
-    reference: row.reference ?? null,
-    at: row.at instanceof Date ? row.at.toISOString() : row.at ?? null,
-    sequence: row.sequence ?? null
-  }));
+  return canonicalAuditPayload(row);
 }
 
-export function auditHash(row, prevHash) {
+/**
+ * SHA-256 over the canonical payload, chained to the previous row's hash.
+ *
+ * `version` selects the canonicalisation rules, so a v1 row can be re-verified
+ * under the rules it was written with. New rows are always AUDIT_HASH_VERSION.
+ */
+export function auditHash(row, prevHash, version = AUDIT_HASH_VERSION) {
   return createHash('sha256')
-    .update(auditPayload(row))
+    .update(auditPayloadForVersion(row, version))
     .update(String(prevHash || 'GENESIS'))
     .digest('hex');
 }
@@ -150,6 +123,25 @@ export function auditHash(row, prevHash) {
  * silently accepting it. Documented in the README.
  */
 const chainLocks = new Map();
+
+/**
+ * The last head STAMPED by this process, per chain.
+ *
+ * Needed because the insert lands after the stamping lock is released, so the
+ * database head lags behind what this process has already issued. Bounded: one
+ * small entry per chain that has been written to in this process, and each
+ * entry is overwritten rather than accumulated.
+ *
+ * Only ever used when it is AHEAD of the stored head, so a stale entry (after
+ * a failed insert, or another instance advancing the chain) can never drag the
+ * sequence backwards — the database always wins when it is further along.
+ */
+const pendingHeads = new Map();
+
+/** Test seam: lets a suite prove the map does not grow without bound. */
+export function __pendingChainHeads() {
+  return pendingHeads.size;
+}
 
 function withChainLock(key, task) {
   const previous = chainLocks.get(key) || Promise.resolve();
@@ -191,11 +183,45 @@ export function installAuditChain() {
     const restaurantId = doc.restaurant || null;
     const key = String(restaurantId || 'global');
     await withChainLock(key, async () => {
-      const head = await chainHead(restaurantId, doc.$session?.());
+      /**
+       * P2D.1 — the in-flight head.
+       *
+       * A REAL RACE, reproduced and confirmed pre-existing (identical on
+       * 57c5ec4): under 30 concurrent writes only 21 distinct sequence
+       * numbers were issued, and the duplicates broke the chain links.
+       *
+       * `withChainLock()` serialises STAMPING, but the INSERT happens after
+       * the lock is released — the hook is `pre('validate')`, and the document
+       * is written later. So the next writer entered the lock and re-read a
+       * `chainHead()` that had not advanced yet:
+       *
+       *     sequential : 10 rows, 10 distinct  OK
+       *     concurrent : 10 rows,  9 distinct  BROKEN  (1,1,2,3,4,…)
+       *
+       * The fix is bounded to this: remember the head this process just
+       * STAMPED, and prefer it when it is ahead of what the database reports.
+       * Serialisation by the lock then actually holds, because each writer
+       * sees its predecessor's stamp rather than waiting for its insert.
+       *
+       * This does NOT change cross-instance behaviour: two processes can still
+       * stamp the same `prevHash`, which `verifyAuditChain()` already reports
+       * as a `link` problem and which the README documents. Fixing that needs
+       * a database-side counter and is out of scope here.
+       */
+      const stored = await chainHead(restaurantId, doc.$session?.());
+      const pending = pendingHeads.get(key) || null;
+      const head = pending && Number(pending.sequence) > Number(stored?.sequence || 0)
+        ? pending
+        : stored;
+
       doc.sequence = Number(head?.sequence || 0) + 1;
       doc.prevHash = head?.hash || null;
       if (!doc.at) doc.at = new Date();
-      doc.hash = auditHash(doc, doc.prevHash);
+      // Recorded on the row so verification can apply the rules the row was
+      // written under, instead of guessing. Rows with no version are v1.
+      doc.hashVersion = AUDIT_HASH_VERSION;
+      doc.hash = auditHash(doc, doc.prevHash, AUDIT_HASH_VERSION);
+      pendingHeads.set(key, {sequence: doc.sequence, hash: doc.hash});
     });
   });
   return true;
@@ -396,6 +422,79 @@ function view(row) {
  *                a row was DELETED or inserted between them.
  *   `sequence` — a gap or duplicate in the counter: rows REMOVED.
  */
+/**
+ * Classify ONE row. Shared by the HTTP verifier and the CLI tool so the two
+ * can never disagree about what a given row means.
+ *
+ * Returns `null` when the row is valid, otherwise a problem object whose
+ * `type` distinguishes the three genuinely different situations:
+ *
+ *   `legacy_canonicalisation` — the hash does not match under v2, but DOES
+ *       match under the v1 rules the row was written with. The row is intact;
+ *       it simply predates the fix. NOT tampering, and reported separately so
+ *       an operator is not sent chasing a breach that did not happen.
+ *   `content` — the hash matches under NEITHER version. The row's content does
+ *       not correspond to its hash. This is the real alarm.
+ *   `malformed` — no hash, or no sequence. Nothing to verify against.
+ */
+export function classifyAuditRow(row) {
+  if (!row.hash) {
+    return {type: 'malformed', detail: 'row has no hash', sequence: row.sequence ?? null};
+  }
+  if (row.sequence === undefined || row.sequence === null) {
+    return {type: 'malformed', detail: 'row has no sequence', sequence: null};
+  }
+
+  const declared = Number(row.hashVersion) || 1;
+  if (auditHash(row, row.prevHash, declared) === row.hash) return null;
+
+  /**
+   * The declared version did not match. Before calling it tampering, try the
+   * other known version: a row written just before the upgrade may carry no
+   * version yet still be perfectly intact, and a row written after it must not
+   * be excused by the looser v1 rules.
+   */
+  const alternate = declared >= 2 ? 1 : 2;
+  if (auditHash(row, row.prevHash, alternate) === row.hash) {
+    return {
+      type: 'legacy_canonicalisation',
+      sequence: row.sequence,
+      detail: `hash matches canonicalisation v${alternate}, row declares v${declared}`,
+      matchedVersion: alternate
+    };
+  }
+
+  /**
+   * NEITHER version reproduces the hash — and for a v1 row that is EXPECTED,
+   * not evidence of tampering.
+   *
+   * My first classifier assumed a v1 row could always be re-verified under v1.
+   * It cannot: the v1 hash covered keys that MongoDB then discarded
+   * (`{"before":{"name":"X","pan":"111","slug":null}}` was hashed, but only
+   * `{"name":"X","pan":"111"}` was stored). The pre-write payload is gone, so
+   * no rule can regenerate it — which is exactly why these rows are
+   * unrepairable (P2D.1-AUDIT.md §5).
+   *
+   * So an UNVERSIONED row that fails both checks is reported as
+   * `legacy_unverifiable`: structurally intact, predating the fix, and
+   * impossible to verify either way. Honest, and distinct from tampering.
+   *
+   * A row that DECLARES v2 has no such excuse. It was written after the fix,
+   * when the hashed shape is the stored shape by construction, so a mismatch
+   * is a genuine `content` alarm.
+   */
+  if (declared < 2) {
+    return {
+      type: 'legacy_unverifiable',
+      sequence: row.sequence,
+      detail: 'pre-P2D.1 row: the hashed payload included keys MongoDB discarded, '
+        + 'so the original cannot be reconstructed. Not evidence of tampering.'
+    };
+  }
+
+  return {type: 'content', sequence: row.sequence, detail: 'hash matches no known canonicalisation'};
+}
+
 export async function verifyAuditChain({user, limit = 5000}) {
   const identity = await userRestaurantContext(user);
   if (identity.role !== 'owner') throw httpError('Only an owner can verify the audit chain', 403);
@@ -406,34 +505,57 @@ export async function verifyAuditChain({user, limit = 5000}) {
     .lean();
 
   const problems = [];
+  const counts = {valid: 0, legacy: 0, content: 0, malformed: 0, link: 0, sequence: 0};
   let previous = null;
   for (const row of rows) {
-    if (row.hash) {
-      const expected = auditHash(row, row.prevHash);
-      if (expected !== row.hash) {
-        problems.push({type: 'content', sequence: row.sequence, id: String(row._id), action: row.action});
-      }
+    const problem = classifyAuditRow(row);
+    if (!problem) {
+      counts.valid += 1;
+    } else {
+      // A legacy row is intact, so it is counted and reported but does NOT
+      // fail verification — otherwise every deployment with pre-P2D.1 history
+      // reports a permanent breach and the signal becomes worthless.
+      if (problem.type === 'legacy_canonicalisation'
+        || problem.type === 'legacy_unverifiable') counts.legacy += 1;
+      else if (problem.type === 'malformed') counts.malformed += 1;
+      else counts.content += 1;
+      problems.push({...problem, id: String(row._id), action: row.action});
     }
     if (previous) {
       if (Number(row.sequence) !== Number(previous.sequence) + 1) {
+        counts.sequence += 1;
         problems.push({
           type: 'sequence', sequence: row.sequence, id: String(row._id),
           detail: `expected ${Number(previous.sequence) + 1}`
         });
       }
       if (row.prevHash !== previous.hash) {
+        counts.link += 1;
         problems.push({type: 'link', sequence: row.sequence, id: String(row._id)});
       }
     }
     previous = row;
   }
 
+  /**
+   * `verified` covers the problems that indicate a REAL integrity failure.
+   * Legacy-canonicalisation rows are intact and are excluded, or a deployment
+   * with any pre-P2D.1 history would report a permanent breach and operators
+   * would learn to ignore the alarm entirely. They are still surfaced, under
+   * `legacyCanonicalisation`, so nobody can claim they were hidden.
+   */
+  const realProblems = problems.filter(
+    p => p.type !== 'legacy_canonicalisation' && p.type !== 'legacy_unverifiable');
+
   return {
-    verified: problems.length === 0,
+    verified: realProblems.length === 0,
     checked: rows.length,
     head: previous ? {sequence: previous.sequence, hash: previous.hash} : null,
-    problems: problems.slice(0, 50),
-    problemCount: problems.length,
+    problems: realProblems.slice(0, 50),
+    problemCount: realProblems.length,
+    counts,
+    legacyCanonicalisation: counts.legacy,
+    hashVersion: AUDIT_HASH_VERSION,
     // Stated in the response so an operator is never misled about the guarantee.
     guarantee: 'Detects tampering. Prevention of direct database writes requires an append-only store or off-host log shipping.'
   };

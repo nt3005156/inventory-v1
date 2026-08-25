@@ -129,9 +129,33 @@ rewrote historical invoices. `Order.invoiceIdentity` now snapshots the legally
 significant fields when the invoice number is allocated, and is immutable
 thereafter.
 
-**A pre-existing audit-chain defect was found and reported, not silently
-redesigned** — see SAAS-ARCHITECTURE.md §8. It reproduces on the P2C commit and
-is a false alarm, not a breach.
+**The pre-existing audit-chain defect found in P2D is fixed in P2D.1** — see
+below.
+
+P2D.1 (audit-chain integrity hardening) is complete. Canonicalisation now
+**hashes what will be stored**, so the false tamper alarms are gone, and
+`undefined` no longer collides with an explicit `null`. A duplicate-sequence
+race under concurrent writes was found and fixed in the same phase.
+
+```bash
+npm run audit:verify                        # read-only, all chains
+npm run audit:verify -- --json              # machine-readable
+npm run audit:verify -- --restaurant <id>   # one tenant
+```
+
+Exit `0` intact, `1` integrity problem, `2` tool failure. It never writes, and
+is deliberately **CLI-only** — it walks every tenant's chain, so it must not be
+an HTTP surface.
+
+Rows are classified rather than lumped together: `valid`,
+`legacy_canonicalisation`, `legacy_unverifiable`, `content` (the real alarm),
+`malformed`, `link`, `sequence`.
+
+**No repair tool exists, deliberately.** Historical rows that carried an
+`undefined` cannot be reconstructed — the dropped key names are gone — so any
+"repair" would be inventing evidence. **No migration is required**; the only
+schema change is an additive `hashVersion`, and existing rows are left
+untouched.
 
 `BILLING_ENFORCEMENT` (`auto` by default) forces enforcement `on` or `off`
 explicitly. The optional subscription sweep — which only reconciles stored

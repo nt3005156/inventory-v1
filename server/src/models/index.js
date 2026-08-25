@@ -47,7 +47,21 @@ const auditSchema=new Schema({
   // any earlier row breaks verification from that point onward.
   prevHash:{type:String,immutable:true},
   hash:{type:String,immutable:true,index:true},
-  sequence:{type:Number,immutable:true}
+  sequence:{type:Number,immutable:true},
+  /**
+   * P2D.1 — which canonicalisation produced `hash`.
+   *
+   * Absent means v1, the pre-P2D.1 rules, under which a row containing an
+   * `undefined` inside before/after verified as `content` (tampered) even
+   * though nothing had been altered — MongoDB drops undefined keys, so the
+   * stored row could not reproduce the pre-write hash.
+   *
+   * Recording the version lets verification apply the rules a row was written
+   * under and report "legacy canonicalisation" instead of "tampered". Those
+   * rows cannot be re-hashed: the dropped key NAMES are unrecoverable, so any
+   * repair would be inventing evidence. See P2D.1-AUDIT.md §5.
+   */
+  hashVersion:{type:Number,immutable:true}
 },{minimize:false});
 auditSchema.index({restaurant:1,branch:1,entity:1,entityId:1,action:1,at:1},{name:'audit_entity_timeline'});
 // Search paths the compliance UI actually uses.
