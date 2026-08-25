@@ -1,7 +1,7 @@
 import {Router} from 'express';
 import {z} from 'zod';
 import {fail as safeFail} from '../services/httpErrors.js';
-import {authenticated, requirePermission} from '../middleware/auth.js';
+import {requirePermission, requirePlatformPermission} from '../middleware/auth.js';
 import {
   createRestaurant, getOwnRestaurant, getRestaurantForPlatform, listRestaurants,
   setRestaurantStatus, updateRestaurant
@@ -25,10 +25,14 @@ import {
  * able to distinguish "the platform changed this tenant" from "the tenant
  * changed itself".
  *
- * The platform routes use `authenticated()` only — the platform permission is
- * enforced in the service layer, which is also where it is unit-testable.
- * Using `requirePermission()` here would be wrong: those are TENANT
- * permissions, and an owner holds all of them.
+ * P2B: the platform routes now carry `requirePlatformPermission()`, the one
+ * centralized platform guard, IN ADDITION to the service-layer check P2A
+ * introduced. P2A left them on bare `authenticated()` because the service was
+ * the only enforcement point; two independent checks is better, and it means
+ * an unauthorized caller is refused before any handler code runs.
+ *
+ * Using `requirePermission()` here would be wrong in every case: those are
+ * TENANT permissions, and an owner holds all 72 of them.
  */
 
 const r = Router();
@@ -49,7 +53,7 @@ const profileSchema = z.object({
 
 // ── platform surface ─────────────────────────────────────────────────────────
 
-r.get('/platform/restaurants', authenticated(), async (req, res) => {
+r.get('/platform/restaurants', requirePlatformPermission('platform.restaurants.view'), async (req, res) => {
   try {
     res.json(await listRestaurants({
       user: req.user, status: req.query.status, q: req.query.q,
@@ -58,13 +62,13 @@ r.get('/platform/restaurants', authenticated(), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.get('/platform/restaurants/:id', authenticated(), async (req, res) => {
+r.get('/platform/restaurants/:id', requirePlatformPermission('platform.restaurants.view'), async (req, res) => {
   try {
     res.json(await getRestaurantForPlatform({user: req.user, restaurantId: req.params.id}));
   } catch (e) { fail(res, e); }
 });
 
-r.post('/platform/restaurants', authenticated(), async (req, res) => {
+r.post('/platform/restaurants', requirePlatformPermission('platform.restaurants.create'), async (req, res) => {
   try {
     const body = profileSchema.extend({
       name: z.string().trim().min(2).max(160),
@@ -74,7 +78,7 @@ r.post('/platform/restaurants', authenticated(), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-r.patch('/platform/restaurants/:id', authenticated(), async (req, res) => {
+r.patch('/platform/restaurants/:id', requirePlatformPermission('platform.restaurants.update'), async (req, res) => {
   try {
     const body = profileSchema.parse(req.body ?? {});
     res.json(await updateRestaurant({
@@ -93,7 +97,7 @@ const lifecycleSchema = z.object({
   reason: z.string().trim().max(300).optional()
 }).strict();
 
-r.post('/platform/restaurants/:id/status', authenticated(), async (req, res) => {
+r.post('/platform/restaurants/:id/status', requirePlatformPermission('platform.restaurants.suspend', 'platform.restaurants.activate'), async (req, res) => {
   try {
     const body = lifecycleSchema.parse(req.body ?? {});
     res.json(await setRestaurantStatus({

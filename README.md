@@ -19,10 +19,55 @@ and **enforced** lifecycle — a suspended restaurant is refused on every
 operational request. Platform permissions are deliberately kept out of the
 tenant catalogue, because a restaurant owner holds `*`.
 
+P2B (platform administration) is complete: an authority **ladder**
+(`platform_support` / `platform_admin` / `super_admin`), ten `platform.*`
+permissions, one centralized guard (`requirePlatformPermission()`), cross-tenant
+user administration, a platform dashboard, a whitelisted platform audit view,
+and a **separate** admin workspace in the client. A `platform_admin` can suspend
+any restaurant but deliberately **cannot mint another operator** — that needs
+`super_admin`.
+
+**Restaurant owner ≠ platform administrator.** An owner holds all 72 tenant
+permissions and **zero** platform authority; every platform endpoint answers
+them 403. Authority is read from the database on every request, so a forged
+`platformRole` JWT claim grants nothing and a revoked role stops working
+immediately.
+
 ```bash
 npm run migrate:tenants:dry -w api   # report what would change, write nothing
 npm run migrate:tenants -w api       # backfill tenant ownership
+
+# Platform operators. The FIRST one requires shell access by design — there is
+# deliberately no bootstrap route, because a route that disables itself after
+# first use comes back after a restore from an older backup.
+npm run platform:admin -w api -- list
+npm run platform:admin -w api -- grant ops@example.com super_admin
+npm run platform:admin -w api -- revoke ops@example.com
+
+# In Docker:
+docker compose exec -T api node scripts/platform-admin.js list
 ```
+
+Subsequent grants go through `PATCH /api/platform/users/:id/platform-role`
+(super admin only), which enforces a rank ceiling, refuses self-promotion,
+protects the last super administrator, requires a reason and writes an audit
+row.
+
+| Platform route | Permission |
+|---|---|
+| `GET /api/platform/me` | any authenticated caller, about themselves |
+| `GET /api/platform/dashboard` | `platform.dashboard.view` |
+| `GET/POST /api/platform/restaurants` | `platform.restaurants.view` / `.create` |
+| `GET/PATCH /api/platform/restaurants/:id` | `platform.restaurants.view` / `.update` |
+| `POST /api/platform/restaurants/:id/status` | `platform.restaurants.suspend` / `.activate` |
+| `GET /api/platform/users`, `/users/:id`, `/admins` | `platform.users.view` |
+| `PATCH /api/platform/users/:id/active` | `platform.users.manage` |
+| `PATCH /api/platform/users/:id/platform-role` | `platform.admins.manage` |
+| `GET /api/platform/audit` | `platform.audit.view` |
+
+Suspending a restaurant requires a reason and takes effect on the **next
+request** of every existing token in that tenant. Platform operators are exempt,
+or suspension could not be undone.
 
 ## Production readiness
 

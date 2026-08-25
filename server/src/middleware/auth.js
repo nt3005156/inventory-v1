@@ -1,6 +1,8 @@
 import jwt from 'jsonwebtoken';
 import {resolvePrincipal} from '../services/accessControl.js';
 import {BASE_ROLES, grants} from '../services/permissions.js';
+import {User} from '../models/index.js';
+import {hasPlatformPermission, platformPermissionsFor} from '../services/platformAccess.js';
 
 /**
  * Phase 25 — how a bearer token is verified.
@@ -88,8 +90,87 @@ async function authenticate(req) {
     branch: principal.branch,
     restaurantId: principal.restaurantId
   };
+  /**
+   * P2B — a forged `platformRole` CLAIM must never survive into `req.user`.
+   *
+   * `req.user` is a spread of the token payload, so a self-signed token
+   * carrying `platformRole: 'super_admin'` would place that string on the
+   * object ~135 call sites read. Nothing currently trusts it — every platform
+   * check re-reads the database — but leaving an attacker-controlled field
+   * named exactly like the authority field, sitting on the request object
+   * every handler destructures, is a defect waiting for its first careless
+   * reader. Deleted here, at the one place a request becomes authenticated,
+   * so no future handler can pick it up by accident.
+   *
+   * The same reasoning applies to `platformPermissions`.
+   */
+  delete req.user.platformRole;
+  delete req.user.platformPermissions;
   return principal;
 }
+
+/**
+ * The caller's PLATFORM authority, read from storage.
+ *
+ * Deliberately a separate database read from `resolvePrincipal()`:
+ * `platformRole` is `select: false` and must stay out of the ordinary
+ * principal, so that no tenant code path can start depending on it and no
+ * tenant projection can leak it.
+ *
+ * Returns the stored row (with `platformRole` and `active`), or null when the
+ * account no longer exists. A deleted or deactivated operator therefore loses
+ * platform access on their very next request — `platformPermissionsFor()`
+ * returns nothing for an inactive row.
+ */
+export async function loadPlatformActor(req) {
+  const id = req?.user?.id || req?.principal?.userId;
+  if (!id) return null;
+  return User.findById(id).select('+platformRole name email active role restaurantId').lean();
+}
+
+/**
+ * THE platform guard. One mechanism, used by every platform route.
+ *
+ * Layered deliberately:
+ *   1. `authenticate()` — a valid, unexpired, HS256 token whose claims agree
+ *      with storage. Anonymous or broken → 401.
+ *   2. a fresh read of `platformRole` FROM THE DATABASE. Never the token.
+ *   3. an explicit permission-key check. Holding a platform role is not the
+ *      same as holding a capability: `platform_support` authenticates fine
+ *      and is still refused a suspension.
+ *
+ * Every failure at stages 2 and 3 is an identical 403 with an identical body,
+ * whether the caller is a restaurant owner, a cashier, a rider or a support
+ * operator reaching above their rank. The platform surface must not describe
+ * itself differently to different callers — that difference is an
+ * enumeration aid, and it is exactly how somebody discovers the endpoint
+ * exists at all.
+ *
+ * NOTE the ordering with respect to tenant lifecycle: `loadPrincipal()`
+ * exempts platform operators from the suspended-tenant block, so an operator
+ * who happens to be embedded in a suspended restaurant can still administer
+ * it. That exemption is what makes suspension reversible.
+ */
+export const requirePlatformPermission = (...permissions) => async (req, res, next) => {
+  try {
+    await authenticate(req);
+  } catch (error) {
+    return deny(res, error);
+  }
+  try {
+    const actor = await loadPlatformActor(req);
+    const allowed = permissions.some(permission => hasPlatformPermission(actor, permission));
+    if (!allowed) {
+      return res.status(403).json({message: 'Platform administration is not available to this account'});
+    }
+    req.platformActor = actor;
+    req.platformPermissions = platformPermissionsFor(actor);
+    return next();
+  } catch {
+    // A failure to establish authority is a refusal, never a pass.
+    return res.status(403).json({message: 'Platform administration is not available to this account'});
+  }
+};
 
 function deny(res, error) {
   const status = error?.status === 403 ? 403 : 401;

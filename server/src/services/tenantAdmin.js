@@ -50,7 +50,7 @@ export function isTenantOperational(status) {
  */
 async function platformActor(user) {
   if (!user?.id) throw httpError('Authentication required', 401);
-  const stored = await User.findById(user.id).select('+platformRole').lean();
+  const stored = await User.findById(user.id).select('+platformRole name email active role').lean();
   if (!stored) throw httpError('Authentication required', 401);
   return stored;
 }
@@ -217,7 +217,10 @@ export async function createRestaurant({user, input}) {
     entity: 'restaurant', entityId: created._id, restaurant: created._id,
     action: 'platform_restaurant_created',
     after: {name: created.name, slug: created.slug || null, status: created.status},
-    user: actor._id
+    // P2B: denormalised actor identity. Without it the platform audit screen
+    // showed a null actor name — an audit row that cannot say who acted is
+    // most of the way to no audit row at all.
+    user: actor._id, userName: actor.name, userRole: `platform:${actor.platformRole}`
   });
   return tenantView(created.toObject(), {branches: 0, users: 0, owner: null});
 }
@@ -242,9 +245,11 @@ export async function updateRestaurant({user, restaurantId, input, viaPlatform =
 
   let actorId;
   let targetId;
+  let actorIdentity = {};
   if (viaPlatform) {
     const actor = await assertPlatform(user, 'platform.restaurants.update');
     actorId = actor._id;
+    actorIdentity = {userName: actor.name, userRole: `platform:${actor.platformRole}`};
     if (!mongoose.isValidObjectId(restaurantId)) throw httpError('Restaurant not found', 404);
     targetId = restaurantId;
   } else {
@@ -292,7 +297,7 @@ export async function updateRestaurant({user, restaurantId, input, viaPlatform =
       name: restaurant.name, slug: restaurant.slug, legalName: restaurant.legalName,
       timezone: restaurant.timezone, currency: restaurant.currency, pan: restaurant.pan
     },
-    user: actorId
+    user: actorId, ...actorIdentity
   });
   return tenantView(restaurant.toObject());
 }
@@ -344,7 +349,7 @@ export async function setRestaurantStatus({user, restaurantId, action, reason}) 
     action: `platform_restaurant_${action}`,
     before: {status: previous}, after: {status: restaurant.status},
     reason: note || undefined,
-    user: actor._id
+    user: actor._id, userName: actor.name, userRole: `platform:${actor.platformRole}`
   });
   return {restaurant: tenantView(restaurant.toObject()), changed: true, previous};
 }

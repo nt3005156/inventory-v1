@@ -7,6 +7,18 @@ COPY client/package.json ./client/package.json
 RUN npm ci --omit=dev --workspace=api && npm cache clean --force
 
 COPY server/src ./server/src
+
+# P2B: the operational scripts were NEVER in the image.
+#
+# Found by Docker verification, not by any test: `docker compose exec api node
+# scripts/platform-admin.js list` failed with MODULE_NOT_FOUND because only
+# `server/src` was ever copied. That silently applied to every script in the
+# directory — backup, restore and the migrations included — so the documented
+# recovery procedures could not actually be run inside a container.
+#
+# Copied explicitly rather than by widening to `COPY server ./server`, which
+# would drag the test suite and its dev-only fixtures into a production image.
+COPY server/scripts ./server/scripts
 WORKDIR /app/server
 
 ENV NODE_ENV=production

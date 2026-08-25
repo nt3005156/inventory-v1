@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell, Building2} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -27,6 +27,7 @@ import Deliveries from './Deliveries.jsx';
 import PosAdmin from './PosAdmin.jsx';
 import RiderApp from './RiderApp.jsx';
 import Storefront from './Storefront.jsx';
+import Platform from './Platform.jsx';
 import './style.css';
 
 const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
@@ -40,6 +41,17 @@ function App() {
   // Phase 20: the caller's real permissions, resolved server-side. Used only
   // to decide what to SHOW; the backend enforces every one of them again.
   const [permissions, setPermissions] = useState([]);
+  /**
+   * P2B — the caller's PLATFORM standing, from `/platform/me`.
+   *
+   * Null until resolved. Kept separate from `permissions` because the two are
+   * different authority systems: a restaurant owner holds all 72 tenant
+   * permissions and no platform authority at all.
+   */
+  const [platformAccess, setPlatformAccess] = useState(null);
+  const [inPlatform, setInPlatform] = useState(
+    typeof window !== 'undefined' && window.location.pathname.startsWith('/platform')
+  );
 
   const call = async (path, opts = {}) => {
     const {raw, ...init} = opts;
@@ -61,16 +73,20 @@ function App() {
     if (!token) return;
     setLoading(true);
     try {
-      const [menu, branches, me] = await Promise.all([
+      const [menu, branches, me, platform] = await Promise.all([
         call('/menu-items'),
         call('/branches'),
         // A principal always has this; failing soft keeps the shell usable if
         // an older server has not shipped the endpoint yet.
-        call('/me/permissions').catch(() => ({permissions: []}))
+        call('/me/permissions').catch(() => ({permissions: []})),
+        // Same failing-soft rule. A restaurant user gets `{platform: false}`,
+        // which is not an error condition.
+        call('/platform/me').catch(() => ({platform: false, permissions: []}))
       ]);
       // /menu-items is paginated ({items, pagination}); older builds returned a bare array.
       setData({menu: Array.isArray(menu) ? menu : (menu?.items || []), branches});
       setPermissions(me?.permissions || []);
+      setPlatformAccess(platform || {platform: false, permissions: []});
     } catch (e) {
       if (e.message === 'Authentication required') logout();
     } finally {
@@ -97,6 +113,28 @@ function App() {
       setToken(x.token);
       setUser(x.user);
     }}/>;
+  }
+
+  /**
+   * P2B — the platform workspace.
+   *
+   * A SEPARATE shell, never a page inside the restaurant navigation: a
+   * platform operator is not an employee of any restaurant, and the two
+   * surfaces must not blend. Entered explicitly, and only offered to accounts
+   * the SERVER has confirmed hold platform authority.
+   */
+  if (inPlatform) {
+    return (
+      <Platform
+        call={call} user={user} access={platformAccess}
+        onExit={() => {
+          if (typeof window !== 'undefined' && window.history?.replaceState) {
+            window.history.replaceState({}, '', '/');
+          }
+          setInPlatform(false);
+        }}
+      />
+    );
   }
 
   // Phase 11: a rider gets the courier workspace instead of the staff shell.
@@ -137,6 +175,15 @@ function App() {
     ['Analytics', BarChart3]
   ];
 
+  /**
+   * The ONLY way into the platform area from the restaurant shell, and it
+   * appears solely when `/platform/me` confirmed platform authority — never
+   * from a tenant permission, because an owner holds all of those. A
+   * restaurant user never sees this control. It is a convenience, not a
+   * control: every platform endpoint re-checks authority server-side.
+   */
+  const showPlatformEntry = Boolean(platformAccess?.platform);
+
   return (
     <div className="shell">
       <aside>
@@ -145,6 +192,11 @@ function App() {
           <button key={x} className={page === x ? 'active' : ''} onClick={() => setPage(x)}><I size={18}/>{x}</button>
         ))}
         <div className="asidebottom">
+          {showPlatformEntry && (
+            <button onClick={() => setInPlatform(true)}>
+              <Building2 size={17}/> Platform admin
+            </button>
+          )}
           <small>{user?.name} · {user?.role}</small>
           <button onClick={logout}><LogOut size={17}/> Sign out</button>
         </div>

@@ -1,4 +1,4 @@
-# SaaS architecture — P1
+# SaaS architecture — P1 · P2A · P2B
 
 How this single-restaurant ERP becomes a multi-tenant platform for ~100
 restaurants on one codebase. Written at the end of Phase P1; sections marked
@@ -178,6 +178,204 @@ Status changes go through a **separate endpoint** from profile edits, need
 their own permission, require a **reason** to suspend or cancel, and are
 audited individually. A tenant can never change its own status.
 
+## 3B. Platform administration — P2B
+
+P2A created the platform boundary. P2B builds the controlled administration
+system on top of it: an authority ladder, a safe provisioning path, one
+centralized guard, cross-tenant user administration, a platform audit view, a
+dashboard, and a separate frontend workspace.
+
+### The authority ladder
+
+Three roles, because there is a real authorization difference at each rung —
+not because a matrix looks thorough.
+
+| Role | Rank | May do | Deliberately may NOT |
+|---|---|---|---|
+| `platform_support` | 1 | read: restaurants, users, audit, dashboard | change anything at all |
+| `platform_admin` | 2 | everything above + create/update/suspend/activate restaurants, deactivate/reactivate users | **mint other operators** |
+| `super_admin` | 3 | everything, incl. `platform.admins.manage` | — |
+
+Each rung is a strict superset of the one below (asserted in the suite), so a
+demotion can never grant something.
+
+**Why `platform_admin` cannot mint operators.** That is the
+privilege-escalation path. An administrator who can suspend every restaurant
+on the platform still cannot recruit an accomplice or make themselves
+permanent, so one compromised admin account is a contained incident.
+
+`rank` answers only "may this actor grant/act on that role?". Permission checks
+are always explicit key lookups, so a future role cannot inherit a capability
+by sitting high on the ladder.
+
+### Platform permissions
+
+Ten keys, all `platform.<resource>.<action>`:
+
+```
+platform.restaurants.view / create / update / suspend / activate
+platform.users.view / manage
+platform.audit.view
+platform.dashboard.view
+platform.admins.manage
+```
+
+They are **three segments on purpose**. `phase20.rbac.test.js` requires every
+tenant catalogue key to match `/^[a-z]+\.[a-z]+$/`, so a platform key is
+*structurally* incompatible with the tenant catalogue — a mechanical guarantee
+on top of the policy one.
+
+### One guard: `requirePlatformPermission()`
+
+Every platform route uses it. No platform route uses `requirePermission()` —
+those are tenant permissions and an owner holds all 72, so guarding a platform
+endpoint with one would open it to every owner on the platform.
+
+Three layers, in order:
+
+1. `authenticate()` — valid, unexpired, HS256 token agreeing with storage.
+2. a **fresh database read** of `platformRole`. Never the token.
+3. an **explicit permission-key check**. Holding a platform role is not the
+   same as holding a capability.
+
+The service layer re-asserts the same permission independently. Two checks for
+one decision is deliberate: P2A's mutation run proved a check living only
+behind a route is a check no unit test exercises.
+
+**Forged claims.** `authenticate()` `delete`s `req.user.platformRole` outright.
+Nothing reads it, but leaving an attacker-controlled field named exactly like
+the authority field, on the object every handler destructures, is a defect
+waiting for its first careless reader.
+
+| Caller | Result |
+|---|---|
+| anonymous | 401 |
+| owner / manager / staff / rider / custom role | 403, identical message |
+| forged `platformRole` claim | 403 |
+| role removed from DB, or account deactivated/deleted | access stops on the next request |
+| operator without the specific permission | 403 |
+
+The refusal is byte-identical for every unauthorized caller: the platform
+surface must not describe itself differently to different callers.
+
+### Provisioning — no bootstrap route, ever
+
+The first operator is created by `server/scripts/platform-admin.js`, which
+needs **shell access**:
+
+```
+node scripts/platform-admin.js list
+node scripts/platform-admin.js grant <email> [super_admin|platform_admin|platform_support]
+node scripts/platform-admin.js revoke <email>
+```
+
+Rejected alternatives, and why:
+
+- *a public `/bootstrap` route that disables itself after first use* — the
+  disable condition ("no super admin exists") becomes true again after a
+  restore from an older backup or a botched migration. A dormant route is a
+  route that comes back.
+- *a route behind a shared secret in an env var* — a password with no
+  rotation, no audit and no expiry, sitting in a file that lands in CI logs.
+- *seeding it* — either mints a real operator in production or is
+  conditionally skipped, which is the dormant-route problem again.
+
+After that, `PATCH /api/platform/users/:id/platform-role` handles every grant.
+It requires `platform.admins.manage` (super admin only) and enforces:
+
+- **rank ceiling** — nobody grants above their own rank;
+- **no self-service** — an actor cannot change their own platform authority in
+  either direction (self-promotion is the attack; self-demotion is how the
+  last super admin disappears);
+- **target must exist and be active** — promoting a deactivated account
+  creates dormant authority nobody is watching;
+- **last-super-admin protection** — counted among active accounts only;
+- **mandatory reason + audit row**, and the target's sessions are revoked.
+
+The endpoint grants authority to accounts that **already exist**. It never
+accepts a password, keeping credential handling out of the authority path.
+
+### Cross-tenant user administration
+
+`GET /api/platform/users` searches every tenant, filterable by restaurant,
+role, platform role and status. Scoping is **by explicit request, never
+implicitly by the caller's own tenant** — an operator embedded in a restaurant
+must not silently see only their own.
+
+`PATCH /api/platform/users/:id/active` can deactivate an owner, which the
+tenant-side equivalent refuses — "this restaurant's owner is abusing the
+service" is exactly what the platform exists to handle. It cannot touch the
+actor themselves or a **peer or superior** operator.
+
+> **Grant vs. administer are different questions.** Granting permits *equal*
+> rank (a super admin must be able to create peers, or the platform has a bus
+> factor of one). Acting on somebody's account requires *strictly higher* rank
+> (a lateral attack on a peer is what one compromised operator would attempt).
+> Conflating them was a real defect the P2B suite caught: one `platform_admin`
+> could deactivate another. Now `canGrantPlatformRole()` is `<=` and
+> `canAdministerPlatformUser()` is `<`.
+
+**The two authority systems never bleed.** `role = 'owner'` does not imply
+`platformRole`. `platformRole` is refused by the tenant role-assignment,
+account-creation and restaurant-profile endpoints, and never appears in any
+tenant-facing projection. All asserted.
+
+### Platform audit
+
+Reuses the existing append-only, SHA-256 hash-chained `Audit` collection — not
+a second log. The difference is scope: `searchAudit()` pins every query to the
+caller's own restaurant, which is right for a tenant and useless for an
+operator.
+
+`GET /api/platform/audit` is a **whitelist** of platform actions:
+
+```
+platform_admin_created / _revoked / _role_changed
+platform_restaurant_created / _updated / _activate / _trial / _suspend / _cancel
+platform_user_deactivated / _reactivated
+```
+
+Without the whitelist this endpoint would be a cross-tenant window onto every
+refund, price change and failed login on the platform. An operator can see what
+the **platform** did, not what a restaurant did internally; investigating a
+tenant's own operations means asking that tenant.
+
+Rows are stamped under the **target's** restaurant, so the tenant's own chain
+records what the platform did to it. Platform-authority changes carry no
+restaurant — they are not a tenant fact and belong on the global chain.
+Actor name and role are denormalised at write time (`platform:<role>`), so the
+record stays readable after a rename.
+
+### Dashboard
+
+`GET /api/platform/dashboard`: restaurant counts by status, branch total, user
+totals (active/inactive/operators), and the five newest restaurants. Counted in
+one aggregation per collection, not N queries.
+
+A restaurant with **no** `status` is legacy and counts as `active`, matching
+what the list screen reports — asserted, because a disagreement here would send
+somebody chasing a phantom discrepancy.
+
+**Deliberately absent: revenue, orders, payments, anything from a tenant's
+books.** An aggregate over money is one `groupBy` away from being individual
+tenant financial data. Business metrics are P2G.
+
+### Frontend
+
+`client/src/Platform.jsx` — a **separate workspace**, not a page in the
+restaurant shell. A platform operator is not an employee of any restaurant, and
+mixing the surfaces is how "suspend restaurant" ends up two clicks from "print
+receipt". The shell swaps entirely; the entry point appears only when
+`/platform/me` confirms authority, and never from a tenant permission.
+
+Screens: Dashboard, Restaurants (search, status filter, open, activate,
+suspend-with-reason), Users, Audit. Controls are hidden according to the
+permissions the server reports, so `platform_support` gets read-only screens.
+
+**The frontend is not the security boundary.** Every request is re-authorized
+server-side against the database `platformRole`. The UI tests say so in their
+own header, so they can never be cited as evidence of enforcement.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -312,17 +510,27 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 
 ---
 
-## 8. Honest limitations after P1
+## 8. Honest limitations after P1 / P2A / P2B
 
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
 - **`restaurant` is not yet `required`** on Order/Payment — legacy rows.
-- **Platform admin exists (P2A) but is minimal**: five permissions covering
-  restaurant administration only. No platform dashboard, no cross-tenant user
-  management, no platform audit view — P2B.
+- **Platform administration (P2B) is built**: three roles, ten permissions,
+  dashboard, cross-tenant user administration, platform audit, and a separate
+  admin workspace. What it still does NOT do: no platform-side password reset,
+  no operator MFA, no IP allowlisting for the platform surface, no session
+  listing per operator, and no email notification when authority changes.
 - **No subscriptions, plans, feature flags, or tenant self-signup.** P2E–P2H.
-- **`platformRole` is set out-of-band** (database). There is deliberately no
-  endpoint to grant it until P2B designs one with its own audit trail.
+- **The first operator still requires shell access** (`scripts/platform-admin.js`).
+  That is the design, not a gap — but it means platform bootstrap cannot be
+  performed by anyone without server access.
+- **The grant rank-ceiling is currently unreachable** and proven so: only
+  `super_admin` holds `platform.admins.manage`, and it is already top rank. It
+  is retained for the first mid-rank granting role, and a test fails loudly if
+  one is added without the accompanying escalation test.
+- **Platform operators are exempt from tenant lifecycle blocking.** Necessary
+  for suspension to be reversible, but it does mean an embedded operator keeps
+  working inside a suspended restaurant.
 - **Branding is receipt-footer only.** No logo, colours, or custom domain.
 - **Single-instance only** — see §6.1.
 - **Rate limits are per-IP, not per-tenant.**

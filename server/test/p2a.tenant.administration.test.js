@@ -116,10 +116,28 @@ describe('P2A · platform authority is separate from tenant RBAC', () => {
   });
 
   it('describes exactly the authority it enforces', () => {
+    /**
+     * P2B CHANGED THIS DELIBERATELY.
+     *
+     * In P2A there was one platform role, so `platform_admin` held every
+     * platform permission and asserting equality was right. P2B introduced
+     * the authority ladder and withheld `platform.admins.manage` from
+     * `platform_admin`: an operator who can suspend any restaurant must not
+     * also be able to recruit further operators or promote themselves.
+     *
+     * The invariant is therefore now NARROWER, not weaker — `super_admin` is
+     * the only role holding the full set.
+     */
     assert.deepEqual(
-      [...PLATFORM_ROLES.platform_admin.permissions].sort(),
+      [...PLATFORM_ROLES.super_admin.permissions].sort(),
       [...PLATFORM_PERMISSIONS].sort()
     );
+    assert.deepEqual(
+      [...PLATFORM_ROLES.platform_admin.permissions].sort(),
+      [...PLATFORM_PERMISSIONS].filter(key => key !== 'platform.admins.manage').sort()
+    );
+    assert.ok(!hasPlatformPermission({platformRole: 'platform_admin'}, 'platform.admins.manage'),
+      'a platform administrator must not be able to mint another operator');
     assert.ok(hasPlatformPermission({platformRole: 'platform_admin'}, 'platform.restaurants.suspend'));
     assert.ok(!hasPlatformPermission({platformRole: 'platform_admin'}, 'platform.billing.refund'),
       'an unimplemented permission must not be granted');
