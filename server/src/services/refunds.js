@@ -182,6 +182,9 @@ export async function refundOrder({orderId, amount, reason, user, session, idemp
   for (const allocation of allocations) {
     const [row] = await Payment.create([{
       order: order._id,
+      // P1B: a refund is money too, and carries the same tenant as its order.
+      restaurant: order.restaurant,
+      branch: order.branch,
       amount: money(-allocation.amount),
       method: allocation.method,
       status: 'refunded',

@@ -112,6 +112,10 @@ export async function applyPayment({orderId, amount, method, transactionId, item
   try {
     payment = (await Payment.create([{
       order: order._id,
+      // P1B: copied from the order so a payment is never orphaned from its
+      // tenant. `order` is already loaded and tenant-checked by the caller.
+      restaurant: order.restaurant,
+      branch: order.branch,
       amount: payAmount,
       method,
       transactionId,
@@ -203,6 +207,8 @@ export async function splitOrder({orderId, items, user, session}) {
 
   const child = new Order({
     orderNo: `${parent.orderNo}-${Date.now().toString().slice(-4)}`,
+    // P1B: a split check inherits its parent's tenant.
+    restaurant: parent.restaurant,
     branch: parent.branch,
     customer: parent.customer,
     table: parent.table,

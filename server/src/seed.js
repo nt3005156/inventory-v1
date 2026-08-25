@@ -478,6 +478,8 @@ export async function seedDemoData({log = console.log} = {}) {
 
     const order = await Order.create({
       orderNo: `ORD-${branch.code}-${String(index + 1).padStart(5, '0')}`,
+      // P1B: demo data must match the production shape, or it hides bugs.
+      restaurant: restaurant._id,
       branch: branch._id,
       customer: customer?._id,
       table: table?._id,
@@ -514,7 +516,8 @@ export async function seedDemoData({log = console.log} = {}) {
     if (status === 'completed') {
       const method = ['cash', 'esewa', 'khalti', 'card'][index % 4];
       await Payment.create({
-        order: order._id, amount: pricing.total, method, status: 'paid',
+        order: order._id, restaurant: restaurant._id, branch: branch._id,
+        amount: pricing.total, method, status: 'paid',
         cashier: users.find(u => u.role === 'staff' && String(u.branch) === String(branch._id))?._id || owner._id,
         transactionId: method === 'cash' ? undefined : `DEMO-${method.toUpperCase()}-${index}`,
         createdAt, updatedAt: createdAt

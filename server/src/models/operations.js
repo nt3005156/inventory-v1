@@ -13,7 +13,38 @@ const n={type:Number,default:0}; const oid={type:Schema.Types.ObjectId};
  * are per-restaurant so an operator can set their own risk appetite, and the
  * defaults are deliberately generous enough not to obstruct normal service.
  */
-export const Restaurant=model('Restaurant',new Schema({name:{type:String,required:true},currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},
+/**
+ * P1A — the tenant record.
+ *
+ * A restaurant is the TENANT boundary of this platform: every other document
+ * belongs to exactly one, and nothing may ever be read across the line. The
+ * SaaS fields below were added in P1 so a tenant can be identified, addressed
+ * and suspended without touching operational data.
+ *
+ *   slug      URL-safe tenant handle. Reserved for subdomain / public-ordering
+ *             addressing later; unique per platform so two tenants can never
+ *             claim the same address.
+ *   legalName The registered entity, which is frequently NOT the trading name
+ *             a guest sees. Tax documents must carry the legal one.
+ *   status    trial -> active -> suspended -> cancelled. The lifecycle a
+ *             subscription drives. Deliberately stored on the tenant rather
+ *             than inferred from a billing record, so access control never
+ *             depends on a billing system being reachable.
+ *   timezone  Nepal is UTC+05:45. Every report boundary ("today's sales")
+ *             depends on this, and hardcoding it would break the first tenant
+ *             outside Kathmandu.
+ *   settings  Free-form per-tenant configuration. Intentionally Mixed: P1 does
+ *             not know what P4 will need to configure, and a rigid schema here
+ *             would force a migration for every new setting.
+ */
+export const TENANT_STATUSES=Object.freeze(['trial','active','suspended','cancelled']);
+const restaurantSchema=new Schema({name:{type:String,required:true},
+  slug:{type:String,trim:true,lowercase:true,maxlength:60},
+  legalName:{type:String,trim:true,maxlength:200},
+  status:{type:String,enum:TENANT_STATUSES,default:'active',index:true},
+  timezone:{type:String,trim:true,maxlength:60,default:'Asia/Kathmandu'},
+  settings:{type:Schema.Types.Mixed,default:()=>({})},
+  currency:{type:String,default:'NPR'},vatRate:{type:Number,default:13},serviceChargeRate:{type:Number,default:0},
   // Phase 15 — expiry policy. Blocking expired stock from a sale was correct
   // but hard-coded, so a kitchen could neither relax it for a slow-moving dry
   // good nor tighten the warning window for fresh produce.
@@ -33,7 +64,10 @@ export const Restaurant=model('Restaurant',new Schema({name:{type:String,require
   staffMaxDiscountAmount:{type:Number,default:500,min:0},
   // Hard ceiling for EVERYONE, including an owner. Guards a mistyped 100%
   // rather than a dishonest one; set to 100 to disable.
-  maxDiscountPercent:{type:Number,default:100,min:0,max:100},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300}},{timestamps:true}));
+  maxDiscountPercent:{type:Number,default:100,min:0,max:100},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300}},{timestamps:true});
+// Partial, so the many existing tenants without a slug do not collide on null.
+restaurantSchema.index({slug:1},{unique:true,name:'restaurant_slug',partialFilterExpression:{slug:{$type:'string'}}});
+export const Restaurant=model('Restaurant',restaurantSchema);
 export const Branch=model('Branch',new Schema({restaurant:{...oid,ref:'Restaurant',index:true},name:{type:String,required:true},code:{type:String,uppercase:true},address:String,phone:String,pan:{type:String,trim:true,maxlength:20},active:{type:Boolean,default:true}},{timestamps:true}));
 const inventoryBalanceSchema=new Schema({
   branch:{...oid,ref:'Branch',required:true,index:true},
@@ -435,7 +469,25 @@ const reservationCounterSchema=new Schema({
 reservationCounterSchema.index({restaurant:1,branchCode:1,year:1},{unique:true,name:'reservation_counter_scope'});
 export const ReservationCounter=model('ReservationCounter',reservationCounterSchema);
 
-const orderSchema=new Schema({orderNo:{type:String,index:true},branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},paymentSettledAt:Date,paymentReference:{type:String,trim:true,maxlength:80,index:true},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'},
+const orderSchema=new Schema({orderNo:{type:String,index:true},
+  /**
+   * P1B — DIRECT tenant ownership.
+   *
+   * An order used to be tenant-scoped only transitively:
+   *   Order -> branch -> Branch.restaurant
+   * Isolation held, but it depended on every one of ~90 query sites
+   * remembering to join through the branch. In a 100-tenant platform that is
+   * one forgotten join away from a cross-tenant leak in the highest-volume,
+   * money-bearing collection in the system.
+   *
+   * The tenant is now stored on the row. `branch` is retained -- it is still
+   * the operational scope -- but tenancy no longer depends on resolving it.
+   * Not `required` yet: rows written before the P1C migration have none, and
+   * failing their validation would break historical reads. P2 can tighten it
+   * once every deployment has run the migration.
+   */
+  restaurant:{...oid,ref:'Restaurant',index:true},
+  branch:{...oid,ref:'Branch',index:true},customer:{...oid,ref:'Customer'},table:{...oid,ref:'RestaurantTable'},type:{type:String,enum:['dine-in','takeaway','pickup','delivery','online','counter'],default:'counter'},status:{type:String,enum:['draft','held','pending','confirmed','accepted','preparing','ready','out_for_delivery','completed','cancelled','refunded'],default:'pending',index:true},items:[{menuItem:{...oid,ref:'MenuItem'},name:String,qty:n,unitPrice:n,vatInclusive:{type:Boolean,default:false},lineNet:n,lineVat:n,lineTotal:n,foodCost:n,recipeVersion:{type:Number,default:1,min:1},recipeCost:n,packagingCost:n,foodCostVersioned:n,notes:String,specialInstructions:{type:String,trim:true,maxlength:500},modifiers:[{groupKey:String,groupName:String,kind:{type:String,enum:['variant','extra','addon','removal']},optionKey:String,name:String,price:n,ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String,removed:{type:Boolean,default:false}}],basePrice:n,station:{type:String,trim:true,lowercase:true,maxlength:40},prepMinutes:n,discount:n,discountKind:{type:String,enum:['percentage','fixed']},discountValue:n,discountReason:{type:String,trim:true,maxlength:200},inventoryRequirements:[{ingredient:{...oid,ref:'Ingredient'},qty:n,unit:String}]}],inventorySourceOrder:{...oid,ref:'Order',index:true},inventorySourceOrders:[{...oid,ref:'Order'}],deliveryAddress:{type:String,trim:true,maxlength:500},subtotal:n,itemDiscount:n,discount:n,discountTotal:n,manualDiscount:n,couponDiscount:n,couponCode:{type:String,trim:true,uppercase:true,maxlength:40},manualDiscountKind:{type:String,enum:['percentage','fixed']},manualDiscountValue:n,discountReason:{type:String,trim:true,maxlength:200},discountBy:{...oid,ref:'User'},vatRate:{type:Number,default:13},vat:n,serviceChargeRate:{type:Number,default:0,min:0,max:100},serviceCharge:n,deliveryFee:n,total:n,paidAmount:n,dueAmount:n,refundAmount:n,source:{type:String,enum:['pos','online'],default:'pos',index:true},publicRequestKey:{type:String,select:false},paymentMethod:{type:String,trim:true,maxlength:20},paymentSettledAt:Date,paymentReference:{type:String,trim:true,maxlength:80,index:true},acceptedOnlineAt:Date,rejectedOnlineAt:Date,rejectionReason:{type:String,trim:true,maxlength:300},reopenedAt:Date,reopenedBy:{...oid,ref:'User'},reopenCount:{type:Number,default:0,min:0},reopenReason:{type:String,trim:true,maxlength:300},priority:{type:String,enum:['normal','rush'],default:'normal',index:true},rushedAt:Date,rushedBy:{...oid,ref:'User'},acceptedAt:Date,preparingAt:Date,readyAt:Date,completedAt:Date,invoiceNo:{type:String,trim:true,uppercase:true,maxlength:40,index:true},invoicedAt:Date,printCount:{type:Number,default:0,min:0},lastPrintedAt:Date,inventoryDeducted:{type:Boolean,default:false},inventoryReversed:{type:Boolean,default:false},createdBy:{...oid,ref:'User'},
   // Phase 13: a tax invoice, once issued, is a legal document. `invoicedTotal`
   // is the figure the numbered invoice was issued against, so a reprint can
   // prove it still matches the order it claims to describe.
@@ -536,7 +588,18 @@ Order.schema.index({publicRequestKey:1},{unique:true,name:'order_public_request_
  * wrong amount) as distinct from a refund, which is money genuinely returned
  * to a guest and must stay on the record.
  */
-const paymentSchema=new Schema({order:{...oid,ref:'Order',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded','reversed'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'},
+const paymentSchema=new Schema({order:{...oid,ref:'Order',index:true},
+  /**
+   * P1B — DIRECT tenant ownership.
+   *
+   * A payment was the deepest-nested document in the system:
+   *   Payment -> order -> Order.branch -> Branch.restaurant
+   * Three hops to answer "whose money is this?". Money is the last place that
+   * should be indirect, so the tenant and the branch are now stored on the
+   * payment itself and copied from the order at creation time.
+   */
+  restaurant:{...oid,ref:'Restaurant',index:true},
+  branch:{...oid,ref:'Branch',index:true},amount:n,method:{type:String,enum:['cash','card','esewa','khalti','wallet','online'],default:'cash'},transactionId:String,status:{type:String,enum:['pending','paid','failed','refunded','reversed'],default:'paid'},refundOf:{...oid,ref:'Payment',default:null,index:true},reason:{type:String,trim:true,maxlength:300},cashier:{...oid,ref:'User'},
   // 11F: one payment per idempotency key per order, so a double-clicked
   // "Pay" cannot bank the amount twice.
   idempotencyKey:{type:String,trim:true,maxlength:200,select:false},

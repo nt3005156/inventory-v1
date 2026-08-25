@@ -269,6 +269,9 @@ async function settleIntent({intent, confirmed, session}) {
   } else {
     [payment] = await Payment.create([{
       order: order._id,
+      // P1B: gateway settlements carry the tenant explicitly.
+      restaurant: order.restaurant,
+      branch: order.branch,
       amount,
       method: intent.provider,
       transactionId,

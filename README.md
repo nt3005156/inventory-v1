@@ -2,6 +2,21 @@
 
 Mittho OPS is a full-stack restaurant operations platform for Nepal. Purchasing receipts and returns update lot-aware inventory and weighted cost, recipes drive stock consumption and historical COGS, and supplier liabilities reconcile invoices, payments, reversals, and statements. Money is recorded in NPR and purchasing supports Nepal's 13% VAT convention.
 
+## Multi-tenant SaaS
+
+The platform is being productized into a multi-tenant SaaS. The architecture,
+tenant model, migration strategy and scaling plan are in
+**[SAAS-ARCHITECTURE.md](SAAS-ARCHITECTURE.md)**.
+
+P1 (tenant foundation) is complete: `Restaurant` is a tenant record with
+`slug`/`legalName`/`status`/`timezone`/`settings`, and `Order`/`Payment` carry
+their tenant **directly** rather than through a two- or three-hop join.
+
+```bash
+npm run migrate:tenants:dry -w api   # report what would change, write nothing
+npm run migrate:tenants -w api       # backfill tenant ownership
+```
+
 ## Production readiness
 
 A full audit — architecture, security, operations, inventory, financial,

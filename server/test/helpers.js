@@ -187,6 +187,9 @@ export async function seedWorld() {
 export function makeOrder(world, overrides = {}) {
   return Order.create({
     orderNo: 'ORD-' + Math.random().toString(36).slice(2, 9).toUpperCase(),
+    // P1B: fixtures carry the tenant, exactly as production writes do. A
+    // fixture that omits it would let a tenant-scoped query pass by accident.
+    restaurant: world.restaurant._id,
     branch: world.branchA._id,
     table: world.table._id,
     type: 'dine-in',

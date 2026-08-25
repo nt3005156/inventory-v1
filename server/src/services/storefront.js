@@ -359,6 +359,8 @@ export async function placePublicOrder({input, requestKey, session}) {
   const [order] = await Order.create([{
     orderNo: `WEB-${Date.now().toString().slice(-7)}`,
     publicRequestKey: requestKey || undefined,
+    // P1B: the tenant is stamped on the row, not inferred from the branch.
+    restaurant: branch.restaurant,
     branch: branch._id,
     customer: customer._id,
     type: orderType,
@@ -400,6 +402,9 @@ export async function placePublicOrder({input, requestKey, session}) {
   if (method !== 'cod') {
     [payment] = await Payment.create([{
       order: order._id,
+      // P1B: money carries its own tenant and branch.
+      restaurant: branch.restaurant,
+      branch: branch._id,
       amount: totals.total,
       method,
       status: 'pending'
