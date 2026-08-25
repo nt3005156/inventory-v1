@@ -116,6 +116,20 @@ export const User=model('User',new Schema({name:String,email:{type:String,unique
   // base role because tenancy scoping, the rider workspace and Socket.IO all
   // still reason in those four terms; roleKey narrows, it never widens.
   roleKey:{type:String,trim:true,lowercase:true,maxlength:40,default:null},
+  /**
+   * P2A — PLATFORM authority, distinct from the tenant `role` above.
+   *
+   * `role` says what an employee may do inside their restaurant. This says
+   * whether the account may act ACROSS restaurants at all. They are separate
+   * because a restaurant owner holds '*' within the tenant catalogue, so
+   * expressing platform authority there would grant it to every owner.
+   *
+   * Null for every existing account, and deliberately NOT settable through any
+   * tenant-facing endpoint: self-promotion to platform admin must be
+   * impossible from inside a tenant. `select: false` so it never rides along
+   * in a casual projection.
+   */
+  platformRole:{type:String,trim:true,lowercase:true,maxlength:40,default:null,select:false},
   // Phase 17 — server-side session invalidation.
   //
   // Every JWT carries the sessionVersion current at sign-in. Incrementing this

@@ -12,6 +12,13 @@ P1 (tenant foundation) is complete: `Restaurant` is a tenant record with
 `slug`/`legalName`/`status`/`timezone`/`settings`, and `Order`/`Payment` carry
 their tenant **directly** rather than through a two- or three-hop join.
 
+P2A (tenant administration) is complete: a **platform authority** separate from
+tenant RBAC (`User.platformRole`), restaurant administration under
+`/api/platform/restaurants`, tenant self-service under `/api/my/restaurant`,
+and **enforced** lifecycle — a suspended restaurant is refused on every
+operational request. Platform permissions are deliberately kept out of the
+tenant catalogue, because a restaurant owner holds `*`.
+
 ```bash
 npm run migrate:tenants:dry -w api   # report what would change, write nothing
 npm run migrate:tenants -w api       # backfill tenant ownership

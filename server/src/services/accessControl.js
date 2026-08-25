@@ -1,6 +1,8 @@
 import {Role, User} from '../models/index.js';
 import {invalidateRole, withRoleCache} from './principalCache.js';
 import {assertSessionLive} from './sessions.js';
+import {isPlatformOperator} from './platformAccess.js';
+import {isTenantOperational} from './tenantAdmin.js';
 import {
   ALL_PERMISSIONS, BUILTIN_ROLES, grants, permissionsForBuiltin
 } from './permissions.js';
@@ -97,6 +99,45 @@ async function loadPrincipal(tokenUser, {session} = {}) {
   // profile, which dispatch already honours; it must end the session too.
   if (stored.active === false) {
     throw httpError('This account is deactivated. Contact your manager.', 401);
+  }
+
+  /**
+   * P2A — TENANT LIFECYCLE ENFORCEMENT.
+   *
+   * A suspended or cancelled restaurant must stop trading immediately, not
+   * when each employee's token happens to expire. P1 added the status field;
+   * without this check it was decoration.
+   *
+   * Enforced HERE, in the one place every authenticated request already
+   * resolves its principal, so no endpoint can forget it. 403 rather than 401:
+   * the credentials are valid, the business is not permitted to trade — a 401
+   * would send staff round a pointless re-login loop.
+   *
+   * PLATFORM OPERATORS ARE EXEMPT. They must still be able to administer a
+   * suspended tenant, which is the whole point of suspension being reversible.
+   * Their authority comes from `platformRole`, which is not tenant-scoped.
+   */
+  if (stored.restaurantId) {
+    const {Restaurant} = await import('../models/operations.js');
+    const tenant = await Restaurant.findById(stored.restaurantId)
+      .select('status').session(session || null).lean();
+    if (tenant && !isTenantOperational(tenant.status)) {
+      const platformUser = await User.findById(tokenUser.id)
+        .select('+platformRole').session(session || null).lean();
+      if (!isPlatformOperator(platformUser)) {
+        // `tenantLifecycle` lets deny() surface this actionable message
+        // instead of the generic "Insufficient permission".
+        throw Object.assign(
+          httpError(
+            tenant.status === 'suspended'
+              ? 'This restaurant is suspended. Contact the platform administrator.'
+              : 'This restaurant is no longer active.',
+            403
+          ),
+          {tenantLifecycle: true}
+        );
+      }
+    }
   }
   // A rider carries a second switch on the embedded profile. Standing a rider
   // down through the rider workspace sets only this one, so checking the

@@ -93,8 +93,20 @@ async function authenticate(req) {
 
 function deny(res, error) {
   const status = error?.status === 403 ? 403 : 401;
+  /**
+   * A 403 is normally flattened to one message so the API does not disclose
+   * WHICH permission was missing — that is an enumeration aid.
+   *
+   * P2A carves out one exception: a suspended or cancelled TENANT. That is not
+   * a permission problem and the caller can act on it ("contact the platform
+   * administrator"), whereas "Insufficient permission" would send a whole
+   * restaurant's staff hunting a role misconfiguration that does not exist.
+   * The message names no other tenant and discloses no permission, so it adds
+   * no enumeration surface. Marked with an explicit flag rather than sniffed
+   * from the text.
+   */
   const message = status === 403
-    ? 'Insufficient permission'
+    ? (error?.tenantLifecycle && error.message ? error.message : 'Insufficient permission')
     : (error?.status === 401 && error.message ? error.message : 'Authentication required');
   return res.status(status).json({message});
 }

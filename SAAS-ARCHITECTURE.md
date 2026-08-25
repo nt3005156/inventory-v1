@@ -120,6 +120,64 @@ understanding before patching.
 
 ---
 
+## 3A. Platform authority — P2A
+
+**Platform permissions are NOT in the tenant catalogue, and that is the whole
+design.**
+
+A restaurant owner holds `'*'`, which `resolvePrincipal()` expands into the
+entire catalogue — verified: `permissionsForBuiltin('owner').length ===
+ALL_PERMISSIONS.length`. Adding `platform.restaurants.suspend` there would have
+silently handed every restaurant owner the power to suspend other restaurants.
+
+So there are two authorities answering two different questions:
+
+| | Question | Mechanism |
+|---|---|---|
+| Tenant RBAC | "What may this employee do **inside** their restaurant?" | `PERMISSION_CATALOG`, 72 keys, `requirePermission()` |
+| Platform | "May this account act **across** restaurants at all?" | `User.platformRole` → `services/platformAccess.js` |
+
+This is not a second authorization system for the same question — it is one
+system for a question the existing one cannot express.
+
+`User.platformRole` is `select: false`, defaults to null for every existing
+account, and is **not settable through any tenant-facing endpoint**.
+Self-promotion from inside a tenant is impossible; it is set out-of-band
+(database today, a platform-admin screen in P2B). Authority is always read from
+storage — a forged `platformRole` claim in a JWT grants nothing.
+
+### Surfaces
+
+| Path | Audience | Guard |
+|---|---|---|
+| `/api/platform/restaurants*` | platform operators | `platformRole` (service layer) |
+| `/api/my/restaurant` | a tenant, itself | `branches.view` / `settings.manage` |
+
+Separate paths rather than one endpoint with a mode flag: a flag is one
+refactor away from being widened by accident, and the audit trail must
+distinguish "the platform changed this tenant" from "the tenant changed
+itself".
+
+### Lifecycle enforcement
+
+P1 added `Restaurant.status`; nothing read it, so it was decoration. P2A
+enforces it in `loadPrincipal()` — the one place every authenticated request
+already resolves its principal, so no endpoint can forget it.
+
+- `trial`, `active` → trade normally
+- `suspended`, `cancelled` → **403 on every operational request**
+- Platform operators are **exempt**, or suspension would be irreversible
+
+403 rather than 401: the credentials are valid, the business is not permitted
+to trade. A 401 would send staff round a pointless re-login loop. The message
+is actionable ("contact the platform administrator") via an explicit
+`tenantLifecycle` flag — the generic 403 flattening is otherwise preserved, so
+no permission is disclosed.
+
+Status changes go through a **separate endpoint** from profile edits, need
+their own permission, require a **reason** to suspend or cancel, and are
+audited individually. A tenant can never change its own status.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -259,8 +317,12 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
 - **`restaurant` is not yet `required`** on Order/Payment — legacy rows.
-- **No platform admin, subscriptions, plans, feature flags, or tenant
-  self-signup.** P2/P3.
+- **Platform admin exists (P2A) but is minimal**: five permissions covering
+  restaurant administration only. No platform dashboard, no cross-tenant user
+  management, no platform audit view — P2B.
+- **No subscriptions, plans, feature flags, or tenant self-signup.** P2E–P2H.
+- **`platformRole` is set out-of-band** (database). There is deliberately no
+  endpoint to grant it until P2B designs one with its own audit trail.
 - **Branding is receipt-footer only.** No logo, colours, or custom domain.
 - **Single-instance only** — see §6.1.
 - **Rate limits are per-IP, not per-tenant.**
