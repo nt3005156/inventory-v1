@@ -1,4 +1,4 @@
-# SaaS architecture — P1 · P2A · P2B · P2C
+# SaaS architecture — P1 · P2A · P2B · P2C · P2D
 
 How this single-restaurant ERP becomes a multi-tenant platform for ~100
 restaurants on one codebase. Written at the end of Phase P1; sections marked
@@ -591,6 +591,134 @@ Deliberately **excluded from `OPERATIONAL_MIGRATIONS`**: assigning commercial
 standing to every tenant must not happen because somebody restarted a
 container. Same precedent as `tenantBackfill.js`.
 
+## 3D. Tenant branding, white-label and customization — P2D
+
+One codebase, one product, many restaurants, tenant-specific configuration. No
+restaurant-specific values are hardcoded in any React component.
+
+### Where branding lives, and why not in `settings`
+
+`Restaurant.settings` is `Mixed` and writable by any tenant holding
+`settings.manage`. That is fine for loose operational preferences and wrong for
+anything rendered into receipt HTML or a public page, which needs a declared
+type and a validator. So branding is a **structured sub-document**,
+`Restaurant.branding`, validated in two places:
+
+- `models/operations.js` — so a script or migration cannot store rubbish;
+- `services/brandingSchema.js` — so an API payload fails with a useful message.
+
+### Branding is untrusted input, and is treated like it
+
+| Field type | Rule | Why |
+|---|---|---|
+| colour | `#RRGGBB` **only** | a raw CSS value permits `expression()`, `url(javascript:)` and background-image exfiltration |
+| URL | http/https only, parsed with `new URL()` | a regex over URLs is a reliable source of bypasses; `javascript:`/`data:`/`vbscript:` are refused by name AND by allowlist |
+| font | a **key** into a server-side allowlist | free-text `font-family` lands inside a declaration and can close it |
+| text | length-capped, control chars stripped, **markup stored raw** | escaping happens at every render site; storing pre-escaped text double-escapes on the next edit |
+| unknown key | **400** | Mongoose `strict:true` silently drops unknown paths, so a typo would look accepted and never apply |
+
+Receipt HTML escapes `& < > " ' /` on every interpolated value; the storefront
+is React, which escapes by default. Both are asserted with real payloads.
+
+### One resolver, safe defaults, never written back
+
+`getRestaurantBranding(restaurantId)` is the single authority. Every key is
+always present, so no caller writes its own `|| '#something'` fallback — that
+pattern, repeated at 30 sites, is how per-page defaults drift apart.
+
+Defaults are **never persisted**: writing one turns "the owner never chose"
+into "the owner chose this", which then survives a change to the product
+default and cannot be distinguished from a deliberate setting.
+
+### White-label tiers, wired to P2C entitlements
+
+| Tier | Feature key | Contents |
+|---|---|---|
+| core | *(none — every plan)* | name, logo, favicon, primary/secondary colour, contact, receipt footer |
+| advanced | `advancedBranding` | storefront copy, accent/background/text colours, typography, social links |
+| white | `whiteLabel` | suppressing the product's own branding |
+| — | `customDomain` | claiming a hostname |
+
+Enforced **twice**: writes are refused with 402 naming the feature, and the
+resolver refuses to APPLY an unentitled tier even if the value is in the
+database. A downgrade therefore stops paid presentation immediately **without
+destroying the stored values**, so an upgrade restores them without re-entry.
+A lapsed subscription reverts to core branding for the same reason.
+
+Platform operators are exempt: support fixing a Starter tenant's storefront
+must not be blocked by that tenant's plan.
+
+### THE INVOICE IDENTITY SNAPSHOT — a defect found and fixed in P2D
+
+**Reproduced before fixing**, with passing controls:
+
+```
+at issue time         name: Mittho Biryani      pan: 301234567   addr: Kalanki
+after a profile edit  name: COMPLETELY DIFFERENT CO
+                                                pan: 999999999   addr: Somewhere Else
+  invoiceNo unchanged     (control) true
+  invoicedTotal unchanged (control) true
+```
+
+Phase 13 froze the invoice number and total, but **seller identity was rebuilt
+from the live `Restaurant` on every print**. Editing today's profile rewrote
+yesterday's tax invoice. For a VAT-registered business that is an
+accounting-integrity problem, and P2D makes it worse by inviting tenants to
+edit their identity.
+
+`Order.invoiceIdentity` now captures name, legal name, PAN, address, phone,
+branch and the printed footer at the moment the number is allocated, and is
+listed in `FROZEN_INVOICE_PATHS` so it is as immutable as the number itself.
+Reprints read the snapshot; new invoices capture current identity.
+
+Deliberately **narrow**: only what a tax invoice must legally carry. The logo
+is cosmetic and is not snapshotted.
+
+Orders invoiced **before** P2D have no snapshot and fall back to live values —
+the pre-existing behaviour. A snapshot cannot be invented after the fact,
+because nobody knows what the profile said that day; the receipt payload
+reports `identitySource: 'live' | 'snapshot'` so the difference is legible
+rather than guessed at.
+
+### Custom domains — modelled, NOT served
+
+Hostname normalisation, a unique partial index, an ownership token, an explicit
+`verified` flag and full audit. **DNS and TLS are not automated**: this
+deployment terminates TLS outside the stack and has no ACME integration, so
+`customDomain` is a recorded intention. Every response carries
+`serving: false`, and nothing in the request path trusts the `Host` header —
+adding hostname-based tenant resolution without that caveat would be the real
+vulnerability, since `Host` is caller-controlled behind a proxy.
+
+### Logo storage
+
+There is **no upload pipeline** in this repository — no multer, no static
+serving, no object-storage client. Rather than invent S3 credentials, P2D
+stores a **validated external URL**. A real uploader can be added behind the
+same field without changing any caller. Object storage is an operational
+dependency that does not exist yet, not a solved problem.
+
+### Caching, and its honest multi-instance behaviour
+
+A per-process `Map` with a 60-second TTL and explicit invalidation on every
+write. **Multi-instance:** a branding change invalidates only the instance that
+served the write; other instances keep the previous value until their own entry
+expires. Worst case is ~60 seconds of stale colours or an old logo on some
+instances — cosmetic, self-healing, and not a correctness or security problem,
+which is why Redis is not justified here.
+
+The cache does **not** self-heal in general: a write that bypasses the service
+leaves a stale entry until the TTL. Proven, and the reason the invalidation
+calls stay even where a subsequent fresh read happens to mask them.
+
+### Migration
+
+**None was needed, and that was verified rather than assumed.** `branding` is a
+new optional sub-document and `settings` is merged, never replaced. Checked
+against an old restaurant with no `branding` key, a partially configured one
+and a fully configured one: all three render correctly, legacy `settings` keys
+survive, and no default is written back.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -725,7 +853,7 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 
 ---
 
-## 8. Honest limitations after P1 / P2A / P2B / P2C
+## 8. Honest limitations after P1 / P2A / P2B / P2C / P2D
 
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
@@ -760,7 +888,23 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 - **Platform operators are exempt from tenant lifecycle blocking.** Necessary
   for suspension to be reversible, but it does mean an embedded operator keeps
   working inside a suspended restaurant.
-- **Branding is receipt-footer only.** No logo, colours, or custom domain.
+- **Branding (P2D) covers name, logo, favicon, colours, typography, storefront
+  copy, receipt identity and contact details**, gated by plan tier. What it does
+  NOT do: no logo UPLOAD (an external URL only — there is no object storage);
+  no DNS/TLS automation for custom domains (modelled and audited, never served);
+  no per-tenant email templates; no localisation beyond a stored preference —
+  the `ne` locale is selectable but no translations ship; POS/KDS remain
+  deliberately un-themed so operational readability cannot be degraded.
+- **KNOWN PRE-EXISTING DEFECT, found during P2D and reported, not silently
+  redesigned:** `verifyAuditChain()` reports a false `content` mismatch on any
+  audit row whose `before`/`after` held an `undefined` value at write time.
+  `auditPayload()` hashes it as `null`; MongoDB then drops the key, so the
+  recomputed hash differs. Nothing is actually tampered, but a tamper-evidence
+  mechanism that cries wolf trains investigators to ignore it. Reproduces
+  identically on the P2C commit `164b108`, so it predates P2D. P2D's own
+  writers coerce with `?? null` and are unaffected, which is asserted. Fixing
+  it needs a decision about existing rows, which cannot be re-hashed without
+  destroying the evidence the chain exists to provide.
 - **Single-instance only** — see §6.1.
 - **Rate limits are per-IP, not per-tenant.**
 - **The three production preconditions still stand**: terminate TLS, enable

@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell, Building2, CreditCard} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell, Building2, CreditCard, Palette} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -29,6 +29,8 @@ import RiderApp from './RiderApp.jsx';
 import Storefront from './Storefront.jsx';
 import Platform from './Platform.jsx';
 import Subscription from './Subscription.jsx';
+import BrandSettings from './BrandSettings.jsx';
+import {applyBranding, brandInitials} from './branding.js';
 import './style.css';
 
 const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
@@ -50,6 +52,13 @@ function App() {
    * permissions and no platform authority at all.
    */
   const [platformAccess, setPlatformAccess] = useState(null);
+  /**
+   * P2D — the tenant's own branding, resolved server-side.
+   *
+   * Null until loaded; every surface falls back to product defaults until it
+   * arrives, so a slow request never leaves a blank or half-branded shell.
+   */
+  const [branding, setBranding] = useState(null);
   const [inPlatform, setInPlatform] = useState(
     typeof window !== 'undefined' && window.location.pathname.startsWith('/platform')
   );
@@ -74,7 +83,7 @@ function App() {
     if (!token) return;
     setLoading(true);
     try {
-      const [menu, branches, me, platform] = await Promise.all([
+      const [menu, branches, me, platform, brand] = await Promise.all([
         call('/menu-items'),
         call('/branches'),
         // A principal always has this; failing soft keeps the shell usable if
@@ -82,12 +91,18 @@ function App() {
         call('/me/permissions').catch(() => ({permissions: []})),
         // Same failing-soft rule. A restaurant user gets `{platform: false}`,
         // which is not an error condition.
-        call('/platform/me').catch(() => ({platform: false, permissions: []}))
+        call('/platform/me').catch(() => ({platform: false, permissions: []})),
+        // Failing soft: an older server, or a principal without branches.view,
+        // simply gets product defaults rather than a broken shell.
+        call('/my/branding').catch(() => null)
       ]);
       // /menu-items is paginated ({items, pagination}); older builds returned a bare array.
       setData({menu: Array.isArray(menu) ? menu : (menu?.items || []), branches});
       setPermissions(me?.permissions || []);
       setPlatformAccess(platform || {platform: false, permissions: []});
+      setBranding(brand);
+      // Applies CSS custom properties, the page title and the favicon.
+      if (brand) applyBranding(brand);
     } catch (e) {
       if (e.message === 'Authentication required') logout();
     } finally {
@@ -177,6 +192,9 @@ function App() {
     // permission the endpoint requires, so the menu cannot offer a screen the
     // server would refuse.
     ...(can('branches.view') ? [['Subscription', CreditCard]] : []),
+    // P2D — brand settings. `settings.manage` is what the WRITE requires, so
+    // the menu matches what the server will actually allow.
+    ...(can('settings.manage') ? [['Brand', Palette]] : []),
     ['Analytics', BarChart3]
   ];
 
@@ -192,7 +210,20 @@ function App() {
   return (
     <div className="shell">
       <aside>
-        <div className="brand"><span>mittho</span><small>OPS · Nepal</small></div>
+        {/*
+          * P2D: the tenant's logo when they have one, their initials when they
+          * do not. Under white-label the product name is suppressed entirely;
+          * otherwise it remains as product chrome, which is the commercially
+          * normal arrangement.
+          */}
+        <div className="brand">
+          {branding?.logoUrl
+            ? <img src={branding.logoUrl} alt="" style={{maxWidth: '150px', maxHeight: '46px'}}/>
+            : <span>{branding?.hideProductBranding
+              ? brandInitials(branding?.displayName)
+              : 'mittho'}</span>}
+          {!branding?.hideProductBranding && <small>OPS · Nepal</small>}
+        </div>
         {nav.map(([x, I]) => (
           <button key={x} className={page === x ? 'active' : ''} onClick={() => setPage(x)}><I size={18}/>{x}</button>
         ))}
@@ -209,14 +240,22 @@ function App() {
       <main>
         <header>
           <div>
-            <p className="eyebrow">MITTHO BIRYANI HOUSE</p>
+            {/*
+              * P2D: this was the hard-coded string `MITTHO BIRYANI HOUSE`,
+              * shown as the header of EVERY tenant's workspace. It is now the
+              * tenant's own resolved display name, falling back to the
+              * restaurant name and then to a neutral product string.
+              */}
+            <p className="eyebrow">
+              {(branding?.displayName || user?.restaurant || 'RESTAURANT WORKSPACE').toUpperCase()}
+            </p>
             <h1>{page}</h1>
           </div>
           <div className="date">Aaja · {new Date().toLocaleDateString('en-NP', {dateStyle: 'full'})}</div>
         </header>
         {loading
           ? <p>Updating live data…</p>
-          : <Page page={page} data={data} call={call} user={user} token={token} permissions={permissions}/>}
+          : <Page page={page} data={data} call={call} user={user} token={token} permissions={permissions} branding={branding}/>}
       </main>
     </div>
   );
@@ -255,7 +294,7 @@ function Login({onLogin}) {
   );
 }
 
-function Page({page, data, call, user, token, permissions = []}) {
+function Page({page, data, call, user, token, permissions = [], branding = null}) {
   const branches = data.branches || [];
   if (page === 'Dashboard') return <Dashboard call={call} branches={branches} user={user}/>;
   if (page === 'Stock Ops') return <StockOps call={call} branches={branches} user={user} token={token}/>;
@@ -267,7 +306,7 @@ function Page({page, data, call, user, token, permissions = []}) {
   if (page === 'Customers') return <Customers call={call} branches={branches} user={user}/>;
   if (page === 'Deliveries') return <Deliveries call={call} branches={branches} user={user} token={token}/>;
   if (page === 'POS Admin') return <PosAdmin call={call} branches={branches} user={user}/>;
-  if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call}/>;
+  if (page === 'POS') return <POS menu={data.menu || []} branches={branches} user={user} call={call} branding={branding}/>;
   if (page === 'KDS') return <Kds call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Purchases') return <Purchasing call={call} branches={branches} user={user} token={token}/>;
   if (page === 'Reorder') return <Reorder call={call} branches={branches} user={user} token={token}/>;
@@ -287,6 +326,7 @@ function Page({page, data, call, user, token, permissions = []}) {
     return <AccessControl call={call} user={user} permissions={effective}/>;
   }
   if (page === 'Subscription') return <Subscription call={call}/>;
+  if (page === 'Brand') return <BrandSettings call={call}/>;
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;

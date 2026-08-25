@@ -69,6 +69,10 @@ row.
 | `GET /api/platform/restaurants/:id/subscription[/history]`, `/usage` | `platform.billing.view` |
 | `POST /api/platform/restaurants/:id/subscription[/trial|/cancel|/reactivate|/past-due]` | `platform.billing.manage` |
 | `GET /api/my/subscription`, `GET /api/my/entitlements` | `branches.view` — **tenant, read only** |
+| `GET /api/my/branding`, `GET /api/my/restaurant/branding\|settings` | `branches.view` |
+| `PATCH /api/my/restaurant/branding\|settings\|domain` | `settings.manage` |
+| `GET/PATCH /api/platform/restaurants/:id/branding\|domain` | `platform.restaurants.view` / `.update` |
+| `GET /api/public/branding?branch=…` | **public**, branch-scoped |
 
 Suspending a restaurant requires a reason and takes effect on the **next
 request** of every existing token in that tenant. Platform operators are exempt,
@@ -101,6 +105,33 @@ npm run seed:plans -w api                  # create the catalogue
 npm run migrate:subscriptions:dry -w api   # report, write nothing
 npm run migrate:subscriptions -w api       # idempotent; safe to run twice
 ```
+
+P2D (tenant branding and white-label) is complete: `Restaurant.branding` with
+strict validation, one authoritative branding resolver with safe defaults, a
+public storefront that renders each tenant's own brand, and a tenant settings
+screen with a live preview.
+
+- **Branding is untrusted input.** Colours are `#RRGGBB` only, URLs are
+  http/https only (parsed, not regexed), the typeface is a key into a
+  server-side allowlist, and unknown fields are a 400 rather than being
+  silently dropped. Receipt HTML escapes every interpolated value.
+- **Tiers follow the plan** — core / `advancedBranding` / `whiteLabel` /
+  `customDomain` — enforced on write *and* on resolve. A downgrade stops paid
+  presentation without deleting the stored values.
+- **Custom domains are modelled, not served.** DNS and TLS are not automated;
+  every response says `serving: false` and nothing trusts the `Host` header.
+- **Logos are validated external URLs.** There is no upload pipeline and none
+  is pretended.
+
+**A tax-invoice defect was found and fixed here.** Seller identity used to be
+rebuilt from the live restaurant profile on every print, so editing the profile
+rewrote historical invoices. `Order.invoiceIdentity` now snapshots the legally
+significant fields when the invoice number is allocated, and is immutable
+thereafter.
+
+**A pre-existing audit-chain defect was found and reported, not silently
+redesigned** — see SAAS-ARCHITECTURE.md §8. It reproduces on the P2C commit and
+is a false alarm, not a breach.
 
 `BILLING_ENFORCEMENT` (`auto` by default) forces enforcement `on` or `off`
 explicitly. The optional subscription sweep — which only reconciles stored

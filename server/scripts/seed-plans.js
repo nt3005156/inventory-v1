@@ -71,7 +71,10 @@ export const DEMO_PLANS = [
       pos: true, inventory: true, kds: true, tables: true,
       purchasing: false, delivery: false, onlineOrdering: false, reservations: false,
       advancedReports: false, loyalty: false, supplierPerformance: false,
-      reorderAutomation: false, multiBranch: false, advancedAccounting: false, apiAccess: false
+      reorderAutomation: false, multiBranch: false, advancedAccounting: false, apiAccess: false,
+      // Core branding (name, logo, colours, contact, receipt footer) needs no
+      // entitlement at all — every tenant gets it. These gate the tiers above.
+      advancedBranding: false, whiteLabel: false, customDomain: false
     }
   },
   {
@@ -101,7 +104,9 @@ export const DEMO_PLANS = [
       purchasing: true, delivery: true, onlineOrdering: true, reservations: true,
       advancedReports: true, supplierPerformance: true, reorderAutomation: true,
       multiBranch: true,
-      loyalty: false, advancedAccounting: false, apiAccess: false
+      advancedBranding: true,
+      loyalty: false, advancedAccounting: false, apiAccess: false,
+      whiteLabel: false, customDomain: false
     }
   },
   {
@@ -130,7 +135,8 @@ export const DEMO_PLANS = [
     features: Object.fromEntries([
       'pos', 'inventory', 'purchasing', 'kds', 'tables', 'delivery', 'onlineOrdering',
       'reservations', 'advancedReports', 'loyalty', 'supplierPerformance',
-      'reorderAutomation', 'multiBranch', 'advancedAccounting', 'apiAccess'
+      'reorderAutomation', 'multiBranch', 'advancedAccounting', 'apiAccess',
+      'advancedBranding', 'whiteLabel', 'customDomain'
     ].map(key => [key, true]))
   }
 ];

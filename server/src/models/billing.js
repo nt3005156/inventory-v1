@@ -86,7 +86,13 @@ export const FEATURE_KEYS = Object.freeze([
   'reorderAutomation',
   'multiBranch',
   'advancedAccounting',
-  'apiAccess'
+  'apiAccess',
+  // P2D — branding tiers. Enforced by services/branding.js, which decides
+  // which fields are APPLIED; the values themselves are never destroyed on a
+  // downgrade, so an upgrade restores them without re-entry.
+  'advancedBranding',
+  'whiteLabel',
+  'customDomain'
 ]);
 
 /** Integer minor units. Rejects floats, NaN, Infinity and negatives. */

@@ -97,7 +97,41 @@ const TYPE_LABELS = {
  * ticket can legitimately mix VAT-inclusive and VAT-exclusive menu prices and a
  * tax invoice has to show the taxable value it was computed from.
  */
-export function buildReceipt({order, restaurant, branch, payments = [], customer, table}) {
+/**
+ * The legally significant seller identity, frozen at the moment of issue.
+ *
+ * Deliberately narrow: what a tax invoice must carry, and nothing cosmetic.
+ * Branch values take precedence over restaurant values for PAN, address and
+ * phone, preserving the precedence `resolveSellerPan()` already established —
+ * a branch with its own PAN is a separately registered entity.
+ */
+export function captureInvoiceIdentity({restaurant, branch, branding = null}) {
+  return {
+    name: branding?.displayName || restaurant?.name || null,
+    legalName: restaurant?.legalName || restaurant?.name || null,
+    pan: resolveSellerPan(restaurant, branch),
+    address: branch?.address || restaurant?.address || null,
+    phone: branch?.phone || restaurant?.phone || null,
+    branchName: branch?.name || null,
+    branchCode: branch?.code || null,
+    /**
+     * `receiptBrandingView()` emits `footer`; the raw resolver emits
+     * `receiptFooter`. Both are accepted because this helper is called from
+     * the issue path (which passes the view) and is exported for tests and
+     * future callers (which may pass either). Reading only one of them lost
+     * the branding footer entirely — caught by the suite.
+     */
+    footer: branding?.footer || branding?.receiptFooter || restaurant?.receiptFooter || null,
+    currency: restaurant?.currency || 'NPR',
+    capturedAt: new Date()
+  };
+}
+
+export function buildReceipt({order, restaurant, branch, payments = [], customer, table, branding = null}) {
+  // Present only on invoices issued from P2D onward; null for legacy rows.
+  const identity = order.invoiceNo && order.invoiceIdentity?.capturedAt
+    ? order.invoiceIdentity
+    : null;
   const vatRate = Number(order.vatRate ?? 13);
   const lines = (order.items || []).map(item => {
     const lineNet = money(item.lineNet ?? Number(item.unitPrice || 0) * Number(item.qty || 0));
@@ -175,15 +209,53 @@ export function buildReceipt({order, restaurant, branch, payments = [], customer
     voidReason: clean(order.invoiceVoidReason) || null,
     currency: restaurant?.currency || 'NPR',
     timezone: 'Asia/Kathmandu',
-    seller: {
-      name: restaurant?.name || 'Restaurant',
-      pan: resolveSellerPan(restaurant, branch),
-      branch: branch?.name || null,
-      branchCode: branch?.code || null,
-      address: branch?.address || restaurant?.address || null,
-      phone: branch?.phone || restaurant?.phone || null,
-      footer: restaurant?.receiptFooter || null
-    },
+    /**
+     * P2D-K — the SNAPSHOT wins whenever one exists.
+     *
+     * An invoice issued after P2D carries `invoiceIdentity`, and a reprint
+     * renders exactly what was printed the first time, however much the
+     * profile has changed since.
+     *
+     * Orders invoiced BEFORE P2D have no snapshot, and one cannot be
+     * invented — nobody knows what the profile said that day. Those fall back
+     * to live values, which is the pre-existing behaviour, no worse than
+     * before and honestly documented rather than silently backfilled with
+     * today's data (which would look authoritative and be wrong).
+     */
+    seller: identity
+      ? {
+        name: identity.name || restaurant?.name || 'Restaurant',
+        legalName: identity.legalName || null,
+        pan: identity.pan || null,
+        branch: identity.branchName || null,
+        branchCode: identity.branchCode || null,
+        address: identity.address || null,
+        phone: identity.phone || null,
+        footer: identity.footer || null,
+        /**
+         * The LOGO is cosmetic and deliberately NOT snapshotted — it is
+         * presentation, not legal identity, and copying an image URL onto
+         * every order would bloat the collection for no accounting benefit.
+         * It therefore comes from current branding, which is the one part of
+         * a reprint that may legitimately look different.
+         */
+        logoUrl: branding?.logoUrl || null,
+        // Stated in the payload so a reader can tell a pinned invoice from a
+        // legacy one rather than having to guess.
+        identitySource: 'snapshot'
+      }
+      : {
+        name: restaurant?.name || 'Restaurant',
+        legalName: restaurant?.legalName || null,
+        pan: resolveSellerPan(restaurant, branch),
+        branch: branch?.name || null,
+        branchCode: branch?.code || null,
+        address: branch?.address || restaurant?.address || null,
+        phone: branch?.phone || restaurant?.phone || null,
+        footer: restaurant?.receiptFooter || null,
+        logoUrl: branding?.logoUrl || null,
+        identitySource: 'live'
+      },
     order: {
       id: String(order._id),
       type: order.type,
@@ -261,6 +333,17 @@ export async function getReceipt({orderId, user, issue = false, session}) {
   if (!branch) throw httpError('Branch not found', 404);
   const restaurant = await Restaurant.findById(branch.restaurant).session(session || null);
 
+  /**
+   * Resolved BEFORE the issue block, because the snapshot must capture the
+   * footer that was current at issue. Resolving it afterwards meant the
+   * branding footer was never pinned and a later edit changed what a reprint
+   * showed — caught by the suite.
+   *
+   * Cosmetic only. Legal identity comes from the restaurant/branch documents.
+   */
+  const {getRestaurantBranding, receiptBrandingView} = await import('./branding.js');
+  const branding = receiptBrandingView(await getRestaurantBranding(branch.restaurant));
+
   // A tax invoice number is only allocated for a real sale, and only once.
   if (issue) {
     // A cancelled order may never be ALLOCATED a number. But if it already has
@@ -288,6 +371,20 @@ export async function getReceipt({orderId, user, issue = false, session}) {
       // being stable.
       order.invoicedTotal = money(order.total);
       order.invoicedBy = user?.id || null;
+      /**
+       * P2D-K — pin WHO issued it, alongside what and for how much.
+       *
+       * Phase 13 froze the number and the total but left seller identity to be
+       * rebuilt from the live Restaurant on every print, so editing the
+       * profile rewrote historical tax invoices. Reproduced before fixing:
+       * name, PAN and address all drifted while invoiceNo and invoicedTotal
+       * correctly held.
+       *
+       * Captured HERE, in the same block that allocates the number, so the two
+       * can never disagree. `invoiceIdentity` is in FROZEN_INVOICE_PATHS, so
+       * this write is the only one that will ever succeed.
+       */
+      order.invoiceIdentity = captureInvoiceIdentity({restaurant, branch, branding});
     }
     order.printCount = Number(order.printCount || 0) + 1;
     order.lastPrintedAt = new Date();
@@ -325,7 +422,8 @@ export async function getReceipt({orderId, user, issue = false, session}) {
     branch,
     payments,
     customer: populated?.customer,
-    table: populated?.table
+    table: populated?.table,
+    branding
   });
 }
 
@@ -404,13 +502,16 @@ td{padding:1px 0;vertical-align:top}
 .neg td{}
 .meta{font-size:11px}
 .foot{text-align:center;font-size:11px;margin-top:8px}
+.logo{max-width:120px;max-height:60px;display:block;margin:0 auto 6px}
 .reprint{text-align:center;font-weight:700;border:1px solid #000;padding:2px;margin:6px 0;font-size:11px}
 @media print{.noprint{display:none}}
 .noprint{display:block;text-align:center;margin:10px 0}
 .noprint button{font:inherit;padding:6px 14px}
 </style></head>
 <body onload="window.focus()">
+${receipt.seller.logoUrl ? `<img class="logo" src="${esc(receipt.seller.logoUrl)}" alt=""/>` : ''}
 <h1>${esc(receipt.seller.name)}</h1>
+${receipt.seller.legalName && receipt.seller.legalName !== receipt.seller.name ? `<p class="sub">${esc(receipt.seller.legalName)}</p>` : ''}
 ${receipt.seller.branch ? `<p class="sub">${esc(receipt.seller.branch)}</p>` : ''}
 ${receipt.seller.address ? `<p class="sub">${esc(receipt.seller.address)}</p>` : ''}
 ${receipt.seller.phone ? `<p class="sub">Tel: ${esc(receipt.seller.phone)}</p>` : ''}

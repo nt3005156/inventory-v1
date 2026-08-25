@@ -1,4 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react';
+import {applyBranding} from './branding.js';
 
 const rs = n => 'Rs. ' + Number(n || 0).toLocaleString('en-NP', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
@@ -39,6 +40,15 @@ export default function Storefront() {
   const [payment, setPayment] = useState(null);
   // Stable for the life of this cart, so a double-click or a retry after a
   // timeout is deduplicated by the server rather than buying twice.
+  /**
+   * P2D — tenant branding for the public storefront.
+   *
+   * Loaded per BRANCH, reusing the existing public tenant-resolution
+   * mechanism: the browser knows a branch, the server derives the tenant. A
+   * restaurant id is never sent, so a visitor cannot ask for another
+   * restaurant's branding.
+   */
+  const [branding, setBranding] = useState(null);
   const [checkoutKey, setCheckoutKey] = useState(() => `sf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   useEffect(() => {
@@ -196,6 +206,24 @@ export default function Storefront() {
     }
   };
 
+  /**
+   * Re-fetched on every branch change, so switching location switches the
+   * whole brand. Fails soft: a branding error must never block ordering.
+   */
+  useEffect(() => {
+    if (!branchId) return undefined;
+    let live = true;
+    fetch(`/api/public/branding?branch=${encodeURIComponent(branchId)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(result => {
+        if (!live || !result?.branding) return;
+        setBranding(result.branding);
+        applyBranding(result.branding);
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [branchId]);
+
   const canCheckout = guest.name.trim().length >= 2
     && guest.phone.trim().length >= 7
     && (type !== 'delivery' || address.trim().length >= 5);
@@ -203,9 +231,23 @@ export default function Storefront() {
   return (
     <div className="storefront">
       <header className="sf-head">
-        <div>
-          <h1>Order online</h1>
-          <p>Fresh from our kitchen to your door.</p>
+        {/*
+          * P2D: was the hard-coded "Order online" / "Fresh from our kitchen".
+          * Now the tenant's own copy, with the previous strings as the
+          * fallback so an unbranded restaurant looks exactly as it did.
+          *
+          * React escapes all of this by default, so tenant-controlled text
+          * cannot inject markup here.
+          */}
+        <div style={{display: 'flex', alignItems: 'center', gap: '12px'}}>
+          {branding?.logoUrl && (
+            <img src={branding.logoUrl} alt="" style={{maxHeight: '48px', maxWidth: '120px'}}/>
+          )}
+          <div>
+            <h1>{branding?.storefrontTitle || branding?.displayName || 'Order online'}</h1>
+            <p>{branding?.storefrontSubtitle || branding?.tagline
+              || 'Fresh from our kitchen to your door.'}</p>
+          </div>
         </div>
         <select value={branchId} onChange={e => setBranchId(e.target.value)}>
           {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -219,6 +261,12 @@ export default function Storefront() {
           </span>
         ))}
       </nav>
+
+      {branding?.storefrontNotice && (
+        <p style={{
+          background: '#fff8e5', color: '#805d19', padding: '10px 14px', borderRadius: '8px'
+        }}>{branding.storefrontNotice}</p>
+      )}
 
       {error && <p className="sf-error">{error}</p>}
 

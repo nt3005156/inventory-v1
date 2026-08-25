@@ -64,9 +64,74 @@ const restaurantSchema=new Schema({name:{type:String,required:true},
   staffMaxDiscountAmount:{type:Number,default:500,min:0},
   // Hard ceiling for EVERYONE, including an owner. Guards a mistyped 100%
   // rather than a dishonest one; set to 100 to disable.
-  maxDiscountPercent:{type:Number,default:100,min:0,max:100},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300}},{timestamps:true});
+  maxDiscountPercent:{type:Number,default:100,min:0,max:100},phone:String,address:String,pan:{type:String,trim:true,maxlength:20},receiptFooter:{type:String,trim:true,maxlength:300},
+  /**
+   * P2D — TENANT BRANDING.
+   *
+   * A structured sub-document rather than another Mixed blob. `settings` is
+   * already Mixed and that is fine for loose operational preferences, but
+   * branding is rendered into receipt HTML and a public page, so every field
+   * needs a declared type and a validator. An unvalidated Mixed bag of
+   * colours and URLs is a stored-XSS surface.
+   *
+   * Colours are `#RRGGBB` only and URLs are http/https only, enforced both
+   * here (so a direct write cannot store rubbish) and in
+   * services/brandingSchema.js (so an API payload fails with a useful
+   * message). Two enforcement points for one rule, deliberately: the model
+   * catches a script or a migration, the service catches a user.
+   *
+   * Every field is OPTIONAL. A restaurant that sets nothing renders from
+   * PRODUCT_DEFAULTS, and the resolver never writes those defaults back.
+   */
+  branding:{
+    displayName:{type:String,trim:true,maxlength:80},
+    tagline:{type:String,trim:true,maxlength:140},
+    logoUrl:{type:String,trim:true,maxlength:500},
+    faviconUrl:{type:String,trim:true,maxlength:500},
+    primaryColor:{type:String,trim:true,lowercase:true,match:[/^#[0-9a-f]{6}$/,'primaryColor must be #RRGGBB']},
+    secondaryColor:{type:String,trim:true,lowercase:true,match:[/^#[0-9a-f]{6}$/,'secondaryColor must be #RRGGBB']},
+    accentColor:{type:String,trim:true,lowercase:true,match:[/^#[0-9a-f]{6}$/,'accentColor must be #RRGGBB']},
+    backgroundColor:{type:String,trim:true,lowercase:true,match:[/^#[0-9a-f]{6}$/,'backgroundColor must be #RRGGBB']},
+    textColor:{type:String,trim:true,lowercase:true,match:[/^#[0-9a-f]{6}$/,'textColor must be #RRGGBB']},
+    // A KEY into a server-side allowlist, never a raw CSS font-family: a
+    // free-text stack lands inside a declaration and can close it.
+    fontFamily:{type:String,trim:true,lowercase:true,maxlength:20},
+    receiptLogoEnabled:{type:Boolean},
+    receiptFooter:{type:String,trim:true,maxlength:300},
+    storefrontTitle:{type:String,trim:true,maxlength:120},
+    storefrontSubtitle:{type:String,trim:true,maxlength:200},
+    storefrontNotice:{type:String,trim:true,maxlength:300},
+    storefrontFooter:{type:String,trim:true,maxlength:300},
+    orderingInstructions:{type:String,trim:true,maxlength:500},
+    hideProductBranding:{type:Boolean},
+    supportEmail:{type:String,trim:true,lowercase:true,maxlength:160},
+    supportPhone:{type:String,trim:true,maxlength:40},
+    websiteUrl:{type:String,trim:true,maxlength:500},
+    facebookUrl:{type:String,trim:true,maxlength:500},
+    instagramUrl:{type:String,trim:true,maxlength:500}
+  },
+  /**
+   * P2D-M — custom domain, MODELLED but not served.
+   *
+   * The deployment terminates TLS outside this stack and has no DNS or ACME
+   * automation, so pretending to provision a domain would be a lie. What is
+   * implemented is the data model and its safety properties: normalised
+   * hostname, a unique index so two tenants cannot claim the same host, an
+   * ownership token, and an explicit verified flag that only becomes true
+   * through a deliberate platform action.
+   *
+   * Nothing in the request path trusts `Host` yet. See SAAS-ARCHITECTURE.md.
+   */
+  customDomain:{type:String,trim:true,lowercase:true,maxlength:253,default:null},
+  customDomainVerified:{type:Boolean,default:false},
+  customDomainToken:{type:String,trim:true,maxlength:80,select:false,default:null},
+  customDomainVerifiedAt:{type:Date,default:null}},{timestamps:true});
 // Partial, so the many existing tenants without a slug do not collide on null.
 restaurantSchema.index({slug:1},{unique:true,name:'restaurant_slug',partialFilterExpression:{slug:{$type:'string'}}});
+// P2D-M: one tenant per hostname. Partial, so the many tenants with no custom
+// domain do not all collide on null. Without this, two restaurants could claim
+// the same host and hostname-based resolution would be ambiguous.
+restaurantSchema.index({customDomain:1},{unique:true,name:'restaurant_custom_domain',partialFilterExpression:{customDomain:{$type:'string'}}});
 export const Restaurant=model('Restaurant',restaurantSchema);
 export const Branch=model('Branch',new Schema({restaurant:{...oid,ref:'Restaurant',index:true},name:{type:String,required:true},code:{type:String,uppercase:true},address:String,phone:String,pan:{type:String,trim:true,maxlength:20},active:{type:Boolean,default:true}},{timestamps:true}));
 const inventoryBalanceSchema=new Schema({
@@ -496,7 +561,47 @@ const orderSchema=new Schema({orderNo:{type:String,index:true},
   // Set when an already-invoiced order is voided. The invoice number is never
   // released or reused; the reprint is stamped VOID instead.
   invoiceVoidedAt:{type:Date,default:null},
-  invoiceVoidReason:{type:String,trim:true,maxlength:300}},{timestamps:true});
+  invoiceVoidReason:{type:String,trim:true,maxlength:300},
+  /**
+   * P2D-K — THE SELLER IDENTITY SNAPSHOT.
+   *
+   * A REPRODUCED DEFECT, not a hypothetical. Before this field, a receipt's
+   * seller block was rebuilt from the LIVE `Restaurant` document on every
+   * print. Probed against a real invoice:
+   *
+   *   at issue time  name: Mittho Biryani     pan: 301234567  addr: Kalanki
+   *   after a profile edit
+   *                  name: COMPLETELY DIFFERENT CO
+   *                                            pan: 999999999  addr: Somewhere Else
+   *   (controls: invoiceNo and invoicedTotal were unchanged — those were
+   *    already frozen by Phase 13. Only WHO ISSUED IT drifted.)
+   *
+   * So yesterday's tax invoice could be rewritten by editing today's profile.
+   * For a VAT-registered business that is an accounting-integrity problem, and
+   * P2D makes it worse by actively inviting tenants to edit their identity.
+   *
+   * The snapshot is written ONCE, when the invoice number is allocated, and is
+   * frozen thereafter by the same guard that protects `invoiceNo`. Reprints
+   * read it and never consult the current profile.
+   *
+   * DELIBERATELY NARROW. Only what a tax invoice must legally carry — seller
+   * name, legal entity, PAN, address, phone, branch and the footer that was
+   * actually printed. Colours, logos and storefront copy are cosmetic and are
+   * NOT snapshotted: copying every branding field onto every order would bloat
+   * the collection and confuse presentation with legal identity.
+   */
+  invoiceIdentity:{
+    name:{type:String,trim:true,maxlength:200},
+    legalName:{type:String,trim:true,maxlength:200},
+    pan:{type:String,trim:true,maxlength:20},
+    address:{type:String,trim:true,maxlength:300},
+    phone:{type:String,trim:true,maxlength:40},
+    branchName:{type:String,trim:true,maxlength:120},
+    branchCode:{type:String,trim:true,maxlength:40},
+    footer:{type:String,trim:true,maxlength:300},
+    currency:{type:String,trim:true,maxlength:8},
+    capturedAt:{type:Date}
+  }},{timestamps:true});
 
 // Phase 13: the tax invoice identity is append-only.
 //
@@ -504,7 +609,10 @@ const orderSchema=new Schema({orderNo:{type:String,index:true},
 // freely rewritable: `Order.updateOne({...},{invoiceNo:'INV-KTM-2026-999999'})`
 // succeeded, and printCount could be rewound to 0 so a reprint would present
 // itself as an original. Both are now refused at the document and query layers.
-const FROZEN_INVOICE_PATHS=['invoiceNo','invoicedAt','invoicedTotal','invoicedBy'];
+// P2D-K adds `invoiceIdentity`: once an invoice is issued, WHO issued it is as
+// immutable as the number and the total. Without it in this list, a profile
+// edit could rewrite the seller on a historical tax invoice — reproduced.
+const FROZEN_INVOICE_PATHS=['invoiceNo','invoicedAt','invoicedTotal','invoicedBy','invoiceIdentity'];
 function invoiceRewriteError(paths){
   return Object.assign(new Error(`An issued tax invoice cannot be altered (${paths.join(', ')}); void it and issue a credit note instead`),{status:409});
 }
