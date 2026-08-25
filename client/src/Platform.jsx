@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
-  Building2, Gauge, ScrollText, ShieldAlert, Users
+  Building2, CreditCard, Gauge, Receipt, ScrollText, ShieldAlert, Users
 } from 'lucide-react';
 
 /**
@@ -521,7 +521,359 @@ function PlatformAudit({call}) {
   );
 }
 
+
+// ── plans (P2C) ──────────────────────────────────────────────────────────────
+
+/**
+ * The plan catalogue.
+ *
+ * Prices arrive as integer minor units and a pre-formatted display string. The
+ * client NEVER divides them: doing float arithmetic on money in the browser is
+ * exactly what the integer representation exists to prevent, and the server
+ * has already formatted it correctly for the plan's own currency.
+ */
+function PlatformPlans({call, permissions}) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState(null);
+
+  const mayManage = permissions.includes('platform.billing.manage');
+
+  const load = useCallback(async () => {
+    setError('');
+    try { setData(await call('/platform/plans?includeInactive=true')); }
+    catch (e) { setError(e.message); }
+  }, [call]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (error) return <p className="danger">{error}</p>;
+  if (!data) return <p>Loading plans…</p>;
+
+  return (
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>Plan</th><th>Code</th><th>Monthly</th><th>Trial</th>
+            <th>Tenants</th><th>Status</th><th/>
+          </tr>
+        </thead>
+        <tbody>
+          {data.plans.map(plan => (
+            <tr key={plan._id}>
+              <td>{plan.name}</td>
+              <td><code>{plan.code}</code></td>
+              {/* Server-formatted. No division happens in the browser. */}
+              <td>{plan.monthlyPriceDisplay}</td>
+              <td>{plan.trialDays} days</td>
+              <td>{plan.subscriberCount}</td>
+              <td><Pill tone={plan.active ? 'active' : 'cancelled'}>
+                {plan.active ? 'active' : 'retired'}
+              </Pill></td>
+              <td>
+                <button onClick={() => setSelected(selected === plan._id ? null : plan._id)}>
+                  {selected === plan._id ? 'Hide' : 'Details'}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {selected && (() => {
+        const plan = data.plans.find(row => row._id === selected);
+        if (!plan) return null;
+        return (
+          <div style={{
+            border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px',
+            background: '#fff', marginTop: '12px'
+          }}>
+            <h3 style={{marginTop: 0}}>{plan.name} entitlements</h3>
+            <p style={{fontSize: '12px', color: '#64748b'}}>{plan.description}</p>
+
+            <h4 style={{marginBottom: 4}}>Features</h4>
+            <div style={{display: 'flex', flexWrap: 'wrap', gap: '6px'}}>
+              {Object.entries(plan.features).map(([key, on]) => (
+                <Pill key={key} tone={on ? 'active' : 'cancelled'}>{key}</Pill>
+              ))}
+            </div>
+
+            <h4 style={{marginBottom: 4}}>Limits</h4>
+            <table>
+              <tbody>
+                {Object.entries(plan.limits).map(([key, value]) => (
+                  <tr key={key}>
+                    <td>{key}</td>
+                    {/* null is unlimited, explicitly — never a magic number. */}
+                    <td>{value === null ? 'unlimited' : value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!mayManage && (
+              <p style={{fontSize: '11px', color: '#94a3b8'}}>
+                Read only. Changing plans requires billing management authority.
+              </p>
+            )}
+          </div>
+        );
+      })()}
+      <p style={{fontSize: '11px', color: '#94a3b8'}}>
+        Plan pricing and limits are data, not code. Development values are seeded by
+        scripts/seed-plans.js and can be changed here without a deployment.
+      </p>
+    </div>
+  );
+}
+
+// ── subscriptions (P2C) ──────────────────────────────────────────────────────
+
+function SubscriptionDetail({call, restaurantId, permissions, onChanged, onClose}) {
+  const [data, setData] = useState(null);
+  const [history, setHistory] = useState(null);
+  const [usage, setUsage] = useState(null);
+  const [plans, setPlans] = useState([]);
+  const [error, setError] = useState('');
+  const [reason, setReason] = useState('');
+  const [planCode, setPlanCode] = useState('');
+  const [trialDays, setTrialDays] = useState('7');
+  const [busy, setBusy] = useState(false);
+
+  const mayManage = permissions.includes('platform.billing.manage');
+
+  const load = useCallback(async () => {
+    setError('');
+    try {
+      const [detail, hist, use, cat] = await Promise.all([
+        call(`/platform/restaurants/${restaurantId}/subscription`),
+        call(`/platform/restaurants/${restaurantId}/subscription/history`),
+        call(`/platform/restaurants/${restaurantId}/usage`),
+        call('/platform/plans')
+      ]);
+      setData(detail);
+      setHistory(hist);
+      setUsage(use);
+      setPlans(cat.plans || []);
+    } catch (e) { setError(e.message); }
+  }, [call, restaurantId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  /** Every commercial mutation needs a reason. Enforced server-side too. */
+  const act = async (path, body) => {
+    setError('');
+    if (reason.trim().length < 3) {
+      setError('A reason is required and is recorded in the subscription history.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await call(`/platform/restaurants/${restaurantId}/subscription${path}`, {
+        method: 'POST', body: JSON.stringify({...body, reason: reason.trim()})
+      });
+      setReason('');
+      await load();
+      onChanged?.();
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+
+  if (error && !data) return <p className="danger">{error}</p>;
+  if (!data) return <p>Loading subscription…</p>;
+
+  const sub = data.subscription;
+  const ent = data.entitlement;
+
+  return (
+    <div style={{border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px', background: '#fff'}}>
+      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+        <h2 style={{margin: 0}}>
+          {data.restaurant.name}{' '}
+          <Pill tone={sub?.status === 'active' ? 'active' : (sub?.status || 'cancelled')}>
+            {sub ? sub.status : 'no subscription'}
+          </Pill>
+        </h2>
+        <button onClick={onClose}>Close</button>
+      </div>
+
+      {!sub && (
+        <p style={{color: '#991b1b'}}>
+          This restaurant has no subscription and cannot create new records.
+        </p>
+      )}
+
+      {sub && (
+        <dl style={{display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 16px', fontSize: '13px'}}>
+          <dt style={{color: '#64748b'}}>Plan</dt>
+          <dd>{sub.plan?.name} ({sub.plan?.code}) · {sub.plan?.monthlyPriceDisplay}</dd>
+          <dt style={{color: '#64748b'}}>Trial ends</dt><dd>{stamp(sub.trialEnd)}</dd>
+          <dt style={{color: '#64748b'}}>Period ends</dt><dd>{stamp(sub.currentPeriodEnd)}</dd>
+          <dt style={{color: '#64748b'}}>Cancel at period end</dt>
+          <dd>{sub.cancelAtPeriodEnd ? 'yes' : 'no'}</dd>
+          <dt style={{color: '#64748b'}}>Operational</dt>
+          <dd>{ent.operational ? 'yes' : `no — ${ent.reason}`}</dd>
+        </dl>
+      )}
+
+      {usage && (
+        <>
+          <h3>Usage against limits</h3>
+          <table>
+            <thead><tr><th>Resource</th><th>Used</th><th>Limit</th></tr></thead>
+            <tbody>
+              {Object.entries(usage.limits).map(([key, limit]) => (
+                <tr key={key}>
+                  <td>{key}</td>
+                  <td>{usage.usage[key] ?? '—'}</td>
+                  <td>{limit === null ? 'unlimited' : limit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {mayManage && (
+        <div style={{borderTop: '1px solid #e2e8f0', paddingTop: '12px', marginTop: '12px'}}>
+          <h3 style={{marginTop: 0}}>Manage</h3>
+          <input
+            aria-label="Reason"
+            placeholder="Reason (required — recorded in subscription history)"
+            value={reason} onChange={e => setReason(e.target.value)}
+            style={{width: '100%', marginBottom: '8px'}}
+          />
+          <div style={{display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center'}}>
+            <select aria-label="Plan" value={planCode} onChange={e => setPlanCode(e.target.value)}>
+              <option value="">Choose a plan…</option>
+              {plans.map(plan => (
+                <option key={plan._id} value={plan.code}>{plan.name}</option>
+              ))}
+            </select>
+            <button disabled={busy || !planCode} onClick={() => act('', {plan: planCode})}>
+              Assign plan
+            </button>
+            <button disabled={busy || !planCode}
+              onClick={() => act('', {plan: planCode, startTrial: true})}>
+              Assign with trial
+            </button>
+          </div>
+          <div style={{display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px', alignItems: 'center'}}>
+            <input
+              aria-label="Trial days" type="number" min="1" max="365" style={{width: '90px'}}
+              value={trialDays} onChange={e => setTrialDays(e.target.value)}
+            />
+            <button disabled={busy}
+              onClick={() => act('/trial', {days: Number(trialDays)})}>Extend trial</button>
+            <button disabled={busy} onClick={() => act('/cancel', {})}>Cancel at period end</button>
+            <button disabled={busy}
+              onClick={() => act('/cancel', {atPeriodEnd: false})}>Cancel immediately</button>
+            <button disabled={busy} onClick={() => act('/reactivate', {})}>Reactivate</button>
+          </div>
+          <p style={{fontSize: '11px', color: '#94a3b8', marginBottom: 0}}>
+            No payment is taken or recorded here. P2C is the entitlement foundation only.
+          </p>
+        </div>
+      )}
+      {error && <p className="danger">{error}</p>}
+
+      {history && (
+        <>
+          <h3>Subscription history</h3>
+          <table>
+            <thead><tr><th>When</th><th>Event</th><th>Actor</th><th>Reason</th></tr></thead>
+            <tbody>
+              {history.events.map(row => (
+                <tr key={row._id}>
+                  <td>{stamp(row.at)}</td>
+                  <td>{row.event}</td>
+                  <td>{row.actor.name || row.actor.role || 'system'}</td>
+                  <td>{row.reason || '—'}</td>
+                </tr>
+              ))}
+              {!history.events.length && (
+                <tr><td colSpan={4}>No commercial history yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+          <p style={{fontSize: '11px', color: '#94a3b8'}}>
+            Subscription history is append-only and cannot be edited or deleted.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PlatformSubscriptions({call, permissions}) {
+  const [data, setData] = useState(null);
+  const [status, setStatus] = useState('');
+  const [selected, setSelected] = useState(null);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setError('');
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    try { setData(await call(`/platform/subscriptions${query}`)); }
+    catch (e) { setError(e.message); }
+  }, [call, status]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div>
+      <select aria-label="Subscription status filter" value={status}
+        onChange={e => setStatus(e.target.value)} style={{marginBottom: '12px'}}>
+        <option value="">All statuses</option>
+        <option value="trialing">Trialing</option>
+        <option value="active">Active</option>
+        <option value="past_due">Past due</option>
+        <option value="cancelled">Cancelled</option>
+        <option value="expired">Expired</option>
+      </select>
+
+      {error && <p className="danger">{error}</p>}
+
+      {selected && (
+        <div style={{marginBottom: '16px'}}>
+          <SubscriptionDetail
+            call={call} restaurantId={selected} permissions={permissions}
+            onChanged={load} onClose={() => setSelected(null)}
+          />
+        </div>
+      )}
+
+      {!data ? <p>Loading subscriptions…</p> : (
+        <table>
+          <thead>
+            <tr><th>Restaurant</th><th>Plan</th><th>Status</th><th>Period ends</th><th/></tr>
+          </thead>
+          <tbody>
+            {data.subscriptions.map(row => (
+              <tr key={row._id}>
+                <td>{row.restaurant.name || '—'}</td>
+                <td>{row.plan?.name || '—'}</td>
+                <td>
+                  <Pill tone={row.status === 'active' ? 'active' : row.status}>{row.status}</Pill>
+                  {row.cancelAtPeriodEnd && <span style={{fontSize: '11px'}}> · cancelling</span>}
+                </td>
+                <td>{stamp(row.currentPeriodEnd)}</td>
+                <td>
+                  <button onClick={() => setSelected(row.restaurant._id)}>Open</button>
+                </td>
+              </tr>
+            ))}
+            {!data.subscriptions.length && (
+              <tr><td colSpan={5}>No subscriptions match that filter.</td></tr>
+            )}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 // ── shell ────────────────────────────────────────────────────────────────────
+
 
 /**
  * The platform workspace.
@@ -555,6 +907,8 @@ export default function Platform({call, user, access, onExit}) {
     ...(permissions.includes('platform.dashboard.view') ? [['Dashboard', Gauge]] : []),
     ...(permissions.includes('platform.restaurants.view') ? [['Restaurants', Building2]] : []),
     ...(permissions.includes('platform.users.view') ? [['Users', Users]] : []),
+    ...(permissions.includes('platform.billing.view') ? [['Plans', CreditCard]] : []),
+    ...(permissions.includes('platform.billing.view') ? [['Subscriptions', Receipt]] : []),
     ...(permissions.includes('platform.audit.view') ? [['Audit', ScrollText]] : [])
   ];
 
@@ -586,10 +940,12 @@ export default function Platform({call, user, access, onExit}) {
         {page === 'Dashboard' && <PlatformDashboard call={call}/>}
         {page === 'Restaurants' && <PlatformRestaurants call={call} permissions={permissions}/>}
         {page === 'Users' && <PlatformUsers call={call} permissions={permissions}/>}
+        {page === 'Plans' && <PlatformPlans call={call} permissions={permissions}/>}
+        {page === 'Subscriptions' && <PlatformSubscriptions call={call} permissions={permissions}/>}
         {page === 'Audit' && <PlatformAudit call={call}/>}
       </main>
     </div>
   );
 }
 
-export {PlatformDashboard, PlatformRestaurants, PlatformUsers, PlatformAudit};
+export {PlatformDashboard, PlatformRestaurants, PlatformUsers, PlatformAudit, PlatformPlans, PlatformSubscriptions};

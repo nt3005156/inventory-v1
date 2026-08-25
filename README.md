@@ -64,10 +64,49 @@ row.
 | `PATCH /api/platform/users/:id/active` | `platform.users.manage` |
 | `PATCH /api/platform/users/:id/platform-role` | `platform.admins.manage` |
 | `GET /api/platform/audit` | `platform.audit.view` |
+| `GET/POST /api/platform/plans`, `GET/PATCH /api/platform/plans/:id` | `platform.billing.view` / `.manage` |
+| `GET /api/platform/subscriptions` | `platform.billing.view` |
+| `GET /api/platform/restaurants/:id/subscription[/history]`, `/usage` | `platform.billing.view` |
+| `POST /api/platform/restaurants/:id/subscription[/trial|/cancel|/reactivate|/past-due]` | `platform.billing.manage` |
+| `GET /api/my/subscription`, `GET /api/my/entitlements` | `branches.view` — **tenant, read only** |
 
 Suspending a restaurant requires a reason and takes effect on the **next
 request** of every existing token in that tenant. Platform operators are exempt,
 or suspension could not be undone.
+
+P2C (subscriptions, plans and entitlements) is complete: a database-driven
+`Plan` catalogue, one `Subscription` per restaurant, an append-only
+`SubscriptionEvent` history, and **one** authoritative entitlement resolver that
+every feature and limit check goes through. No `if (plan === 'enterprise')`
+anywhere in the application.
+
+- **Money is integer minor units (paisa).** No float arithmetic in the billing
+  path; `NPR 8,300.00` is stored as `830000`.
+- **Unlimited is `null`**, never `-1` or a magic number.
+- **A plan limit answers 402**, not 403 — "your plan does not include this" is a
+  different problem from "your role does not allow this".
+- **A tenant cannot change its own plan.** There is no tenant write surface at
+  all; `/api/my/subscription` is read only.
+- **No payment gateway, and nothing pretends there is one.** No charge is taken
+  and no successful transaction is ever fabricated.
+
+**Commercial values are data, not code.** Prices and limits are set through
+`PATCH /api/platform/plans/:id` (audited) or seeded for development by
+`scripts/seed-plans.js`. The figures in that script are DEMO VALUES.
+
+```bash
+# Rollout order matters. Enforcement stays OFF until a plan catalogue exists,
+# so deploying this phase cannot brick tenants that have no subscription yet.
+npm run seed:plans -w api                  # create the catalogue
+npm run migrate:subscriptions:dry -w api   # report, write nothing
+npm run migrate:subscriptions -w api       # idempotent; safe to run twice
+```
+
+`BILLING_ENFORCEMENT` (`auto` by default) forces enforcement `on` or `off`
+explicitly. The optional subscription sweep — which only reconciles stored
+status with reality, and is not the enforcement mechanism — is enabled with
+`SUBSCRIPTION_SCHEDULER_ENABLED` and reuses the existing distributed scheduler
+lease.
 
 ## Production readiness
 

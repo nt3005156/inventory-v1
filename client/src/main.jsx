@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell, Building2} from 'lucide-react';
+import {LayoutDashboard, Package, ShoppingCart, ChefHat, UtensilsCrossed, Armchair, BarChart3, Receipt, LogOut, CalendarCheck2, Users, Bike, ClipboardList, PackageSearch, Gauge, Download, ShieldCheck, ScrollText, Bell, Building2, CreditCard} from 'lucide-react';
 import Purchasing from './Purchasing.jsx';
 import StockOps from './StockOps.jsx';
 import SupplierCatalog from './SupplierCatalog.jsx';
@@ -28,6 +28,7 @@ import PosAdmin from './PosAdmin.jsx';
 import RiderApp from './RiderApp.jsx';
 import Storefront from './Storefront.jsx';
 import Platform from './Platform.jsx';
+import Subscription from './Subscription.jsx';
 import './style.css';
 
 const API = String(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
@@ -172,6 +173,10 @@ function App() {
     ...(can('users.manage') || can('roles.manage') ? [['Access Control', ShieldCheck]] : []),
     ...(can('notifications.view') ? [['Notifications', Bell]] : []),
     ...(can('audit.view') ? [['Audit Log', ScrollText]] : []),
+    // P2C — the tenant's own read-only subscription view. Gated on the same
+    // permission the endpoint requires, so the menu cannot offer a screen the
+    // server would refuse.
+    ...(can('branches.view') ? [['Subscription', CreditCard]] : []),
     ['Analytics', BarChart3]
   ];
 
@@ -281,6 +286,7 @@ function Page({page, data, call, user, token, permissions = []}) {
       : permissions;
     return <AccessControl call={call} user={user} permissions={effective}/>;
   }
+  if (page === 'Subscription') return <Subscription call={call}/>;
   if (page === 'Expenses') return <Expenses call={call} branches={branches} user={user}/>;
   if (page === 'Month Close') return <MonthClose call={call} branches={branches} user={user}/>;
   if (page === 'Supplier Catalog') return <SupplierCatalog call={call}/>;

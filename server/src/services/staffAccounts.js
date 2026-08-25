@@ -19,6 +19,8 @@ import {Delivery} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 import {revokeUserSessions} from './sessions.js';
+import {assertWithinLimit} from './entitlements.js';
+import {getUserUsage} from './usage.js';
 
 const clean = value => String(value ?? '').trim();
 
@@ -130,6 +132,25 @@ export async function createStaffAccount({user, input}) {
   } else if (role !== 'owner' && role !== 'manager') {
     // Staff and riders are branch-bound in every other part of the system.
     throw httpError('A branch is required for staff and rider accounts', 400);
+  }
+
+  /**
+   * P2C — plan seat limit.
+   *
+   * Checked HERE, immediately before the insert and after every validation,
+   * so a refusal cannot leave a half-created account behind. Per-role limits
+   * are checked alongside the overall seat count because a plan may sell "10
+   * users, of whom 2 may be managers".
+   *
+   * Enforced in the SERVICE, not the route: `POST /auth/register` and
+   * `POST /accounts` both land here, and a route-level check would have to be
+   * duplicated in both and would be missed by any future third caller.
+   */
+  const seats = await getUserUsage(restaurantId);
+  await assertWithinLimit(restaurantId, 'maxUsers', seats.total, {label: 'user accounts'});
+  const roleLimitKey = {manager: 'maxManagers', staff: 'maxStaff', rider: 'maxRiders'}[role];
+  if (roleLimitKey) {
+    await assertWithinLimit(restaurantId, roleLimitKey, seats[role] || 0, {label: `${role} accounts`});
   }
 
   const created = await User.create({

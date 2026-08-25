@@ -1,4 +1,4 @@
-# SaaS architecture — P1 · P2A · P2B
+# SaaS architecture — P1 · P2A · P2B · P2C
 
 How this single-restaurant ERP becomes a multi-tenant platform for ~100
 restaurants on one codebase. Written at the end of Phase P1; sections marked
@@ -376,6 +376,221 @@ permissions the server reports, so `platform_support` gets read-only screens.
 server-side against the database `platformRole`. The UI tests say so in their
 own header, so they can never be cited as evidence of enforcement.
 
+## 3C. Subscriptions, plans and entitlements — P2C
+
+The commercial layer: which restaurant is on which plan, and what that plan
+permits. Built so a plan change is a DATA change, never a code change.
+
+### Where commercial state lives, and why not on `Restaurant`
+
+`Restaurant.settings` is `Mixed` and writable by any tenant holding
+`settings.manage` — that is `PATCH /api/my/restaurant`. Storing a plan or a
+feature map there would be **self-grantable**: an owner could give themselves
+Enterprise by editing their own settings. So commercial state lives in three
+collections no tenant-facing endpoint writes:
+
+| Collection | Role |
+|---|---|
+| `Plan` | the catalogue: prices, limits, features. One per `code`, unique. |
+| `Subscription` | CURRENT state. Exactly one per restaurant (unique index). |
+| `SubscriptionEvent` | the append-only commercial record. |
+
+A test asserts the resolver ignores `Restaurant.settings` even when it is
+stuffed with every feature set to true.
+
+### Money is integer minor units
+
+The operational schemas use `money = {type: Number}` — a float. Tolerable for a
+Rs 350 biryani, not for a price list, where `0.1 + 0.2 !== 0.3` becomes a
+billing dispute. **Every amount in the billing path is an integer count of
+paisa**, validated as a safe integer at the schema. `formatMinor()` renders it
+with integer division and remainder; the client never divides money.
+
+`NPR 8,300.00` is stored as `830000`.
+
+### Unlimited is `null`
+
+Not `-1`, not `999999`. Both take part in arithmetic, so a forgotten guard
+turns "unlimited" into a negative or into a real ceiling somebody eventually
+hits. `null` cannot be compared by accident and forces the explicit
+`isUnlimited()` check. A mutant that made `isUnlimited()` return `false` is
+killed by the suite.
+
+### Where the commercial VALUES are set
+
+**Not in source.** Nobody has approved real pricing, so inventing it in code
+would bake a guess into the product. The limit STRUCTURE (`LIMIT_KEYS`,
+`FEATURE_KEYS`) is in `models/billing.js`; the VALUES are data:
+
+1. **`PATCH /api/platform/plans/:id`** with `platform.billing.manage` — the
+   intended route for a live platform. Every edit is audited.
+2. **`node scripts/seed-plans.js --force`** — development and fresh
+   environments. The figures there are DEMO VALUES, modelled from the stated
+   ~NPR 1 crore/year across ~100 restaurants (≈ NPR 8,300/restaurant/month,
+   which is where `professional` sits).
+
+### The entitlement resolver
+
+ONE authoritative function, `resolveEntitlement(restaurantId)`:
+
+```
+restaurant -> subscription -> plan -> {features, limits}
+```
+
+Each failure has a different correct answer, and all of them **fail closed**:
+
+| Situation | Result |
+|---|---|
+| suspended / cancelled tenant | nothing, not even read access (a platform sanction) |
+| no subscription | RESTRICTED, never "unlimited because nothing is configured" |
+| plan document missing | RESTRICTED, `reason: plan_missing` (a data fault, named) |
+| subscription cancelled / expired | not operational, **but data still readable** |
+| trial end date passed | not operational **immediately**, before any sweep |
+| plan retired underneath a live tenant | keeps working — see below |
+
+**`operational` vs `readOnly`.** The brief requires that a lapsed subscription
+not destroy access to historical data, and for a VAT-registered business in
+Nepal that is also a compliance matter. So a cancelled tenant keeps `readOnly`
+and loses `operational`. A *suspended* tenant loses both, because suspension is
+a platform sanction already enforced in `loadPrincipal()`.
+
+**A retired plan keeps working for existing subscribers.** Silently downgrading
+a paying customer because marketing archived a SKU would be worse than the
+alternative. New assignments to a retired plan are refused (409).
+
+### The check API
+
+```js
+hasFeature(restaurantId, 'onlineOrdering')      // boolean
+getLimit(restaurantId, 'maxBranches')           // number | null
+assertFeature(restaurantId, 'apiAccess')        // throws 402
+assertWithinLimit(restaurantId, 'maxUsers', used, {adding: 1})  // throws 402
+```
+
+**402, not 403.** 403 means "your role does not allow this" and sends an owner
+hunting a permission misconfiguration; 402 means "your plan does not include
+this" and points at the actual fix. The error carries `billing: true` and a
+machine-readable `reason`.
+
+**The boundary:** usage 4, limit 5, adding 1 → allowed (the fifth). Usage 5 →
+refused (the sixth). A plan that says "5 branches" permits exactly five.
+
+### Enforcement rollout gate — a defect the suite caught
+
+The first implementation enforced unconditionally. That is right in steady
+state and **catastrophic on deploy day**: every existing restaurant has no
+subscription, so restarting the container would have refused every menu item,
+user and table on the platform *before* anybody could run the migration. Nine
+existing tests failed and said so.
+
+Enforcement is therefore gated by `BILLING_ENFORCEMENT`:
+
+| Value | Behaviour |
+|---|---|
+| `off` | never enforce; entitlements still computed and reported honestly |
+| `on` | always enforce |
+| unset / `auto` (default) | enforce only once a plan catalogue **exists** |
+
+`auto` is safe because an empty catalogue unambiguously means the commercial
+subsystem is not provisioned here — a platform that has never sold anything
+cannot refuse somebody for not having bought it. This is not a hole: creating
+plans needs `platform.billing.manage` and there is no delete-plan endpoint, so
+a tenant cannot empty the catalogue to disable enforcement.
+
+**Rollout order: deploy → `seed:plans` → `migrate:subscriptions` → enforced.**
+
+### Enforcement points (P2C-I — representative, not exhaustive)
+
+| Resource | Where | Why there |
+|---|---|---|
+| users | `staffAccounts.createStaffAccount()` | both `/auth/register` and `/accounts` land here |
+| menu items | `recipes.createMenuItem()` | every caller covered, not just the route |
+| branches | `tenantLimits.assertBranchCreationAllowed()` | created inline in the route; guard extracted to a service |
+| tables | `tenantLimits.assertTableCreationAllowed()` | same, and resolves the tenant from the branch |
+
+Each check runs **after** validation and **immediately before** the insert, so
+a refusal cannot leave a partially created record. Later phases apply the same
+mechanism to the remaining resources.
+
+### Subscription lifecycle
+
+```
+trialing → active | past_due | cancelled | expired
+active   → past_due | cancelled | expired
+past_due → active | cancelled | expired
+cancelled → active          (reactivation)
+expired   → active
+```
+
+Declared as data in `SUBSCRIPTION_TRANSITIONS`; anything absent is refused.
+**Nothing returns to `trialing`** — otherwise "extend the trial" and "restart
+the trial" become the same operation and a tenant can be trialled indefinitely.
+
+`past_due` is reachable **only by an explicit platform action**. Nothing in P2C
+infers a failed payment, because no gateway exists to report one.
+
+### Trials
+
+Duration comes from `Plan.trialDays`, never a constant. A trial is offered only
+on FIRST assignment — re-trialling an existing subscriber is an unbounded free
+ride one "plan change" at a time. Extensions require `platform.billing.manage`,
+are bounded to 1–365 days, need a reason, and are audited.
+
+**There is no hidden infinite trial.** The resolver computes expiry from the
+DATE, so access stops on time whether or not the scheduler ever runs.
+
+### The sweep reuses the existing lease
+
+`subscriptionScheduler.js` uses `mongoSchedulerLock()` from Phase 16B under the
+lock name `subscription-sweep` — a *different* name from the reorder sweep, so
+the two singletons do not starve each other. **No second scheduler was written.**
+
+The sweep is **bookkeeping, not enforcement**: it makes the stored status agree
+with reality so listings and history are honest. Enforcement is in the
+resolver, which is why the job is safe to be late, skipped, or switched off.
+Idempotent and restartable; it re-reads and re-checks each transition, so
+losing a race with an operator is a no-op rather than overwriting a human
+decision.
+
+Disabled by default (`SUBSCRIPTION_SCHEDULER_ENABLED`).
+
+### Two logs, deliberately
+
+Every commercial mutation writes to both:
+
+- **`SubscriptionEvent`** — append-only (schema hooks refuse update/delete),
+  queryable per tenant. It **is** the commercial record, so the write is
+  awaited and allowed to throw.
+- **`Audit`** — the existing tamper-evident hash chain, stamped under the
+  tenant. Best-effort: losing a log line must not roll back a completed state
+  change.
+
+Not duplication — they answer different questions. System actions record
+`system:scheduler` or `system:migration` rather than inventing a user.
+
+### Authority
+
+| Surface | Guard |
+|---|---|
+| `/api/platform/plans*`, `/api/platform/subscriptions*` | `requirePlatformPermission()` |
+| `/api/my/subscription`, `/api/my/entitlements` | `branches.view` — **read only** |
+
+`platform.billing.view` / `.manage` are split so support can see which plan a
+caller is on without being able to move them. **A tenant has no write surface
+over its own subscription anywhere in P2C** — self-service billing is a
+commercial design that does not exist yet.
+
+### Migration
+
+`migrate:subscriptions` (+ `:dry`). Idempotent, dry-runnable, **never
+overwrites** an existing subscription, aborts rather than inventing a plan, and
+does not backdate `startDate` (which would fabricate a billing relationship).
+Defaults to `starter`/`trialing` — the least-privileged, non-paying option.
+
+Deliberately **excluded from `OPERATIONAL_MIGRATIONS`**: assigning commercial
+standing to every tenant must not happen because somebody restarted a
+container. Same precedent as `tenantBackfill.js`.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -510,7 +725,7 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 
 ---
 
-## 8. Honest limitations after P1 / P2A / P2B
+## 8. Honest limitations after P1 / P2A / P2B / P2C
 
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
@@ -520,7 +735,21 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
   admin workspace. What it still does NOT do: no platform-side password reset,
   no operator MFA, no IP allowlisting for the platform surface, no session
   listing per operator, and no email notification when authority changes.
-- **No subscriptions, plans, feature flags, or tenant self-signup.** P2E–P2H.
+- **Subscriptions, plans and entitlements exist (P2C)**, but: **no payment
+  gateway** — no charge is ever taken and no gateway transaction is fabricated;
+  no invoices, no dunning, no proration, no tax on subscription fees; no tenant
+  self-service billing; `past_due` is set only by hand.
+- **Limit enforcement covers four representative resources** (users, branches,
+  menu items, tables). Every other resource is unmetered until a later phase
+  applies the same central mechanism.
+- **Feature entitlements are resolvable but only partly enforced.** The
+  resolver reports all 15 keys; individual feature gates are added as each
+  surface is wired up.
+- **The entitlement cache is per-process with a 30s TTL.** A missed
+  invalidation self-heals within 30 seconds; across instances a plan change can
+  take that long to be seen everywhere.
+- **No feature flags beyond plan entitlements, no branding, no tenant
+  self-signup.** P2D–P2H.
 - **The first operator still requires shell access** (`scripts/platform-admin.js`).
   That is the design, not a gap — but it means platform bootstrap cannot be
   performed by anyone without server access.

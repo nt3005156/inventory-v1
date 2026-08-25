@@ -9,6 +9,7 @@ import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrder
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent, publishOrderEvent} from '../services/realtime.js';
 import {fail as safeFail} from '../services/httpErrors.js';
+import {assertTableCreationAllowed} from '../services/tenantLimits.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -115,6 +116,11 @@ r.post('/tables', requirePermission('tables.configure'), async (req, res) => {
       name: {$regex: `^${x.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i'}
     });
     if (dup) throw Object.assign(new Error('Table name already exists at this branch'), {status: 409});
+    // P2C — plan limit, checked immediately before the insert so a refusal
+    // cannot leave a half-created table. The tenant is resolved from the
+    // branch, which `assertTableBranchAccess` has already proven belongs to
+    // the caller.
+    await assertTableCreationAllowed(x.branch);
     const table = await RestaurantTable.create({
       ...x, area: normalizeArea(x.area), status: x.status || 'available', active: true
     });

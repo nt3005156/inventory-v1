@@ -11,6 +11,7 @@ import notificationsRouter from '../src/routes/notifications.js';
 import onboardingRouter from '../src/routes/onboarding.js';
 import tenantsRouter from '../src/routes/tenants.js';
 import platformRouter from '../src/routes/platform.js';
+import subscriptionsRouter from '../src/routes/subscriptions.js';
 import supplierCatalog from '../src/routes/supplierCatalog.js';
 import ingredientsRouter from '../src/routes/ingredients.js';
 import recipesRouter from '../src/routes/recipes.js';
@@ -78,6 +79,7 @@ export async function startTestApp() {
     app.use('/api', deliveriesRouter);
     app.use('/api', tenantsRouter);
     app.use('/api', platformRouter);
+    app.use('/api', subscriptionsRouter);
     app.use('/api', onboardingRouter);
     app.use('/api', rbacRouter);
     app.use('/api', auditRouter);

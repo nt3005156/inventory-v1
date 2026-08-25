@@ -6,6 +6,8 @@ import { Branch, InventoryBalance } from '../models/operations.js';
 import { userRestaurantContext } from './supplierCatalog.js';
 import { convertQuantity, INGREDIENT_UNITS } from './ingredients.js';
 import { resolveStation } from './stations.js';
+import {assertWithinLimit} from './entitlements.js';
+import {getMenuItemUsage} from './usage.js';
 
 const clean = v => String(v ?? '').trim();
 function httpError(msg, status=400){ const e=new Error(msg); e.status=status; return e; }
@@ -422,6 +424,13 @@ export async function createMenuItem({ input, user, principal }){
   const normalizedModifierGroups = normalizeModifierGroups(input.modifierGroups);
   await assertModifierIngredientsOwned(normalizedModifierGroups, restaurantId);
   assertCapability(user, principal, 'menu.manage', 'Only owner/manager can create menu items');
+  /**
+   * P2C — plan limit on menu size. Service layer, so every caller of
+   * `createMenuItem()` is covered rather than only the HTTP route.
+   */
+  await assertWithinLimit(restaurantId, 'maxMenuItems', await getMenuItemUsage(restaurantId), {
+    label: 'menu items'
+  });
   const name = clean(input.name);
   if(!name || name.length<2) throw httpError('Menu name must be at least 2 characters',400);
   if(name.length>120) throw httpError('Menu name too long',400);

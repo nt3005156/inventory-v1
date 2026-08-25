@@ -56,6 +56,11 @@ export const PLATFORM_PERMISSIONS = Object.freeze([
   // Oversight.
   'platform.audit.view',
   'platform.dashboard.view',
+  // P2C — commercial administration. Split view/manage because a support
+  // agent must be able to SEE which plan a caller is on without being able to
+  // move them onto a different one.
+  'platform.billing.view',
+  'platform.billing.manage',
   // The most dangerous capability on the platform: minting other operators.
   'platform.admins.manage'
 ]);
@@ -102,7 +107,9 @@ export const PLATFORM_ROLES = Object.freeze({
       'platform.restaurants.view',
       'platform.users.view',
       'platform.audit.view',
-      'platform.dashboard.view'
+      'platform.dashboard.view',
+      // Support answers "what plan am I on?" without being able to change it.
+      'platform.billing.view'
     ])
   }),
   platform_admin: Object.freeze({
@@ -119,7 +126,9 @@ export const PLATFORM_ROLES = Object.freeze({
       'platform.users.view',
       'platform.users.manage',
       'platform.audit.view',
-      'platform.dashboard.view'
+      'platform.dashboard.view',
+      'platform.billing.view',
+      'platform.billing.manage'
     ])
   }),
   super_admin: Object.freeze({
