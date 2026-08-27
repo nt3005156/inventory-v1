@@ -193,6 +193,78 @@ export async function withQuota({
   }
 }
 
+/**
+ * P2G.1 — reserve SEVERAL quotas as one all-or-nothing step.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Creating a staff account consumes two separate ceilings: the overall seat
+ * count (`maxUsers`) and the per-role count (`maxStaff`). A plan may sell
+ * "10 users, of whom 5 may be staff", so both have to hold.
+ *
+ * `withQuota()` reserves exactly one resource. Calling it twice in sequence is
+ * NOT equivalent: if the second reservation is refused, the first has already
+ * been consumed, and the caller has leaked a seat that nothing releases until
+ * the next reconciliation. Under a burst of concurrent creates that leak is
+ * the difference between a plan limit and a suggestion.
+ *
+ * So the reservations are taken in order and, the moment one is refused, every
+ * reservation already taken in this call is handed back before the refusal is
+ * rethrown. The caller either holds all of them or none.
+ *
+ * WHY NOT A TRANSACTION
+ * ---------------------
+ * Each reservation is already a single-document atomic conditional write, and
+ * they touch different documents. Wrapping them in a multi-document
+ * transaction would serialise every seat creation on the platform through the
+ * transaction machinery to buy a guarantee that compensating release already
+ * provides. The failure mode without a transaction is a briefly-held
+ * reservation that is then released — which is exactly what the code does
+ * explicitly, and what reconciliation would repair anyway.
+ *
+ * DELIBERATELY NOT CHANGING `withQuota`/`reserveQuota`. Station creation and
+ * the branch/table/customer paths already work and are covered by P2E tests;
+ * this is additive so none of their behaviour moves.
+ */
+export async function withCompoundQuota(reservations, create) {
+  const taken = [];
+
+  /** Hand back everything reserved so far. Best-effort, never throws. */
+  const unwind = async () => {
+    for (const held of taken.reverse()) {
+      await releaseQuota({
+        restaurantId: held.restaurantId, resource: held.resource, adding: held.adding ?? 1
+      });
+    }
+  };
+
+  for (const spec of reservations) {
+    try {
+      const reservation = await reserveQuota(spec);
+      // An unlimited resource writes no counter, so there is nothing to give
+      // back and it must not be added to the unwind list.
+      if (!reservation.unlimited) {
+        taken.push({
+          restaurantId: spec.restaurantId, resource: spec.resource, adding: spec.adding ?? 1
+        });
+      }
+    } catch (error) {
+      // THE POINT OF THIS FUNCTION: a later refusal must not leave an earlier
+      // reservation consumed.
+      await unwind();
+      throw error;
+    }
+  }
+
+  try {
+    return await create();
+  } catch (error) {
+    // The create itself failed after every reservation succeeded.
+    await unwind();
+    throw error;
+  }
+}
+
 /** Test/ops seam: read a counter without mutating it. */
 export async function readQuotaCounter(restaurantId, resource) {
   const row = await ResourceCounter.findOne({

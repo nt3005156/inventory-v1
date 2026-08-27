@@ -19,7 +19,8 @@ import {Delivery} from '../models/operations.js';
 import {assertTenantBranchAccess} from './kitchen.js';
 import {userRestaurantContext} from './supplierCatalog.js';
 import {revokeUserSessions} from './sessions.js';
-import {assertWithinLimit} from './entitlements.js';
+import {billingEnforcementActive, getLimit} from './entitlements.js';
+import {withCompoundQuota} from './quotaGuard.js';
 import {getUserUsage} from './usage.js';
 
 const clean = value => String(value ?? '').trim();
@@ -146,14 +147,32 @@ export async function createStaffAccount({user, input}) {
    * `POST /accounts` both land here, and a route-level check would have to be
    * duplicated in both and would be missed by any future third caller.
    */
-  const seats = await getUserUsage(restaurantId);
-  await assertWithinLimit(restaurantId, 'maxUsers', seats.total, {label: 'user accounts'});
   const roleLimitKey = {manager: 'maxManagers', staff: 'maxStaff', rider: 'maxRiders'}[role];
-  if (roleLimitKey) {
-    await assertWithinLimit(restaurantId, roleLimitKey, seats[role] || 0, {label: `${role} accounts`});
-  }
 
-  const created = await User.create({
+  /**
+   * P2G.1 — ATOMIC seat reservation, replacing a measured race.
+   *
+   * The previous code read the seat counts, compared them to the plan, and
+   * then inserted. Correct sequentially, defenceless in parallel — probed
+   * against a two-seat plan:
+   *
+   *     limit maxUsers = 2, one owner already present
+   *     6 concurrent staff creates -> 6 fulfilled, 7 users exist   BYPASSED
+   *
+   * Every request read the same seat count, every one passed the check, every
+   * one inserted. A tenant on a two-seat plan could hold as many accounts as
+   * they could open tabs.
+   *
+   * Now each ceiling is a single-document conditional write, and a staff
+   * account takes BOTH `maxUsers` and `maxStaff` as one all-or-nothing step —
+   * `withCompoundQuota()` releases whatever it already holds if the second is
+   * refused, so a rejected create cannot leak a seat.
+   *
+   * `billingEnforcementActive()` is honoured for the same reason P2C added it:
+   * a deployment with no plan catalogue must behave exactly as it did before,
+   * or upgrading starts refusing accounts on a platform that never sold seats.
+   */
+  const insert = async () => User.create({
     name: clean(input.name),
     email,
     password: await bcrypt.hash(password, 12),
@@ -177,6 +196,35 @@ export async function createStaffAccount({user, input}) {
       }
       : {})
   });
+
+  /**
+   * Reservations, in a deliberate order: the OVERALL seat first, then the
+   * per-role seat. If the role ceiling refuses, the overall reservation is
+   * released before the error escapes.
+   *
+   * A role with no configured ceiling (owner) reserves only `maxUsers`.
+   */
+  const reservations = [{
+    restaurantId,
+    resource: 'users',
+    limit: await getLimit(restaurantId, 'maxUsers'),
+    countActual: async () => (await getUserUsage(restaurantId)).total,
+    label: 'user accounts'
+  }];
+  if (roleLimitKey) {
+    reservations.push({
+      restaurantId,
+      // Counter scoped per role, so staff and manager seats cannot contend.
+      resource: `users:${role}`,
+      limit: await getLimit(restaurantId, roleLimitKey),
+      countActual: async () => (await getUserUsage(restaurantId))[role] || 0,
+      label: `${role} accounts`
+    });
+  }
+
+  const created = await billingEnforcementActive()
+    ? await withCompoundQuota(reservations, insert)
+    : await insert();
 
   await Audit.create({
     entity: 'user', entityId: created._id, branch: created.branch,
