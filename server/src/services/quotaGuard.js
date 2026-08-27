@@ -96,7 +96,7 @@ function httpError(message, status = 400, extra = {}) {
  * Returns `{reserved: true, count}` or throws 402.
  */
 export async function reserveQuota({
-  restaurantId, resource, limit, countActual, label, adding = 1
+  restaurantId, resource, limit, countActual, label, adding = 1, session = null
 }) {
   // No ceiling to enforce: skip the counter entirely rather than maintaining
   // a document nothing reads.
@@ -118,7 +118,7 @@ export async function reserveQuota({
     // `$max` so a concurrent reservation that has already incremented past
     // the observed count is never rolled backwards by this reconciliation.
     {$max: {count: actual}, $setOnInsert: scope, $set: {reconciledAt: new Date()}},
-    {upsert: true}
+    {upsert: true, session}
   );
 
   /**
@@ -129,11 +129,11 @@ export async function reserveQuota({
   const updated = await ResourceCounter.findOneAndUpdate(
     {...scope, count: {$lte: limit - adding}},
     {$inc: {count: adding}},
-    {new: true}
+    {new: true, session}
   );
 
   if (!updated) {
-    const current = await ResourceCounter.findOne(scope).lean();
+    const current = await ResourceCounter.findOne(scope).session(session).lean();
     throw httpError(
       `Your plan allows ${limit} ${label || resource} (${current?.count ?? actual} in use). `
       + 'Upgrade the plan to add more.',
@@ -154,7 +154,7 @@ export async function reserveQuota({
  * reservation reconciles against the real count. A release that drove the
  * counter negative would not be.
  */
-export async function releaseQuota({restaurantId, resource, adding = 1}) {
+export async function releaseQuota({restaurantId, resource, adding = 1, session = null}) {
   try {
     await ResourceCounter.updateOne(
       {
@@ -162,7 +162,8 @@ export async function releaseQuota({restaurantId, resource, adding = 1}) {
         resource,
         count: {$gte: adding}
       },
-      {$inc: {count: -adding}}
+      {$inc: {count: -adding}},
+      {session}
     );
   } catch (error) {
     // Never let bookkeeping fail the caller's error path.
@@ -178,15 +179,29 @@ export async function releaseQuota({restaurantId, resource, adding = 1}) {
  * next reconciliation.
  */
 export async function withQuota({
-  restaurantId, resource, limit, countActual, label, adding = 1
+  restaurantId, resource, limit, countActual, label, adding = 1, session = null
 }, create) {
   const reservation = await reserveQuota({
-    restaurantId, resource, limit, countActual, label, adding
+    restaurantId, resource, limit, countActual, label, adding, session
   });
   try {
     return await create();
   } catch (error) {
-    if (!reservation.unlimited) {
+    /**
+     * P2G.3 — DO NOT COMPENSATE A RESERVATION THAT THE TRANSACTION WILL UNDO.
+     *
+     * When a `session` is supplied the `$inc` above is part of the caller's
+     * transaction. If the create then throws, the transaction aborts and
+     * MongoDB rolls the increment back for us. Issuing an explicit release as
+     * well would decrement a second time — the counter would end up BELOW
+     * reality, and reconciliation only ever raises a counter (`$max`), so that
+     * drift would not self-heal. Measured before this branch existed: a
+     * failed station create left the counter one lower than the true count.
+     *
+     * The sessionless paths (branches, tables, customers, menu items) still
+     * compensate explicitly, because nothing else will.
+     */
+    if (!reservation.unlimited && !session) {
       await releaseQuota({restaurantId, resource, adding});
     }
     throw error;

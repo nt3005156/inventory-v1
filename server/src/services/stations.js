@@ -1,5 +1,8 @@
 import mongoose from 'mongoose';
 import {KitchenStation} from '../models/index.js';
+import {billingEnforcementActive, getLimit} from './entitlements.js';
+import {releaseQuota, withQuota} from './quotaGuard.js';
+import {getStationUsage} from './usage.js';
 
 // Phase 5C — kitchen stations.
 //
@@ -57,7 +60,12 @@ export async function listStations({restaurantId, includeInactive = false, sessi
     return includeInactive ? existing : existing.filter(s => s.active !== false);
   }
   const seeded = await KitchenStation.insertMany(
-    BUILT_IN_STATIONS.map(s => ({...s, restaurant: restaurantId, isDefault: Boolean(s.isDefault)})),
+    // P2G.3: `builtIn` marks these as free of `maxStations`. Persisted at seed
+    // time because a built-in can later be renamed, after which nothing else
+    // could tell it apart from a station the tenant created.
+    BUILT_IN_STATIONS.map(s => ({
+      ...s, restaurant: restaurantId, isDefault: Boolean(s.isDefault), builtIn: true
+    })),
     {session: session || undefined}
   );
   return seeded.sort((a, b) => a.sortOrder - b.sortOrder);
@@ -129,15 +137,64 @@ function normalizeInput(input = {}) {
   };
 }
 
+/**
+ * P2G.3 — create a station under an ATOMIC quota reservation.
+ *
+ * THE DEFECT THIS CLOSES, MEASURED. `maxStations` had no usage counter at all
+ * and was enforced nowhere: with a ceiling of 2, four sequential creates all
+ * returned 201, and six concurrent creates produced six stations on every one
+ * of eight trials (6,6,6,6,6,6,6,6).
+ *
+ * THE RESERVATION JOINS THE CALLER'S TRANSACTION.
+ * ----------------------------------------------
+ * The route already wraps station creation in `session.withTransaction()`, and
+ * the brief is explicit that this must not be weakened. So rather than
+ * reserving outside the transaction, `reserveQuota` now accepts a `session`
+ * and the counter increment becomes part of the same atomic unit as the insert
+ * and its audit row. Two consequences, both wanted:
+ *
+ *   station insert fails  -> the transaction aborts and the increment is
+ *                            rolled back WITH it. No leaked seat, and no
+ *                            compensating release that would double-decrement
+ *                            (see the `!session` guard in `withQuota`).
+ *   reservation refused   -> a 402 is thrown before the insert, the
+ *                            transaction never commits, no station is written.
+ *
+ * That is why the single-document conditional write still works here: it is
+ * atomic on its own, and the transaction only decides whether it survives.
+ *
+ * `withQuota`, not `withCompoundQuota`: a station consumes exactly one
+ * ceiling. Same reasoning as P2G.2.
+ */
 export async function createStation({restaurantId, input, user, session}) {
   const data = normalizeInput(input);
+  // Seeds the built-ins on first use. Deliberately BEFORE the reservation:
+  // the seeded rows are `builtIn` and free, so this cannot consume the seat
+  // the tenant is about to reserve.
   await listStations({restaurantId, includeInactive: true, session});
   const clash = await KitchenStation.findOne({restaurant: restaurantId, code: data.code}).session(session || null);
   if (clash) throw httpError(`Station "${data.code}" already exists`, 409);
-  const [created] = await KitchenStation.create([{
-    ...data, restaurant: restaurantId, isDefault: false, createdBy: user?.id
-  }], {session: session || undefined});
-  return created;
+
+  const insert = async () => {
+    const [created] = await KitchenStation.create([{
+      ...data, restaurant: restaurantId, isDefault: false, builtIn: false, createdBy: user?.id
+    }], {session: session || undefined});
+    return created;
+  };
+
+  // Gated exactly as every other quota is: a deployment with no plan
+  // catalogue must behave as it did before, or a restart refuses every
+  // station on the platform.
+  if (!await billingEnforcementActive()) return insert();
+
+  return withQuota({
+    restaurantId,
+    resource: 'stations',
+    limit: await getLimit(restaurantId, 'maxStations'),
+    countActual: () => getStationUsage(restaurantId, {session}),
+    label: 'kitchen stations',
+    session: session || null
+  }, insert);
 }
 
 export async function updateStation({restaurantId, stationId, patch, user, session}) {
@@ -158,15 +215,63 @@ export async function updateStation({restaurantId, stationId, patch, user, sessi
     station.categories = [...new Set((patch.categories || []).map(stationCode).filter(Boolean))];
   }
   if (patch.sortOrder !== undefined) station.sortOrder = Number(patch.sortOrder) || 0;
+  /**
+   * P2G.3 — toggling `active` moves a seat, so it goes through the quota.
+   *
+   * Deactivating frees the seat; REACTIVATING must therefore buy it back, or a
+   * tenant on a ceiling of 2 could deactivate, create a replacement, reactivate
+   * the old one and hold three. Reactivation is a create in disguise and is
+   * gated like one.
+   *
+   * Built-ins are free in both directions, so they never touch the counter.
+   */
+  const wasActive = station.active !== false;
+  let reactivating = false;
   if (patch.active !== undefined) {
     // The default station is where unrouted items land, so it must stay live.
     if (patch.active === false && station.isDefault) {
       throw httpError('The default station cannot be deactivated', 409);
     }
     station.active = Boolean(patch.active);
+    reactivating = !wasActive && station.active === true;
   }
   station.updatedBy = user?.id;
-  await station.save({session: session || undefined});
+
+  /**
+   * `=== false`, not `!== true`. A pre-P2G.3 row carries no flag at all, and
+   * `!== true` would treat it as billable — releasing a seat it never held
+   * (driving the counter below reality) or charging for reactivating it. Only
+   * a station explicitly written as `builtIn: false` by `createStation()`
+   * participates in the quota. Same rule as `getStationUsage()`.
+   */
+  const countsAgainstQuota = station.builtIn === false && await billingEnforcementActive();
+  const deactivating = wasActive && station.active === false;
+
+  const persist = async () => {
+    await station.save({session: session || undefined});
+    return station;
+  };
+
+  if (countsAgainstQuota && reactivating) {
+    // `getStationUsage` does not yet see this row (still inactive in the
+    // database), so reserving one seat is exactly right.
+    return withQuota({
+      restaurantId,
+      resource: 'stations',
+      limit: await getLimit(restaurantId, 'maxStations'),
+      countActual: () => getStationUsage(restaurantId, {session}),
+      label: 'kitchen stations',
+      session: session || null
+    }, persist);
+  }
+
+  await persist();
+  if (countsAgainstQuota && deactivating) {
+    // AFTER the save, and inside the caller's transaction: if the save had
+    // failed the seat was never surrendered, and if the transaction later
+    // aborts this decrement is rolled back with it.
+    await releaseQuota({restaurantId, resource: 'stations', session: session || null});
+  }
   return station;
 }
 
@@ -193,7 +298,24 @@ export async function deleteStation({restaurantId, stationId, session}) {
   if (!station) throw httpError('Station not found', 404);
   if (station.isDefault) throw httpError('The default station cannot be removed', 409);
   // Deactivated rather than deleted: historical order lines still name it.
+  const wasActive = station.active !== false;
   station.active = false;
   await station.save({session: session || undefined});
+
+  /**
+   * P2G.3 — retiring a station hands its seat back.
+   *
+   * Guarded on `wasActive` so deleting an already-inactive station twice
+   * cannot release two seats for one row — that would drive the counter below
+   * reality, and reconciliation only raises it (`$max`).
+   *
+   * A caveat this does NOT solve, and should not pretend to: the unique
+   * `{restaurant, code}` index still holds the retired code, so the freed seat
+   * can only be spent on a DIFFERENT code until a real delete or code-reuse
+   * path exists. That is existing behaviour and out of scope here.
+   */
+  if (wasActive && station.builtIn === false && await billingEnforcementActive()) {
+    await releaseQuota({restaurantId, resource: 'stations', session: session || null});
+  }
   return station;
 }

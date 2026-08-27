@@ -26,7 +26,7 @@
  * tenant's branches first rather than guessing.
  */
 import mongoose from 'mongoose';
-import {MenuItem, User} from '../models/index.js';
+import {KitchenStation, MenuItem, User} from '../models/index.js';
 import {Branch, Customer, Order, RestaurantTable} from '../models/operations.js';
 
 const asId = value => new mongoose.Types.ObjectId(String(value));
@@ -74,6 +74,43 @@ export async function getTableUsage(restaurantId) {
   const branches = await Branch.find({restaurant: asId(restaurantId)}).select('_id').lean();
   if (!branches.length) return 0;
   return RestaurantTable.countDocuments({branch: {$in: branches.map(row => row._id)}});
+}
+
+/**
+ * P2G.3 — kitchen stations a tenant CREATED, which is what `maxStations` sells.
+ *
+ * TWO EXCLUSIONS, both deliberate.
+ *
+ * `builtIn: false` — eleven built-in stations are auto-seeded per restaurant
+ * on first read. Starter allows 2 and professional 8, so counting the seeded
+ * set would put every tenant on those plans permanently over quota without
+ * them doing anything. The flag is persisted, not derived from the code,
+ * because a built-in can be renamed into an arbitrary code (measured).
+ *
+ * MATCHING `false` EXPLICITLY, NOT `{$ne: true}`. My first version used
+ * `{$ne: true}` and its own comment claimed that read pre-P2G.3 rows (which
+ * carry no flag) as built-in. It does the OPPOSITE: in MongoDB a missing field
+ * satisfies `$ne: true`, so every legacy station was counted as billable —
+ * exactly the "existing tenants instantly over quota" outcome this exclusion
+ * exists to prevent. The test caught it. Requiring `false` means a row must
+ * have been explicitly written by `createStation()` to cost anything.
+ *
+ * `active: {$ne: false}` — deactivating a station (what DELETE actually does;
+ * the row is kept because historical order lines still name it) hands the seat
+ * back, so a kitchen that retires a station can create a replacement.
+ *
+ * NOTE the asymmetry with `getUserUsage()`, which counts deactivated accounts
+ * on purpose. That is not an inconsistency: a disabled user still holds a
+ * login and cycling `active` would otherwise mint unlimited accounts, whereas
+ * a disabled station is inert and its code cannot be reused anyway (the unique
+ * `{restaurant, code}` index still holds it).
+ */
+export async function getStationUsage(restaurantId, {session} = {}) {
+  return KitchenStation.countDocuments({
+    restaurant: asId(restaurantId),
+    builtIn: false,
+    active: {$ne: false}
+  }).session(session || null);
 }
 
 /** Customers. P1 gave Customer a direct `restaurant`. */
@@ -139,15 +176,17 @@ export function monthWindow(now = new Date(), offsetMinutes = 345) {
  * path, so the extra round trips are acceptable in exchange for one call site.
  */
 export async function getUsageSummary(restaurantId) {
-  const [branches, users, menuItems, tables, customers, orders, onlineOrders] = await Promise.all([
-    getBranchUsage(restaurantId),
-    getUserUsage(restaurantId),
-    getMenuItemUsage(restaurantId),
-    getTableUsage(restaurantId),
-    getCustomerUsage(restaurantId),
-    getOrderUsage(restaurantId),
-    getOnlineOrderUsage(restaurantId)
-  ]);
+  const [branches, users, menuItems, tables, customers, orders, onlineOrders, stations]
+    = await Promise.all([
+      getBranchUsage(restaurantId),
+      getUserUsage(restaurantId),
+      getMenuItemUsage(restaurantId),
+      getTableUsage(restaurantId),
+      getCustomerUsage(restaurantId),
+      getOrderUsage(restaurantId),
+      getOnlineOrderUsage(restaurantId),
+      getStationUsage(restaurantId)
+    ]);
   return {
     maxBranches: branches,
     maxUsers: users.total,
@@ -159,8 +198,8 @@ export async function getUsageSummary(restaurantId) {
     maxCustomers: customers,
     maxMonthlyOrders: orders,
     maxMonthlyOnlineOrders: onlineOrders,
-    // Not yet metered. Reported as null rather than 0 so a screen does not
-    // claim "0 of 5 used" for something nothing counts.
-    maxStations: null
+    // P2G.3 — now metered. Counts tenant-created, active stations only; the
+    // auto-seeded built-ins are free and do not appear here.
+    maxStations: stations
   };
 }

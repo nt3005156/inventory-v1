@@ -460,6 +460,25 @@ const kitchenStationSchema=new Schema({
   sortOrder:{type:Number,default:0},
   // Exactly one station per restaurant catches otherwise unrouted items.
   isDefault:{type:Boolean,default:false},
+  /**
+   * P2G.3 — was this row auto-seeded from BUILT_IN_STATIONS, or created by the
+   * tenant?
+   *
+   * `maxStations` counts only stations a tenant CREATED. Eleven built-ins are
+   * seeded lazily per restaurant, which is more than the starter (2) and
+   * professional (8) ceilings allow, so counting them would put every existing
+   * tenant instantly over quota.
+   *
+   * This has to be PERSISTED rather than derived from the code, because a
+   * built-in can be renamed: `PATCH {code:'renamed-grill'}` on the seeded
+   * `grill` succeeds today (measured), after which no code list can tell the
+   * two apart. Immutable so a rename can never flip a station's billing class.
+   *
+   * Absent on rows written before P2G.3. `{$ne: true}` therefore reads those
+   * legacy rows as built-in — the safe direction, since it grants seats rather
+   * than retroactively refusing tenants.
+   */
+  builtIn:{type:Boolean,default:false,immutable:true},
   active:{type:Boolean,default:true,index:true},
   createdBy:{type:Schema.Types.ObjectId,ref:'User'},
   updatedBy:{type:Schema.Types.ObjectId,ref:'User'}
