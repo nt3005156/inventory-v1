@@ -685,6 +685,29 @@ Order.schema.index({customer:1,createdAt:-1},{name:'order_customer_recent',spars
 // so a double-click cannot win a race between two application-level checks.
 Order.schema.index({publicRequestKey:1},{unique:true,name:'order_public_request_key',partialFilterExpression:{publicRequestKey:{$type:'string'}}});
 /**
+ * P2G.4 — the monthly quota count.
+ *
+ * MEASURED BEFORE THIS INDEX. `countDocuments({restaurant, createdAt:{range}})`
+ * won with `IXSCAN restaurant_1`, then FETCHED every one of the tenant's
+ * orders and applied the date predicate in memory. That is fine at four
+ * documents and ruinous at a year of trading: the cost of counting one month
+ * grows with the tenant's ENTIRE history, on a path the enforcement phase will
+ * put in front of order creation.
+ *
+ * `{restaurant, createdAt}` lets the range be satisfied by index bounds rather
+ * than a filter, so keys examined tracks the month rather than the lifetime.
+ *
+ * WHY `status` IS NOT IN THE KEY. The status predicate is `$nin: ['cancelled']`
+ * — a negation, which cannot produce tight index bounds. Appending it would
+ * add a field to every key for no seek benefit. Left out deliberately, and the
+ * plan is asserted rather than assumed: the count is expected to be an
+ * IXSCAN over this index with the status applied as a residual filter.
+ *
+ * `createdAt` ascending: a range scan reads equally well in either direction,
+ * and ascending matches how the boundary is expressed.
+ */
+Order.schema.index({restaurant:1,createdAt:1},{name:'order_restaurant_created'});
+/**
  * 11F: order payments carry an idempotency key.
  *
  * A double-clicked "Pay" button banked the amount twice — verified against the

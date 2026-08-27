@@ -27,7 +27,7 @@
  */
 import mongoose from 'mongoose';
 import {KitchenStation, MenuItem, User} from '../models/index.js';
-import {Branch, Customer, Order, RestaurantTable} from '../models/operations.js';
+import {Branch, Customer, Order, Restaurant, RestaurantTable} from '../models/operations.js';
 
 const asId = value => new mongoose.Types.ObjectId(String(value));
 
@@ -119,19 +119,75 @@ export async function getCustomerUsage(restaurantId) {
 }
 
 /**
- * Orders in the CURRENT calendar month.
+ * P2G.4 — WHICH ORDER STATUSES CONSUME MONTHLY QUOTA.
  *
- * Month boundaries are computed in the tenant's own timezone offset — Nepal is
- * UTC+05:45, so a naive UTC month boundary would count a 5:45am order on the
- * 1st into the previous month and make a monthly quota reset at the wrong
- * moment. `Order.restaurant` is direct since P1 and indexed, so this is a
- * two-field range count.
+ * The full enum on `Order.status` is:
+ *
+ *   draft, held, pending, confirmed, accepted, preparing, ready,
+ *   out_for_delivery, completed, cancelled, refunded
+ *
+ * No status is invented here; this is exactly that list, partitioned.
+ *
+ * EXCLUDED — `cancelled`. P2F measured cancelled orders counting against the
+ * monthly quota, which bills a tenant for work they did not do and, worse,
+ * lets a mis-keyed and immediately voided ticket eat a paid order slot. A
+ * cancelled order produced no revenue and reversed its inventory.
+ *
+ * INCLUDED — everything else, `refunded` deliberately among them. A refund is
+ * a completed transaction that was later reversed for the customer: the
+ * kitchen cooked it, the POS printed it, the platform carried it. Unlike a
+ * cancellation it reached `completed` first (`ALLOWED_TRANSITIONS.completed`
+ * is `['refunded']`, so `refunded` is only ever reachable from `completed`).
+ * Excluding it would also hand every tenant an unlimited-orders loophole:
+ * complete, refund, repeat.
+ *
+ * `draft` and `held` are counted too. They are real orders occupying real
+ * capacity, and a tenant that parked every ticket in `held` would otherwise
+ * pay for nothing. If that proves commercially wrong it is a pricing decision,
+ * not a counting bug, and it belongs in a later phase with its own evidence.
+ *
+ * Frozen and exported so the enforcement phase (P2G.5) cannot drift to a
+ * different definition of "countable" than the one metered here.
  */
-export async function getOrderUsage(restaurantId, {now = new Date(), offsetMinutes = 345} = {}) {
-  const {start, end} = monthWindow(now, offsetMinutes);
+export const QUOTA_EXCLUDED_ORDER_STATUSES = Object.freeze(['cancelled']);
+
+export const QUOTA_COUNTABLE_ORDER_STATUSES = Object.freeze([
+  'draft', 'held', 'pending', 'confirmed', 'accepted', 'preparing',
+  'ready', 'out_for_delivery', 'completed', 'refunded'
+]);
+
+/**
+ * The status predicate used by every monthly count.
+ *
+ * `$nin` rather than `$in`, deliberately. A status added to the enum in a
+ * later phase then counts by DEFAULT — the safe direction commercially, and it
+ * fails visibly (a tenant reports being over) rather than silently under-
+ * billing forever. It also keeps the index prefix usable.
+ */
+const countableStatusFilter = {status: {$nin: QUOTA_EXCLUDED_ORDER_STATUSES}};
+
+/**
+ * Orders in the CURRENT calendar month, in the TENANT'S OWN timezone.
+ *
+ * Two defects from the P2F audit are fixed here, both measured:
+ *
+ *   1. the month boundary was hardcoded to `offsetMinutes = 345` (Kathmandu)
+ *      while `Restaurant.timezone` already existed and was ignored. A tenant
+ *      in `America/New_York` had their billing month roll over at 20:15 the
+ *      previous day, local.
+ *   2. cancelled orders counted. A dataset of two live and two cancelled
+ *      orders reported 4.
+ *
+ * `now` and `timezone` stay injectable so the boundary can be tested without
+ * waiting for a month to turn over.
+ */
+export async function getOrderUsage(restaurantId, {now = new Date(), timezone} = {}) {
+  const zone = timezone || await restaurantTimezone(restaurantId);
+  const {start, end} = monthWindow(now, zone);
   return Order.countDocuments({
     restaurant: asId(restaurantId),
-    createdAt: {$gte: start, $lt: end}
+    createdAt: {$gte: start, $lt: end},
+    ...countableStatusFilter
   });
 }
 
@@ -144,13 +200,115 @@ export async function getOrderUsage(restaurantId, {now = new Date(), offsetMinut
  * filter would have been silently dropped and this would have counted every
  * order as online. Checked against the schema rather than assumed.
  */
-export async function getOnlineOrderUsage(restaurantId, {now = new Date(), offsetMinutes = 345} = {}) {
-  const {start, end} = monthWindow(now, offsetMinutes);
+export async function getOnlineOrderUsage(restaurantId, {now = new Date(), timezone} = {}) {
+  const zone = timezone || await restaurantTimezone(restaurantId);
+  const {start, end} = monthWindow(now, zone);
   return Order.countDocuments({
     restaurant: asId(restaurantId),
     source: 'online',
-    createdAt: {$gte: start, $lt: end}
+    createdAt: {$gte: start, $lt: end},
+    // P2G.4 — the same exclusion as the overall count. A cancelled storefront
+    // order must not consume the online allowance either.
+    ...countableStatusFilter
   });
+}
+
+export const DEFAULT_TIMEZONE = 'Asia/Kathmandu';
+
+/**
+ * The tenant's IANA timezone, falling back to Kathmandu.
+ *
+ * The fallback is the schema default, so a restaurant that predates the field
+ * or carries a blank keeps exactly the behaviour it had before P2G.4 rather
+ * than silently jumping to UTC and shifting its billing month by 5h45m.
+ */
+export async function restaurantTimezone(restaurantId) {
+  if (!restaurantId || !mongoose.isValidObjectId(String(restaurantId))) return DEFAULT_TIMEZONE;
+  const row = await Restaurant.findById(asId(restaurantId)).select('timezone').lean();
+  return normalizeTimezone(row?.timezone);
+}
+
+/**
+ * A timezone this runtime can actually resolve.
+ *
+ * An unusable value must not throw on the billing path — that would take the
+ * subscription screen down over a typo in a tenant record — so it degrades to
+ * the default. Verified that `Intl.DateTimeFormat` throws `RangeError` for an
+ * unknown zone rather than silently returning UTC.
+ */
+export function normalizeTimezone(timezone) {
+  const wanted = String(timezone || '').trim();
+  if (!wanted) return DEFAULT_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat('en-US', {timeZone: wanted});
+    return wanted;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
+/**
+ * The offset, in minutes east of UTC, that `timezone` was at the instant
+ * `date`.
+ *
+ * Computed from `Intl` rather than a stored number because the offset is NOT a
+ * property of a zone — it is a property of a zone AT A MOMENT.
+ * `America/New_York` is -300 in January and -240 in August. The old
+ * `offsetMinutes = 345` constant could not express that at all.
+ *
+ * `formatToParts` with `timeZone` gives the wall-clock reading in that zone;
+ * treating those fields as if they were UTC and differencing against the true
+ * instant yields the offset. This is the standard technique and it needs no
+ * timezone database of our own — Node ships full ICU (verified: Kathmandu
+ * +5:45, Chatham +12:45, New York -4 in August).
+ */
+function offsetMinutesAt(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  }).formatToParts(date).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = Number(part.value);
+    return acc;
+  }, {});
+
+  const asUtc = Date.UTC(
+    parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second
+  );
+  // Whole minutes: every real zone offset is a multiple of a minute, and the
+  // seconds field is carried above only so the arithmetic cannot drift.
+  return Math.round((asUtc - date.getTime()) / 60_000);
+}
+
+/** The wall-clock calendar date in `timeZone` at instant `date`. */
+function localParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = Number(part.value);
+    return acc;
+  }, {});
+  return {year: parts.year, month: parts.month};
+}
+
+/**
+ * The UTC instant at which local midnight begins the given month in `timeZone`.
+ *
+ * TWO PASSES, and the second is not decoration. The offset that applies at a
+ * boundary can differ from the offset applying now — a tenant counting in
+ * August must use August's offset for the start of August, not today's. So the
+ * first pass guesses using the current offset, then the offset is re-read AT
+ * that guess and the instant recomputed. A third pass would only matter if a
+ * zone changed offset within the few hours around its own month boundary,
+ * which no real zone does (DST shifts happen mid-month or on a Sunday, never
+ * at 00:00 on the 1st in a way that is not already resolved by pass two).
+ */
+function startOfMonthUtc(year, month, timeZone) {
+  const naive = Date.UTC(year, month - 1, 1, 0, 0, 0);
+  const firstGuess = new Date(naive - offsetMinutesAt(new Date(naive), timeZone) * 60_000);
+  const settled = new Date(naive - offsetMinutesAt(firstGuess, timeZone) * 60_000);
+  return settled;
 }
 
 /**
@@ -158,15 +316,28 @@ export async function getOnlineOrderUsage(restaurantId, {now = new Date(), offse
  *
  * Exported for testing, because an off-by-one here silently mis-bills a whole
  * tenant for a whole month and is invisible until somebody complains.
+ *
+ * P2G.4: the second argument is now an IANA TIMEZONE NAME, not a fixed offset
+ * in minutes. The old signature `monthWindow(now, 345)` could only ever
+ * describe Kathmandu and was applied to every tenant regardless of
+ * `Restaurant.timezone`.
  */
-export function monthWindow(now = new Date(), offsetMinutes = 345) {
-  const shifted = new Date(now.getTime() + offsetMinutes * 60_000);
-  const startLocal = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1);
-  const endLocal = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 1);
-  return {
-    start: new Date(startLocal - offsetMinutes * 60_000),
-    end: new Date(endLocal - offsetMinutes * 60_000)
-  };
+export function monthWindow(now = new Date(), timezone = DEFAULT_TIMEZONE) {
+  const zone = normalizeTimezone(timezone);
+  const {year, month} = localParts(now, zone);
+  const start = startOfMonthUtc(year, month, zone);
+  /**
+   * The December branch is REDUNDANT and kept only for readability.
+   * `Date.UTC(2026, 12, 1)` already normalises to 2027-01-01, so
+   * `startOfMonthUtc(year, 13)` and `startOfMonthUtc(year + 1, 1)` are the
+   * same instant — proven, and the reason a mutant collapsing this to the
+   * single-expression form survives the suite. It is an equivalent mutant, not
+   * a coverage gap: no observable behaviour distinguishes them.
+   */
+  const end = month === 12
+    ? startOfMonthUtc(year + 1, 1, zone)
+    : startOfMonthUtc(year, month + 1, zone);
+  return {start, end};
 }
 
 /**
@@ -176,6 +347,11 @@ export function monthWindow(now = new Date(), offsetMinutes = 345) {
  * path, so the extra round trips are acceptable in exchange for one call site.
  */
 export async function getUsageSummary(restaurantId) {
+  // P2G.4 — resolved ONCE and passed down. Both monthly counts need the
+  // tenant's zone, and letting each fetch it would issue the same lookup twice
+  // and could, across a month boundary, use two different answers in one
+  // summary.
+  const timezone = await restaurantTimezone(restaurantId);
   const [branches, users, menuItems, tables, customers, orders, onlineOrders, stations]
     = await Promise.all([
       getBranchUsage(restaurantId),
@@ -183,8 +359,8 @@ export async function getUsageSummary(restaurantId) {
       getMenuItemUsage(restaurantId),
       getTableUsage(restaurantId),
       getCustomerUsage(restaurantId),
-      getOrderUsage(restaurantId),
-      getOnlineOrderUsage(restaurantId),
+      getOrderUsage(restaurantId, {timezone}),
+      getOnlineOrderUsage(restaurantId, {timezone}),
       getStationUsage(restaurantId)
     ]);
   return {
