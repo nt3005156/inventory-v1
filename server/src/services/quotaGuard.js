@@ -96,7 +96,8 @@ function httpError(message, status = 400, extra = {}) {
  * Returns `{reserved: true, count}` or throws 402.
  */
 export async function reserveQuota({
-  restaurantId, resource, limit, countActual, label, adding = 1, session = null
+  restaurantId, resource, limit, countActual, label, adding = 1, session = null,
+  reconcile = 'raise'
 }) {
   // No ceiling to enforce: skip the counter entirely rather than maintaining
   // a document nothing reads.
@@ -113,13 +114,36 @@ export async function reserveQuota({
    * admit or refuse the wrong number of creates.
    */
   const actual = Number(await countActual()) || 0;
-  await ResourceCounter.updateOne(
-    scope,
-    // `$max` so a concurrent reservation that has already incremented past
-    // the observed count is never rolled backwards by this reconciliation.
-    {$max: {count: actual}, $setOnInsert: scope, $set: {reconciledAt: new Date()}},
-    {upsert: true, session}
-  );
+
+  /**
+   * TWO RECONCILIATION MODES, because stocks and flows differ.
+   *
+   * `raise` (default, and what P2G.1–P2G.3 use) applies `$max`: the counter is
+   * only ever pulled UP to reality. That is essential for seats, menu items
+   * and stations, where a concurrent reservation may legitimately have
+   * incremented past the count we just observed and must not be rolled back.
+   *
+   * `sync` (P2G.5, monthly orders) applies `$set` when reality is LOWER.
+   * A monthly allowance is a flow whose usage can genuinely fall: cancelling
+   * an order removes it from the count, and the tenant should get that
+   * allowance back. Under `$max` the counter would stay at its high-water mark
+   * for the rest of the month, so a cancelled order silently kept consuming a
+   * slot. Measured: two orders on a ceiling of two, cancel one, real usage 1,
+   * counter still 2, next order refused.
+   *
+   * `sync` is only safe because the source of truth here is a COUNT of orders
+   * that already exist. The window between reading `actual` and the
+   * conditional `$inc` below can let a racing writer's increment be
+   * overwritten — but that writer's order is itself in the collection, so the
+   * next reservation's count includes it. The ceiling is still enforced by the
+   * conditional write; the risk is bounded to briefly under-counting during a
+   * burst, never over-admitting beyond `limit` at the moment of the write.
+   */
+  const reconciliation = reconcile === 'sync'
+    ? {$set: {count: actual, reconciledAt: new Date()}, $setOnInsert: scope}
+    : {$max: {count: actual}, $setOnInsert: scope, $set: {reconciledAt: new Date()}};
+
+  await ResourceCounter.updateOne(scope, reconciliation, {upsert: true, session});
 
   /**
    * THE ATOMIC STEP. `count: {$lt: limit}` is evaluated by MongoDB in the same
@@ -179,10 +203,11 @@ export async function releaseQuota({restaurantId, resource, adding = 1, session 
  * next reconciliation.
  */
 export async function withQuota({
-  restaurantId, resource, limit, countActual, label, adding = 1, session = null
+  restaurantId, resource, limit, countActual, label, adding = 1, session = null,
+  reconcile = 'raise'
 }, create) {
   const reservation = await reserveQuota({
-    restaurantId, resource, limit, countActual, label, adding, session
+    restaurantId, resource, limit, countActual, label, adding, session, reconcile
   });
   try {
     return await create();

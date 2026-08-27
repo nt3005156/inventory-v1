@@ -322,6 +322,21 @@ function startOfMonthUtc(year, month, timeZone) {
  * describe Kathmandu and was applied to every tenant regardless of
  * `Restaurant.timezone`.
  */
+/**
+ * P2G.5 — a stable `YYYY-MM` label for the tenant's CURRENT local month.
+ *
+ * The monthly quota counter is scoped by this, so the counter for September is
+ * a different document from August's and the allowance resets by construction
+ * rather than by a sweep job that has to run on time in every timezone.
+ *
+ * Derived from the same `localParts()` the window uses, so a label and a
+ * window can never disagree about which month it is.
+ */
+export function monthKey(now = new Date(), timezone = DEFAULT_TIMEZONE) {
+  const {year, month} = localParts(now, normalizeTimezone(timezone));
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
 export function monthWindow(now = new Date(), timezone = DEFAULT_TIMEZONE) {
   const zone = normalizeTimezone(timezone);
   const {year, month} = localParts(now, zone);

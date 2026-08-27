@@ -224,7 +224,7 @@ export async function resolveEntitlement(restaurantId, {fresh = false} = {}) {
     if (hit) return hit;
   }
 
-  const restaurant = await Restaurant.findById(restaurantId).select('status').lean();
+  const restaurant = await Restaurant.findById(restaurantId).select('status timezone').lean();
   if (!restaurant) {
     return remember(restaurantId, {...RESTRICTED_ENTITLEMENT, reason: 'no_restaurant'});
   }
@@ -241,13 +241,16 @@ export async function resolveEntitlement(restaurantId, {fresh = false} = {}) {
     return remember(restaurantId, {
       ...RESTRICTED_ENTITLEMENT,
       readOnly: false,
-      reason: restaurant.status === 'suspended' ? 'tenant_suspended' : 'tenant_cancelled'
+      reason: restaurant.status === 'suspended' ? 'tenant_suspended' : 'tenant_cancelled',
+      timezone: restaurant.timezone || null
     });
   }
 
   const subscription = await Subscription.findOne({restaurant: restaurantId}).lean();
   if (!subscription) {
-    return remember(restaurantId, {...RESTRICTED_ENTITLEMENT, reason: 'no_subscription'});
+    return remember(restaurantId, {
+      ...RESTRICTED_ENTITLEMENT, reason: 'no_subscription', timezone: restaurant.timezone || null
+    });
   }
 
   const plan = await Plan.findById(subscription.plan).lean();
@@ -255,7 +258,9 @@ export async function resolveEntitlement(restaurantId, {fresh = false} = {}) {
     // The plan document is gone but the subscription still points at it. That
     // is a data-integrity fault, not a commercial state, so it fails closed
     // and is named distinctly enough to be searchable in a log.
-    return remember(restaurantId, {...RESTRICTED_ENTITLEMENT, reason: 'plan_missing'});
+    return remember(restaurantId, {
+      ...RESTRICTED_ENTITLEMENT, reason: 'plan_missing', timezone: restaurant.timezone || null
+    });
   }
 
   const {features, limits} = materialise(plan);
@@ -304,6 +309,19 @@ export async function resolveEntitlement(restaurantId, {fresh = false} = {}) {
     cancelAtPeriodEnd: Boolean(subscription.cancelAtPeriodEnd),
     // An inactive plan keeps working for tenants already on it — see header.
     planActive: plan.active !== false,
+    /**
+     * P2G.5 — the tenant's IANA timezone, carried on the CACHED entitlement.
+     *
+     * The monthly order quota needs the tenant's zone to know which billing
+     * month an order falls in. P2G.4 resolved that with its own
+     * `Restaurant.findById` per call, which is one extra query on the order
+     * hot path — the busiest write in the product.
+     *
+     * This resolver ALREADY loads the restaurant row and is already cached for
+     * 30s, so widening its projection by one field makes the timezone free at
+     * the point of use. `null` when unknown; callers normalise.
+     */
+    timezone: restaurant.timezone || null,
     features,
     limits,
     reason

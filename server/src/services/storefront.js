@@ -5,6 +5,8 @@ import {money} from './billing.js';
 import {priceOrder} from './pos.js';
 import {applyModifierPricing, resolveModifiers, toOrderModifiers, normalizeInstructions} from './modifiers.js';
 import {listStations, routeItemToStation} from './stations.js';
+import {withMonthlyOrderQuota} from './orderQuota.js';
+import {resolveEntitlement} from './entitlements.js';
 import {recordRedemption, resolveOrderDiscount, validateCoupon} from './discounts.js';
 import {availablePaymentMethods} from './paymentConfig.js';
 import {findOrCreateCustomer} from './customers.js';
@@ -396,36 +398,52 @@ export async function placePublicOrder({input, requestKey, session}) {
     line.lineTotal = totals.lines[index].lineGross;
   });
 
-  const [order] = await Order.create([{
-    orderNo: `WEB-${Date.now().toString().slice(-7)}`,
-    publicRequestKey: requestKey || undefined,
-    // P1B: the tenant is stamped on the row, not inferred from the branch.
-    restaurant: branch.restaurant,
-    branch: branch._id,
-    customer: customer._id,
-    type: orderType,
-    // Awaiting the branch's acceptance; stock moves when they accept.
-    status: 'pending',
-    items: lines,
-    deliveryAddress: orderType === 'delivery' ? address : undefined,
-    subtotal: totals.subtotal,
-    itemDiscount: 0,
-    discount: totals.discount || 0,
-    discountTotal: totals.discount || 0,
-    couponDiscount: money(couponAmount || 0),
-    couponCode: coupon ? coupon.code : undefined,
-    vatRate: totals.vatRate,
-    vat: totals.vat,
-    serviceChargeRate: 0,
-    serviceCharge: 0,
-    deliveryFee: totals.deliveryFee,
-    total: totals.total,
-    paidAmount: 0,
-    dueAmount: totals.total,
-    inventoryDeducted: false,
-    source: 'online',
-    paymentMethod: method
-  }], {session: session || undefined});
+  /**
+   * P2G.5 — a storefront order consumes the SAME monthly allowance as a POS
+   * order. `maxMonthlyOrders` is the overall ceiling; `maxMonthlyOnlineOrders`
+   * is a separate sub-limit and is not enforced here (out of scope).
+   *
+   * The tenant's timezone comes from the cached entitlement, so this adds no
+   * `Restaurant` query to the guest checkout path.
+   */
+  const order = await withMonthlyOrderQuota({
+    restaurantId: branch.restaurant,
+    timezone: (await resolveEntitlement(branch.restaurant)).timezone,
+    session: session || null,
+    source: 'online'
+  }, async () => {
+    const [created] = await Order.create([{
+      orderNo: `WEB-${Date.now().toString().slice(-7)}`,
+      publicRequestKey: requestKey || undefined,
+      // P1B: the tenant is stamped on the row, not inferred from the branch.
+      restaurant: branch.restaurant,
+      branch: branch._id,
+      customer: customer._id,
+      type: orderType,
+      // Awaiting the branch's acceptance; stock moves when they accept.
+      status: 'pending',
+      items: lines,
+      deliveryAddress: orderType === 'delivery' ? address : undefined,
+      subtotal: totals.subtotal,
+      itemDiscount: 0,
+      discount: totals.discount || 0,
+      discountTotal: totals.discount || 0,
+      couponDiscount: money(couponAmount || 0),
+      couponCode: coupon ? coupon.code : undefined,
+      vatRate: totals.vatRate,
+      vat: totals.vat,
+      serviceChargeRate: 0,
+      serviceCharge: 0,
+      deliveryFee: totals.deliveryFee,
+      total: totals.total,
+      paidAmount: 0,
+      dueAmount: totals.total,
+      inventoryDeducted: false,
+      source: 'online',
+      paymentMethod: method
+    }], {session: session || undefined});
+      return created;
+  });
 
   // Redemption is recorded inside the same transaction, so usage limits hold
   // even if two guests submit the last use of a coupon simultaneously.
