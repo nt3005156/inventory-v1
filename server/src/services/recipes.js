@@ -6,7 +6,8 @@ import { Branch, InventoryBalance } from '../models/operations.js';
 import { userRestaurantContext } from './supplierCatalog.js';
 import { convertQuantity, INGREDIENT_UNITS } from './ingredients.js';
 import { resolveStation } from './stations.js';
-import {assertWithinLimit} from './entitlements.js';
+import {assertWithinLimit, billingEnforcementActive, getLimit} from './entitlements.js';
+import {withQuota} from './quotaGuard.js';
 import {getMenuItemUsage} from './usage.js';
 
 const clean = v => String(v ?? '').trim();
@@ -427,6 +428,24 @@ export async function createMenuItem({ input, user, principal }){
   /**
    * P2C — plan limit on menu size. Service layer, so every caller of
    * `createMenuItem()` is covered rather than only the HTTP route.
+   *
+   * P2G.2 — THIS CHECK IS KEPT, DELIBERATELY, and is no longer the enforcement.
+   *
+   * It is check-then-act and was measured being raced (see the atomic
+   * reservation at the insert below). It is retained because it is the only
+   * thing here that can express NON-COMMERCIAL refusals: a suspended tenant, a
+   * lapsed trial, a cancelled subscription. `assertWithinLimit()` inspects
+   * `entitlement.operational` and produces "No subscription is attached to this
+   * restaurant..." etc. The quota counter cannot — it only knows a number, so a
+   * tenant with no subscription would be told "your plan allows 0 menu items",
+   * which is both unhelpful and a regression against the P2C tests that assert
+   * the subscription wording.
+   *
+   * So the two do different jobs and both are needed:
+   *   this line          -> is this tenant allowed to transact at all, and a
+   *                         friendly early refusal when they are obviously over
+   *   the reservation    -> the ceiling that actually holds under concurrency
+   * It mutates nothing, so running both cannot double-count.
    */
   await assertWithinLimit(restaurantId, 'maxMenuItems', await getMenuItemUsage(restaurantId), {
     label: 'menu items'
@@ -493,15 +512,66 @@ export async function createMenuItem({ input, user, principal }){
     const ing = await Ingredient.findById(line.ingredient).lean();
     line.cost = await calculateRecipeCost([line], { restaurantId });
   }
-  try{
-    const [row] = await MenuItem.create([doc]);
-    await Audit.create({ entity:'menu_items', entityId: row._id, restaurant: restaurantId, action:'create', after: row, user: (await userRestaurantContext(user)).userId });
-    return getMenuItem({ menuId: row._id, user });
-  }catch(e){
-    if(e?.code===11000) throw httpError('Menu code or name already exists',409);
-    if(e?.name==='ValidationError') throw httpError(e.message,400);
-    throw e;
-  }
+  /**
+   * P2G.2 — THE INSERT, UNDER AN ATOMIC SEAT RESERVATION.
+   *
+   * THE DEFECT THIS CLOSES, MEASURED on this exact path (10 trials, limit 2,
+   * 6 concurrent `POST /api/menu-items`):
+   *
+   *     items created per trial: 6,6,3,4,4,4,4,3,5,5
+   *
+   * Every request read the same `getMenuItemUsage()` value, every one passed
+   * `assertWithinLimit`, every one inserted. `maxMenuItems` was a suggestion.
+   *
+   * (A single-trial probe showed a clean 2 and briefly looked like there was
+   * no defect at all. That probe was wrong, not the audit: with a warm
+   * entitlement cache the six requests happened to serialise. Repeating the
+   * trial is what exposes it.)
+   *
+   * `withQuota` — NOT `withCompoundQuota`. A menu item consumes exactly ONE
+   * ceiling, `maxMenuItems`. P2G.1 needed the compound form because a staff
+   * account consumes two (`maxUsers` and the per-role seat) and a refusal on
+   * the second had to hand the first back. There is no second ceiling here, so
+   * the compound wrapper would add an unwind list, a loop and a second failure
+   * mode to express a single conditional write. This is the same primitive the
+   * branch, table and customer paths already use.
+   *
+   * The closure is deliberately TIGHT — the insert and nothing else. Audit
+   * writing and the read-back happen outside it, because a failure in either
+   * of those must NOT release the seat: the menu item exists at that point and
+   * genuinely occupies one. Releasing there would drive the counter below
+   * reality, and reconciliation only ever raises a counter (`$max`), so that
+   * particular drift would not self-heal.
+   */
+  const insert = async () => {
+    try{
+      const [created] = await MenuItem.create([doc]);
+      return created;
+    }catch(e){
+      if(e?.code===11000) throw httpError('Menu code or name already exists',409);
+      if(e?.name==='ValidationError') throw httpError(e.message,400);
+      throw e;
+    }
+  };
+
+  /**
+   * Gated on `billingEnforcementActive()` for the reason P2C introduced that
+   * gate: a deployment with no plan catalogue must behave exactly as it did
+   * before. Without this, shipping P2G.2 would refuse menu items on every
+   * unprovisioned deployment the moment the container restarted.
+   */
+  const row = await billingEnforcementActive()
+    ? await withQuota({
+      restaurantId,
+      resource: 'menuItems',
+      limit: await getLimit(restaurantId, 'maxMenuItems'),
+      countActual: () => getMenuItemUsage(restaurantId),
+      label: 'menu items'
+    }, insert)
+    : await insert();
+
+  await Audit.create({ entity:'menu_items', entityId: row._id, restaurant: restaurantId, action:'create', after: row, user: (await userRestaurantContext(user)).userId });
+  return getMenuItem({ menuId: row._id, user });
 }
 
 export async function updateMenuItem({ menuId, patch, expectedVersion, user, principal }){
