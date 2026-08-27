@@ -32,6 +32,8 @@ import {
 } from '../services/subscriptions.js';
 import {getUsageSummary} from '../services/usage.js';
 import {resolveEntitlement} from '../services/entitlements.js';
+import {describeTenantFeatures} from '../services/featureGuard.js';
+import {publicFeatureCatalogue} from '../services/featureCatalogue.js';
 import {userRestaurantContext} from '../services/supplierCatalog.js';
 
 const r = Router();
@@ -297,6 +299,24 @@ r.get('/my/entitlements', requirePermission('branches.view'), async (req, res) =
       features: entitlement.features,
       limits: entitlement.limits,
       usage
+    });
+  } catch (e) { fail(res, e); }
+});
+
+/**
+ * P2E — which catalogued features this tenant may actually use.
+ *
+ * Distinguishes "not in your plan" from "your subscription lapsed", because
+ * those need different remedies and a UI that conflates them sends the owner
+ * to the wrong place. Presentation only: every one of these features is
+ * re-checked server-side at its own enforcement point.
+ */
+r.get('/my/features', requirePermission('branches.view'), async (req, res) => {
+  try {
+    const {restaurantId} = await userRestaurantContext(req.user);
+    res.json({
+      features: await describeTenantFeatures(restaurantId),
+      catalogue: publicFeatureCatalogue()
     });
   } catch (e) { fail(res, e); }
 });

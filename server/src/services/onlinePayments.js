@@ -141,6 +141,23 @@ export async function createPaymentIntent({orderNo, phone, provider, env = proce
   const branch = await Branch.findById(order.branch).select('restaurant name');
   if (!branch) throw httpError('Branch not found', 404);
 
+  /**
+   * P2E — starting a NEW online payment requires the onlineOrdering
+   * entitlement.
+   *
+   * Deliberately placed after the ownership and status checks, so a caller
+   * who does not already know the order number AND its phone number learns
+   * nothing about the tenant's plan — the 404 above still fires first.
+   *
+   * Note what is NOT gated: the payment RETURN handler and reference lookup.
+   * A guest who was redirected to eSewa while the feature was live must be
+   * able to complete and verify that payment even if the plan lapses in
+   * between. Stranding money in flight would be worse than the revenue the
+   * gate protects.
+   */
+  const {assertFeature} = await import('./entitlements.js');
+  await assertFeature(branch.restaurant, 'onlineOrdering', {label: 'Online payment'});
+
   const amount = money(order.total);
   if (!(amount > 0)) throw httpError('This order has no payable amount', 409);
 

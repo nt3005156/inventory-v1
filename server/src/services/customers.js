@@ -336,7 +336,19 @@ export async function createCustomer({user, input}) {
     );
   }
 
-  const customer = await Customer.create({
+  /**
+   * P2E — `maxCustomers` is now enforced. P2C declared the limit key and never
+   * checked it, so a Starter tenant could hold unlimited customer records.
+   *
+   * Atomic: the reservation and the insert are one conditional write, so a
+   * bulk import cannot race past the ceiling. Checked after the duplicate
+   * check, so re-saving an existing customer never consumes quota.
+   */
+  const {billingEnforcementActive, getLimit} = await import('./entitlements.js');
+  const {withQuota} = await import('./quotaGuard.js');
+  const {getCustomerUsage} = await import('./usage.js');
+
+  const insert = () => Customer.create({
     restaurant: restaurantId,
     branch: input.branch || undefined,
     name: clean(input.name),
@@ -349,6 +361,16 @@ export async function createCustomer({user, input}) {
     tags: (input.tags || []).map(t => clean(t).toLowerCase()).filter(Boolean),
     loyalty: {points: 0, tier: 'bronze', lifetimePoints: 0, joinedAt: new Date()}
   });
+
+  const customer = await billingEnforcementActive()
+    ? await withQuota({
+      restaurantId,
+      resource: 'customers',
+      limit: await getLimit(restaurantId, 'maxCustomers'),
+      countActual: () => getCustomerUsage(restaurantId),
+      label: 'customers'
+    }, insert)
+    : await insert();
 
   await Audit.create({
     entity: 'customer', entityId: customer._id, branch: customer.branch,
@@ -593,6 +615,26 @@ export async function removeCustomerAddress({user, customerId, addressId}) {
 /** Manual loyalty adjustment, always audited. */
 export async function adjustLoyaltyPoints({user, customerId, delta, reason}) {
   const customer = await getCustomer({user, customerId});
+
+  /**
+   * P2E — earning and redeeming points requires the `loyalty` entitlement.
+   *
+   * Enforced in the SERVICE, after `getCustomer()` has already proven the
+   * customer belongs to the caller's restaurant. Two consequences, both
+   * intended:
+   *
+   *   - the tenant is `customer.restaurant`, taken from the stored document,
+   *     so no request field can redirect the check at another tenant's quota;
+   *   - a caller who does not own the customer gets `getCustomer()`'s 404
+   *     first and learns nothing about anybody's plan.
+   *
+   * READING a balance stays ungated. Those points were earned under a plan
+   * that allowed it; hiding them when a plan lapses looks like data loss, and
+   * the catalogue marks `balanceRead` exempt for exactly that reason.
+   */
+  const {assertFeature} = await import('./entitlements.js');
+  await assertFeature(customer.restaurant, 'loyalty', {label: 'Customer loyalty'});
+
   const change = Number(delta);
   if (!Number.isFinite(change) || change === 0) {
     throw httpError('A non-zero point adjustment is required', 400);

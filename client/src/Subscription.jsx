@@ -98,12 +98,21 @@ const LIMIT_LABELS = {
 
 export default function Subscription({call}) {
   const [data, setData] = useState(null);
+  const [features, setFeatures] = useState(null);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setError('');
-    try { setData(await call('/my/entitlements')); }
-    catch (e) { setError(e.message); }
+    try {
+      const [entitlements, featureState] = await Promise.all([
+        call('/my/entitlements'),
+        // P2E. Fails soft: an older server simply shows no feature panel
+        // rather than breaking the whole subscription screen.
+        call('/my/features').catch(() => null)
+      ]);
+      setData(entitlements);
+      setFeatures(featureState?.features || null);
+    } catch (e) { setError(e.message); }
   }, [call]);
 
   useEffect(() => { load(); }, [load]);
@@ -160,6 +169,46 @@ export default function Subscription({call}) {
           ))}
         </tbody>
       </table>
+
+      {features && (
+        <>
+          <h3>Feature availability</h3>
+          {/*
+            * P2E — three distinct states, deliberately not collapsed into
+            * "unavailable". They need different remedies: buy an upgrade,
+            * settle the subscription, or wait for the capability to ship.
+            * The server decides; this only renders what it reports.
+            */}
+          <table>
+            <thead><tr><th>Feature</th><th>Status</th><th/></tr></thead>
+            <tbody>
+              {features.map(feature => (
+                <tr key={feature.key}>
+                  <td>{feature.label}</td>
+                  <td>
+                    {feature.state === 'available' && <Pill tone="active">available</Pill>}
+                    {feature.state === 'not_in_plan' && <Pill tone="cancelled">not in plan</Pill>}
+                    {feature.state === 'subscription_inactive'
+                      && <Pill tone="past_due">subscription inactive</Pill>}
+                    {feature.state === 'not_implemented' && <Pill>coming later</Pill>}
+                  </td>
+                  <td style={{fontSize: '11px', color: '#64748b'}}>
+                    {feature.state === 'not_in_plan' && 'Upgrade your plan to enable this.'}
+                    {feature.state === 'subscription_inactive'
+                      && 'Included in your plan, but your subscription is not active.'}
+                    {feature.state === 'not_implemented' && 'Not available in this release.'}
+                    {feature.state === 'available' && feature.description}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{fontSize: '11px', color: '#94a3b8'}}>
+            Feature access is enforced by the server. Hiding a control here is a
+            convenience, never a security boundary.
+          </p>
+        </>
+      )}
 
       <h3>Included in your plan</h3>
       <div style={{display: 'flex', flexWrap: 'wrap', gap: '6px'}}>

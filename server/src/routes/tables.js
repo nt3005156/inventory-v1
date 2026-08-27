@@ -9,7 +9,7 @@ import {OPEN_ORDER_STATUSES, applyTableStatus, moveOrderToTable, mergeTableOrder
 import {Order} from '../models/operations.js';
 import {publishKitchenOrder, publishTableEvent, publishOrderEvent} from '../services/realtime.js';
 import {fail as safeFail} from '../services/httpErrors.js';
-import {assertTableCreationAllowed} from '../services/tenantLimits.js';
+import {createTableWithinQuota} from '../services/tenantLimits.js';
 
 const r = Router();
 const roles = ['owner', 'manager', 'staff'];
@@ -120,10 +120,11 @@ r.post('/tables', requirePermission('tables.configure'), async (req, res) => {
     // cannot leave a half-created table. The tenant is resolved from the
     // branch, which `assertTableBranchAccess` has already proven belongs to
     // the caller.
-    await assertTableCreationAllowed(x.branch);
-    const table = await RestaurantTable.create({
+    // P2E: atomic reservation + insert, so a burst of creates cannot exceed
+    // the plan's table quota.
+    const table = await createTableWithinQuota(x.branch, () => RestaurantTable.create({
       ...x, area: normalizeArea(x.area), status: x.status || 'available', active: true
-    });
+    }));
     await Audit.create({entity: 'table', entityId: table._id, action: 'create', after: table, user: req.user.id});
     publishTableEvent(table.branch, {reason: 'create', tableIds: [String(table._id)]});
     res.status(201).json({...table.toJSON(), currentOrder: null});

@@ -20,6 +20,13 @@ import {ensureCustomerIndexes} from './customerMigration.js';
 import {ensureDeliveryIndexes} from './deliveryMigration.js';
 import {ensureSalesInvoiceIndexes} from './salesInvoiceMigration.js';
 import {ensureAlertIndexes} from './alertMigration.js';
+import {ResourceCounter} from './quotaGuard.js';
+
+/** P2E — quota counter indexes. Idempotent. */
+async function ensureResourceCounterIndexes() {
+  await ResourceCounter.createIndexes();
+  return true;
+}
 
 const OPERATIONAL_MIGRATIONS = [
   // Per-device sessions: unique sessionHash + TTL. Both are load-bearing.
@@ -50,7 +57,11 @@ const OPERATIONAL_MIGRATIONS = [
   ensureSalesInvoiceIndexes,
   // Phase 16A: alert lifecycle backfill + the unique index that makes
   // duplicate suppression a database guarantee rather than a racy check.
-  ensureAlertIndexes
+  ensureAlertIndexes,
+  // P2E: the unique (restaurant, resource) index is what makes the quota
+  // counter's conditional write a single-document atomic operation. Without
+  // it, two counters could exist for one scope and the ceiling would not hold.
+  ensureResourceCounterIndexes
 ];
 
 const INSECURE_PRODUCTION_SECRETS = new Set([

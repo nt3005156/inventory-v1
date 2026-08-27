@@ -77,8 +77,21 @@ function publicFail(res, e) {
   } else if (status >= 500) {
     message = 'Something went wrong. Please try again.';
   }
+  /**
+   * P2E — a billing refusal carries its stable code.
+   *
+   * `publicFail` deliberately strips everything else, but a 402 needs to be
+   * machine-readable: the storefront must distinguish "this restaurant does
+   * not offer online ordering" from a validation error, and parsing English
+   * is not an interface. Only the code and the feature key are added — no
+   * plan name, no subscription state, nothing about another tenant.
+   */
+  const billing = e?.billing && Number(status) === 402
+    ? {code: e.code || 'FEATURE_NOT_ENTITLED', ...(e.feature ? {feature: e.feature} : {})}
+    : {};
+
   // Never let a stack trace or internal path reach a guest.
-  return res.status(status).json({message: String(message).slice(0, 200)});
+  return res.status(status).json({message: String(message).slice(0, 200), ...billing});
 }
 
 const fail = (res, e) => publicFail(res, e);

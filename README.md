@@ -157,6 +157,31 @@ Rows are classified rather than lumped together: `valid`,
 schema change is an additive `hashVersion`, and existing rows are left
 untouched.
 
+P2E (feature entitlement enforcement) is complete. P2C built the resolver and
+`assertFeature()`; the P2E audit found it had **zero call sites**, so no feature
+was actually gated. Now:
+
+| Feature | Enforced at | Notes |
+|---|---|---|
+| `onlineOrdering` | menu, quote, order creation, payment intent | branding + order tracking stay reachable |
+| `loyalty` | point adjustments | reading a balance is never gated |
+| `apiAccess` | — | **no API-key subsystem exists**; declared, not faked |
+
+Enforcement is at the **service** layer, so every caller is covered — not just
+one route. Refusals are 402 with a stable code: `FEATURE_NOT_ENTITLED`,
+`SUBSCRIPTION_INACTIVE`, `TENANT_SUSPENDED`, `RESOURCE_LIMIT_REACHED`, …
+
+```bash
+curl "$API/api/my/features"     # available | not_in_plan | subscription_inactive | not_implemented
+```
+
+**A quota bypass was found and fixed.** Concurrent creates used to sail past
+plan limits — 5 simultaneous requests produced 6 branches on a 2-branch plan.
+Branch, table and customer creation now reserve quota with a single-document
+conditional write, which MongoDB applies atomically. `maxCustomers`, declared
+by P2C and never checked, is now enforced.
+
+**Nothing is gated on a deployment without a plan catalogue.**
 `BILLING_ENFORCEMENT` (`auto` by default) forces enforcement `on` or `off`
 explicitly. The optional subscription sweep — which only reconciles stored
 status with reality, and is not the enforcement mechanism — is enabled with

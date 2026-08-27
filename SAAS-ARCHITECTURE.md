@@ -1,4 +1,4 @@
-# SaaS architecture — P1 · P2A · P2B · P2C · P2D · P2D.1
+# SaaS architecture — P1 · P2A · P2B · P2C · P2D · P2D.1 · P2E
 
 How this single-restaurant ERP becomes a multi-tenant platform for ~100
 restaurants on one codebase. Written at the end of Phase P1; sections marked
@@ -795,6 +795,92 @@ Two different pre-write objects store identically, and the dropped key *names*
 are unrecoverable. Any repair would be inventing evidence, which is worse than
 an honest gap in an audit trail.
 
+## 3F. Feature entitlement enforcement — P2E
+
+P2C built the resolver, the plan catalogue and `assertFeature()`. The P2E audit
+found **`assertFeature()` had zero call sites**: every feature was resolvable
+and none was enforced. A plan saying `onlineOrdering: false` gated nothing.
+
+### The catalogue
+
+`services/featureCatalogue.js` describes the keys `models/billing.js` declares
+— it does not redefine them, and asserts at load time that the two agree.
+
+| Feature | Enforcement | Implemented |
+|---|---|---|
+| `onlineOrdering` | readonly (existing orders survive) | ✅ |
+| `loyalty` | readonly (balances stay readable) | ✅ |
+| `apiAccess` | block | ❌ **no API-key subsystem exists** |
+
+Unknown keys fail closed: `describeFeature()` returns null,
+`assertFeature()` throws `FEATURE_UNKNOWN` — **even with enforcement off**, so
+a typo is a loud failure rather than a silent hole.
+
+`assertFeatureImplemented()` refuses to gate on `apiAccess`, so nobody can wire
+a permanently-closed door that looks like a billing problem.
+
+### Enforcement is at the SERVICE layer
+
+| Surface | Function | Feature |
+|---|---|---|
+| public menu | `getPublicMenu()` | `onlineOrdering` |
+| cart quote | `priceCart()` | `onlineOrdering` |
+| order creation | `placePublicOrder()` | `onlineOrdering` |
+| payment intent | `createPaymentIntent()` | `onlineOrdering` |
+| loyalty adjust | `adjustLoyaltyPoints()` | `loyalty` |
+
+Routes have several callers each; a route-level check would be duplicated at
+every one and missed by the next. Order creation is gated **independently** of
+`priceCart()` because it is the irreversible act.
+
+**Deliberately exempt:** public branding, order tracking, payment returns,
+loyalty balance reads, and staff accept/reject of existing orders. A guest
+mid-payment must finish; a kitchen must serve orders already placed.
+
+### Error contract
+
+Stable, machine-readable codes on the existing 402:
+`FEATURE_NOT_ENTITLED`, `FEATURE_UNKNOWN`, `SUBSCRIPTION_INACTIVE`,
+`SUBSCRIPTION_MISSING`, `TENANT_SUSPENDED`, `TENANT_CANCELLED`,
+`RESOURCE_LIMIT_REACHED`. The public storefront's `publicFail()` passes the
+code through — and nothing else, so no other tenant's plan is disclosed.
+
+### Quota enforcement survives concurrency
+
+Measured before P2E: 5 simultaneous creates against a 2-branch limit produced
+**6 branches** — classic check-then-act. Now a single-document conditional
+write:
+
+```js
+findOneAndUpdate({restaurant, resource, count: {$lte: limit - 1}}, {$inc: {count: 1}})
+```
+
+MongoDB applies that atomically, so exactly `limit` writers can win. The
+counter is a **gate, not the truth**: every reservation reconciles against the
+real `countDocuments()` first, so drift self-heals. Failed creates release
+their reservation.
+
+Rejected: multi-document transactions on the hot path, and Redis (not in this
+architecture).
+
+Enforced limits: `maxBranches`, `maxTables`, `maxCustomers` (**new in P2E**),
+plus P2C's `maxUsers`/per-role and `maxMenuItems`. Still unenforced:
+`maxStations`, `maxMonthlyOrders`, `maxMonthlyOnlineOrders`.
+
+### Cache
+
+Per-process `Map`, 30s TTL, explicit invalidation on every API write that
+changes entitlement. Verified live: upgrade → 200 and downgrade → 402 on the
+next request. **Limitation:** an out-of-band write (script, or another
+instance) is not seen for ≤30s. Measured: cached resolution is ~900x cheaper
+than uncached (0.0027ms vs 2.42ms).
+
+### Rollout safety
+
+Every gate respects `billingEnforcementActive()`. With no plan catalogue,
+behaviour is exactly as before P2E — verified: 50/50 E2E both before and after
+seeding plans.
+
 ## 4. Configuration and customization strategy
 
 | Layer | Where | Phase |
@@ -929,7 +1015,7 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
 
 ---
 
-## 8. Honest limitations after P1 / P2A / P2B / P2C / P2D / P2D.1
+## 8. Honest limitations after P1 / P2A / P2B / P2C / P2D / P2D.1 / P2E
 
 - **Isolation is application-enforced.** A missing filter leaks. P1B narrows
   the surface for the two riskiest collections; it does not eliminate the class.
@@ -943,12 +1029,16 @@ most dangerous role in a SaaS, so it needs its own audit trail from day one.
   gateway** — no charge is ever taken and no gateway transaction is fabricated;
   no invoices, no dunning, no proration, no tax on subscription fees; no tenant
   self-service billing; `past_due` is set only by hand.
-- **Limit enforcement covers four representative resources** (users, branches,
-  menu items, tables). Every other resource is unmetered until a later phase
-  applies the same central mechanism.
-- **Feature entitlements are resolvable but only partly enforced.** The
-  resolver reports all 15 keys; individual feature gates are added as each
-  surface is wired up.
+- **Limit enforcement covers users (+per-role), branches, menu items, tables
+  and customers**, the last added in P2E. Branch/table/customer creates are
+  ATOMIC and survive concurrency; the user and menu-item paths are still
+  check-then-act and could be raced. `maxStations`, `maxMonthlyOrders` and
+  `maxMonthlyOnlineOrders` are declared but unenforced.
+- **Feature entitlements are ENFORCED as of P2E** for `onlineOrdering` and
+  `loyalty`, at the service layer. `apiAccess` is declared but has **no
+  implementation to gate** — there is no API-key subsystem in the repository
+  and none was fabricated. The other 15 keys remain resolvable but ungated;
+  each needs its surface wired up deliberately.
 - **The entitlement cache is per-process with a 30s TTL.** A missed
   invalidation self-heals within 30 seconds; across instances a plan change can
   take that long to be seen everywhere.

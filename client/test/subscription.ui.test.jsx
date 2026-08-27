@@ -153,6 +153,19 @@ const DASHBOARD = {
   generatedAt: '2026-08-25T00:00:00.000Z'
 };
 
+/** P2E — the three distinct feature states the UI must not conflate. */
+const TENANT_FEATURES = {
+  features: [
+    {key: 'onlineOrdering', label: 'Online ordering', description: 'Public storefront.',
+      implemented: true, inPlan: true, state: 'available', available: true, reason: null},
+    {key: 'loyalty', label: 'Customer loyalty', description: 'Points and adjustments.',
+      implemented: true, inPlan: false, state: 'not_in_plan', available: false, reason: null},
+    {key: 'apiAccess', label: 'API access', description: 'Tenant-scoped API keys.',
+      implemented: false, inPlan: false, state: 'not_implemented', available: false, reason: null}
+  ],
+  catalogue: []
+};
+
 const TENANT_ENTITLEMENTS = {
   planCode: 'starter', planName: 'Starter', status: 'active',
   operational: true, readOnly: true, reason: 'ok',
@@ -359,8 +372,11 @@ describe('P2C UI · platform subscription management', () => {
 // ── tenant view ──────────────────────────────────────────────────────────────
 
 describe('P2C UI · tenant subscription view', () => {
-  const renderTenant = async payload => {
-    const {call, calls} = stubCall({'/my/entitlements': payload});
+  const renderTenant = async (payload, features = TENANT_FEATURES) => {
+    const {call, calls} = stubCall({
+      '/my/entitlements': payload,
+      '/my/features': features
+    });
     await render(<Subscription call={call}/>);
     return calls;
   };
@@ -418,5 +434,67 @@ describe('P2C UI · tenant subscription view', () => {
     for (const word of ['card number', 'cvv', 'pay now', 'checkout']) {
       assert.ok(!lower.includes(word), `tenant screen offered "${word}" with no gateway behind it`);
     }
+  });
+});
+
+// ── P2E: feature availability ────────────────────────────────────────────────
+
+describe('P2E UI · feature availability', () => {
+  const renderWith = async features => {
+    const {call} = stubCall({
+      '/my/entitlements': TENANT_ENTITLEMENTS,
+      '/my/features': features
+    });
+    await render(<Subscription call={call}/>);
+  };
+
+  it('shows an available feature as available', async () => {
+    await renderWith(TENANT_FEATURES);
+    assert.match(text(), /Feature availability/);
+    assert.match(text(), /Online ordering/);
+    assert.match(text(), /available/);
+  });
+
+  it('distinguishes "not in plan" from "subscription inactive"', async () => {
+    /**
+     * The states need different remedies — buy an upgrade vs settle the
+     * subscription — so a UI that collapses them sends the owner to the wrong
+     * place. The server names the distinction; this asserts it is rendered.
+     */
+    await renderWith({
+      features: [
+        {key: 'onlineOrdering', label: 'Online ordering', description: 'x',
+          implemented: true, inPlan: false, state: 'not_in_plan', available: false},
+        {key: 'loyalty', label: 'Customer loyalty', description: 'y',
+          implemented: true, inPlan: true, state: 'subscription_inactive',
+          available: false, reason: 'subscription_past_due'}
+      ],
+      catalogue: []
+    });
+    assert.match(text(), /not in plan/);
+    assert.match(text(), /Upgrade your plan/);
+    assert.match(text(), /subscription inactive/);
+    assert.match(text(), /Included in your plan, but your subscription is not active/);
+  });
+
+  it('marks an unimplemented feature honestly rather than pretending', async () => {
+    await renderWith(TENANT_FEATURES);
+    assert.match(text(), /API access/);
+    assert.match(text(), /coming later/);
+    assert.match(text(), /Not available in this release/);
+  });
+
+  it('states that the server enforces access, not the UI', async () => {
+    await renderWith(TENANT_FEATURES);
+    assert.match(text(), /enforced by the server/i);
+    assert.match(text(), /never a security boundary/i);
+  });
+
+  it('degrades without the feature endpoint rather than breaking the screen', async () => {
+    // An older server: the subscription screen must still render.
+    const {call} = stubCall({'/my/entitlements': TENANT_ENTITLEMENTS});
+    await render(<Subscription call={call}/>);
+    assert.match(text(), /Starter/);
+    assert.ok(!text().includes('Feature availability'));
   });
 });

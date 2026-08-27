@@ -47,6 +47,7 @@ import {
   FEATURE_KEYS, LIMIT_KEYS, OPERATIONAL_SUBSCRIPTION_STATUSES, Plan, Subscription
 } from '../models/billing.js';
 import {isTenantOperational} from './tenantAdmin.js';
+import {BILLING_ERROR_CODES, codeForReason} from './featureCatalogue.js';
 
 function httpError(message, status = 400) {
   return Object.assign(new Error(message), {status});
@@ -346,6 +347,21 @@ export async function getLimit(restaurantId, limitKey) {
  * something useful.
  */
 export async function assertFeature(restaurantId, feature, {label} = {}) {
+  /**
+   * P2E — an unknown key is refused BEFORE the enforcement gate.
+   *
+   * `FEATURE_KEYS` is the closed set of things a plan can grant, so a key
+   * outside it can never be true. Refusing here rather than falling through
+   * means a typo in a route is a loud failure instead of a silent hole, and
+   * it cannot be excused by `BILLING_ENFORCEMENT=off`.
+   */
+  if (!FEATURE_KEYS.includes(feature)) {
+    throw Object.assign(
+      httpError(`Unknown feature: ${feature}`, 500),
+      {billing: true, reason: 'unknown_feature', code: BILLING_ERROR_CODES.FEATURE_UNKNOWN, feature}
+    );
+  }
+
   const entitlement = await resolveEntitlement(restaurantId);
   // Not provisioned for billing yet: report, never refuse. See
   // `billingEnforcementActive()` for why this gate exists.
@@ -354,13 +370,23 @@ export async function assertFeature(restaurantId, feature, {label} = {}) {
   if (!entitlement.operational) {
     throw Object.assign(
       httpError(subscriptionMessage(entitlement), 402),
-      {billing: true, reason: entitlement.reason}
+      {
+        billing: true,
+        reason: entitlement.reason,
+        // Stable and machine-readable: the client must be able to tell
+        // "buy an upgrade" from "settle your invoice" from "call support"
+        // without parsing English prose.
+        code: codeForReason(entitlement.reason)
+      }
     );
   }
   if (entitlement.features[feature] !== true) {
     throw Object.assign(
       httpError(`${label || feature} is not included in the ${entitlement.planName || 'current'} plan`, 402),
-      {billing: true, reason: 'feature_not_in_plan', feature}
+      {
+        billing: true, reason: 'feature_not_in_plan',
+        code: BILLING_ERROR_CODES.FEATURE_NOT_ENTITLED, feature
+      }
     );
   }
   return entitlement;
@@ -409,7 +435,7 @@ export async function assertWithinLimit(restaurantId, limitKey, currentUsage, {
   if (!entitlement.operational) {
     throw Object.assign(
       httpError(subscriptionMessage(entitlement), 402),
-      {billing: true, reason: entitlement.reason}
+      {billing: true, reason: entitlement.reason, code: codeForReason(entitlement.reason)}
     );
   }
 
@@ -424,7 +450,11 @@ export async function assertWithinLimit(restaurantId, limitKey, currentUsage, {
         + `(${used} in use). Upgrade the plan to add more.`,
         402
       ),
-      {billing: true, reason: 'limit_reached', limit: limitKey, allowed: limit, used}
+      {
+        billing: true, reason: 'limit_reached',
+        code: BILLING_ERROR_CODES.RESOURCE_LIMIT_REACHED,
+        limit: limitKey, allowed: limit, used
+      }
     );
   }
   return entitlement;

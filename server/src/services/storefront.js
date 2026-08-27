@@ -43,6 +43,31 @@ const clean = value => String(value ?? '').trim();
  * but it is validated against active branches so a guessed or stale id cannot
  * reach an inactive or non-existent site.
  */
+/**
+ * P2E — the online-ordering entitlement gate for the PUBLIC surface.
+ *
+ * Placed in the SERVICE layer, not the routes: `getPublicMenu`, `priceCart`
+ * and `placePublicOrder` each have more than one caller (routes, the payment
+ * return handler, tests), and a route-level check would have to be duplicated
+ * at every one of them and would be missed by the next.
+ *
+ * The tenant is derived from the BRANCH, using `resolvePublicBranch()` — the
+ * mechanism this file already uses for menus and quotes. A guest's browser
+ * never supplies a restaurant id, so it cannot aim the check at another
+ * tenant.
+ *
+ * Imported lazily because `featureGuard` -> `entitlements` -> `tenantAdmin`
+ * would otherwise close a cycle back to this module.
+ */
+async function assertOnlineOrdering(branchId, {label} = {}) {
+  const {assertPublicFeature} = await import('./featureGuard.js');
+  return assertPublicFeature({
+    branchId, feature: 'onlineOrdering',
+    resolveBranch: id => resolvePublicBranch(id),
+    label: label || 'Online ordering'
+  });
+}
+
 export async function resolvePublicBranch(branchId, {session} = {}) {
   if (!branchId) throw httpError('Branch is required', 400);
   if (!mongoose.isValidObjectId(branchId)) throw httpError('Invalid branch', 400);
@@ -83,7 +108,10 @@ export async function listPublicBranches() {
  * dish is exposed.
  */
 export async function getPublicMenu({branchId}) {
-  const branch = await resolvePublicBranch(branchId);
+  // Gated: the menu IS the ordering surface. Branding stays reachable
+  // separately (P2D's /public/branding), so a restaurant without the feature
+  // still has a public identity — it simply cannot take orders.
+  const branch = await assertOnlineOrdering(branchId, {label: 'Online ordering'});
   const ingredientIds = await Ingredient.find({restaurant: branch.restaurant}).distinct('_id');
   const items = await MenuItem.find({
     active: {$ne: false},
@@ -156,6 +184,8 @@ export function normalizeGuest(input = {}) {
  * is looked up here, so a tampered cart cannot buy a Rs.400 dish for Rs.1.
  */
 export async function priceCart({branchId, type, items, deliveryAddress, couponCode, customerId, session}) {
+  // Gated: quoting a cart is part of taking an order.
+  await assertOnlineOrdering(branchId);
   const branch = await resolvePublicBranch(branchId, {session});
   const orderType = clean(type).toLowerCase() || 'delivery';
   if (!ONLINE_ORDER_TYPES.includes(orderType)) {
@@ -309,6 +339,16 @@ export async function findByRequestKey(requestKey, {session} = {}) {
  * deducting stock for an order that may be rejected would corrupt the ledger.
  */
 export async function placePublicOrder({input, requestKey, session}) {
+  /**
+   * Gated INDEPENDENTLY of `priceCart()`.
+   *
+   * `priceCart()` is called below and is itself gated, so this is a second
+   * check on the same decision. That is deliberate: order creation is the
+   * irreversible act — it writes an Order, decrements stock and can take
+   * money — and it must fail closed on its own merits rather than inheriting
+   * safety from a helper somebody may later refactor or bypass.
+   */
+  await assertOnlineOrdering(input?.branch, {label: 'Online ordering'});
   const guest = normalizeGuest(input.customer);
   const {branch, orderType, lines, totals, coupon, couponAmount} = await priceCart({
     branchId: input.branch,

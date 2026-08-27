@@ -271,6 +271,39 @@ The only schema change is an additive, optional `hashVersion`. New writes are
 correct from deployment; existing rows are left untouched. Nothing to roll
 back.
 
+## Feature entitlement enforcement (P2E)
+
+P2C shipped a plan/subscription/entitlement subsystem whose enforcement helper
+was never called. P2E wired it in.
+
+**Enforced:** `onlineOrdering` (public menu, quote, order creation, payment
+intent) and `loyalty` (point adjustments), at the service layer.
+
+**Not enforced, and honestly so:** `apiAccess` — there is no API-key subsystem
+in this repository. The entitlement is declared; the capability does not exist.
+
+**Quota bypass fixed.** Concurrent creates previously exceeded plan limits (6
+branches created against a limit of 2). Branch, table and customer creation now
+use an atomic conditional write. The user and menu-item paths remain
+check-then-act and could still be raced — a bounded follow-up.
+
+**Rollout is safe.** Every gate respects `BILLING_ENFORCEMENT`; a deployment
+with no plan catalogue behaves exactly as before. Verified: 50/50 E2E both
+before and after provisioning billing.
+
+**Cache:** per-process, 30s TTL, explicit invalidation on every API write.
+Out-of-band or cross-instance changes take up to 30 seconds. No Redis was
+added.
+
+### Operational procedure
+
+```bash
+npm run seed:plans -w api                  # provision the catalogue
+npm run migrate:subscriptions -w api       # attach subscriptions
+# enforcement becomes active automatically once plans exist
+BILLING_ENFORCEMENT=off                    # emergency disable
+```
+
 ## Operational preconditions (unmet by default)
 
 These must be handled before taking real orders:
