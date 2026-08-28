@@ -18,6 +18,8 @@
 import {Router} from 'express';
 import {z} from 'zod';
 import {fail as safeFail} from '../services/httpErrors.js';
+import {billingStreamHealth} from '../services/billingChangeStream.js';
+import {roleStreamActive, roleStreamStats} from '../services/roleChangeStream.js';
 import {authenticated, requirePlatformPermission} from '../middleware/auth.js';
 import {PLATFORM_ROLE_KEYS} from '../services/platformAccess.js';
 import {
@@ -152,6 +154,47 @@ r.get('/platform/audit',
         actorId: req.query.actor, from: req.query.from, to: req.query.to,
         page: req.query.page, limit: req.query.limit
       }));
+    } catch (e) { fail(res, e); }
+  });
+
+/**
+ * P2H.1 — operational health of the background streams.
+ *
+ * WHY THIS LIVES BEHIND A PLATFORM PERMISSION. The unauthenticated `/health`
+ * endpoint is a liveness probe for a load balancer; adding internal subsystem
+ * state to it would publish the platform's operational posture to anyone who
+ * can reach the port. This is a diagnostic for whoever runs the platform, so
+ * it sits with the other `platform.*` routes and reuses the existing
+ * `platform.dashboard.view` permission rather than inventing a new one.
+ *
+ * NO TENANT DATA. The payload is process state — flags, counters, timestamps
+ * and a truncated error string. It deliberately exposes nothing about
+ * subscriptions, plans or restaurants, even though the stream it describes
+ * watches exactly those collections. A test asserts that.
+ */
+r.get('/platform/health/streams',
+  requirePlatformPermission('platform.dashboard.view'),
+  (req, res) => {
+    try {
+      const billing = billingStreamHealth();
+      res.json({
+        checkedAt: new Date().toISOString(),
+        /**
+         * One instance's view. The streams are per-process, so an operator
+         * running several API containers must ask each of them — stated in
+         * the payload so the number is not mistaken for a cluster-wide one.
+         */
+        scope: 'this-instance',
+        billing,
+        /**
+         * The role stream is reported alongside because it is the same class
+         * of background invalidation and an operator checking one will want
+         * the other. Its module keeps counters only, so no health verdict is
+         * fabricated for it beyond whether the cursor is open.
+         */
+        roles: {running: roleStreamActive(), ...roleStreamStats},
+        healthy: billing.healthy
+      });
     } catch (e) { fail(res, e); }
   });
 

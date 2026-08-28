@@ -60,6 +60,36 @@ import {invalidateEntitlements} from './entitlements.js';
 let stream = null;
 let starting = false;
 
+/**
+ * P2H.1 — how much of an error message is worth keeping.
+ *
+ * Enough to tell "not a replica set" from "connection reset" from "resume
+ * token no longer in the oplog", and no more. The message is truncated and
+ * the stack is never retained: this is surfaced on an operational endpoint,
+ * and an unbounded driver string is how internal detail leaks out of one.
+ */
+const MAX_ERROR_LENGTH = 200;
+
+function describeStreamError(error) {
+  if (!error) return null;
+  const name = typeof error.name === 'string' ? error.name : 'Error';
+  const message = String(error.message ?? error).slice(0, MAX_ERROR_LENGTH);
+  // `codeName` is MongoDB's stable, non-sensitive classification.
+  const code = error.codeName || (typeof error.code === 'number' ? error.code : null);
+  return {name, message, ...(code ? {code: String(code)} : {})};
+}
+
+/**
+ * P2H.1 — counters PLUS the state and timestamps an operator needs.
+ *
+ * The counters alone could not answer "is it running?" or "how long has it
+ * been down?" — probed before this change: after a failure the stats read
+ * `errors: 1` and nothing else, with no timestamp and no state.
+ *
+ * Deliberately carries NO tenant, subscription or plan data. This is process
+ * health, and the endpoint that exposes it must not become a side channel
+ * into the billing collections it watches.
+ */
 export const billingStreamStats = {
   started: 0,
   events: 0,
@@ -67,16 +97,85 @@ export const billingStreamStats = {
   planEvents: 0,
   errors: 0,
   closed: 0,
-  restarts: 0
+  restarts: 0,
+  /** ISO instants, or null when the thing has never happened. */
+  startedAt: null,
+  lastEventAt: null,
+  lastErrorAt: null,
+  stoppedAt: null,
+  /** Sanitised — see `describeStreamError`. Never a stack. */
+  lastError: null
 };
 
 export function billingStreamActive() {
   return Boolean(stream);
 }
 
+/**
+ * Test seam: the live cursor, so a test can emit on the listener the driver
+ * actually wired up.
+ *
+ * Added because a mutation survived that dropped the error argument from
+ * `stream.on('error', ...)`. My first attempt to kill it built a SEPARATE
+ * watcher and attached its own listener — which tested the test, not the
+ * module. Reaching the real cursor is the only honest way to assert that
+ * wiring.
+ */
+export function __billingStreamCursor() {
+  return stream;
+}
+
 /** Test seam: makes the counters assertable from a clean slate. */
 export function __resetBillingStreamStats() {
-  for (const key of Object.keys(billingStreamStats)) billingStreamStats[key] = 0;
+  for (const key of Object.keys(billingStreamStats)) {
+    billingStreamStats[key] = typeof billingStreamStats[key] === 'number' ? 0 : null;
+  }
+}
+
+/**
+ * A health snapshot for operators.
+ *
+ * WHY "QUIET" IS NOT "UNHEALTHY". A stream that has seen no events for two
+ * hours is perfectly healthy if nobody edited a subscription for two hours —
+ * billing changes are rare by nature. Inventing a heartbeat requirement would
+ * manufacture false alarms and teach an operator to ignore this.
+ *
+ * So the health signal is the one that actually matters: IS THE CURSOR OPEN.
+ * `lastEventAt` is reported for context, never as a liveness test.
+ *
+ * `degradedForMs` is the useful derived number — how long the process has been
+ * falling back to the 30s TTL — and is null while healthy.
+ */
+export function billingStreamHealth({now = Date.now()} = {}) {
+  const running = billingStreamActive();
+  const since = billingStreamStats.stoppedAt || billingStreamStats.lastErrorAt;
+  return {
+    running,
+    /**
+     * `healthy` is true when the stream is open. A process that never started
+     * one — a deployment where `startBillingChangeStream()` was never called,
+     * or refused — is NOT healthy, because its entitlement invalidation is
+     * silently TTL-bound.
+     */
+    healthy: running,
+    startedAt: billingStreamStats.startedAt,
+    lastEventAt: billingStreamStats.lastEventAt,
+    lastErrorAt: billingStreamStats.lastErrorAt,
+    stoppedAt: billingStreamStats.stoppedAt,
+    lastError: billingStreamStats.lastError,
+    restarts: billingStreamStats.restarts,
+    errors: billingStreamStats.errors,
+    events: billingStreamStats.events,
+    subscriptionEvents: billingStreamStats.subscriptionEvents,
+    planEvents: billingStreamStats.planEvents,
+    /** Milliseconds since the stream stopped or failed; null while running. */
+    degradedForMs: running || !since ? null : Math.max(0, now - Date.parse(since)),
+    /**
+     * What a degraded process actually falls back to, stated so an operator
+     * reading this does not have to know the internals to judge severity.
+     */
+    fallback: 'entitlement cache TTL (30s)'
+  };
 }
 
 /**
@@ -133,8 +232,12 @@ export function applyInvalidation(event, options = {}) {
  * nothing ever drove this path. Making it callable means the recovery contract
  * is asserted rather than assumed.
  */
-export function __handleStreamFailure(failed) {
+export function __handleStreamFailure(failed, error) {
   billingStreamStats.errors += 1;
+  // P2H.1 — WHEN it failed and WHY, so a degraded process is diagnosable
+  // without attaching a debugger to it.
+  billingStreamStats.lastErrorAt = new Date().toISOString();
+  billingStreamStats.lastError = describeStreamError(error);
   try { failed?.close?.(); } catch { /* already gone */ }
   // Only surrender the module handle if the failing stream is the current one;
   // a late error from an already-replaced stream must not kill a healthy one.
@@ -150,6 +253,9 @@ export function __handleStreamFailure(failed) {
  */
 export function __handleStreamEvent(event) {
   billingStreamStats.events += 1;
+  // Context only. Deliberately NOT a liveness signal — see
+  // `billingStreamHealth()` on why a quiet stream is not an unhealthy one.
+  billingStreamStats.lastEventAt = new Date().toISOString();
   const collection = event?.ns?.coll;
   if (collection === 'plans') billingStreamStats.planEvents += 1;
   else billingStreamStats.subscriptionEvents += 1;
@@ -191,6 +297,15 @@ export async function startBillingChangeStream() {
     );
     billingStreamStats.started += 1;
     if (billingStreamStats.started > 1) billingStreamStats.restarts += 1;
+    /**
+     * P2H.1 — RECOVERY IS RECORDED, not just failure. `startedAt` moves to the
+     * new start and the previous failure is cleared, so the snapshot reads as
+     * healthy again while `errors`/`restarts` preserve the history.
+     */
+    billingStreamStats.startedAt = new Date().toISOString();
+    billingStreamStats.stoppedAt = null;
+    billingStreamStats.lastError = null;
+    billingStreamStats.lastErrorAt = null;
 
     const watched = stream;
     stream.on('change', __handleStreamEvent);
@@ -198,7 +313,7 @@ export async function startBillingChangeStream() {
     // RECOVERY. See `__handleStreamFailure` — the handle is surrendered so a
     // restart can rebuild it, and the cache is dropped because changes made
     // while the stream is down are never delivered.
-    stream.on('error', () => __handleStreamFailure(watched));
+    stream.on('error', error => __handleStreamFailure(watched, error));
 
     /**
      * A fresh watcher has no idea what changed while it was not running —
@@ -208,8 +323,13 @@ export async function startBillingChangeStream() {
      */
     invalidateEntitlements();
     return true;
-  } catch {
+  } catch (error) {
+    // A watch() MongoDB refuses (not a replica set, no permission) is the most
+    // likely reason a deployment silently has no invalidation at all, so it is
+    // recorded rather than merely counted.
     billingStreamStats.errors += 1;
+    billingStreamStats.lastErrorAt = new Date().toISOString();
+    billingStreamStats.lastError = describeStreamError(error);
     stream = null;
     return false;
   } finally {
@@ -222,6 +342,9 @@ export async function stopBillingChangeStream() {
   const current = stream;
   stream = null;
   billingStreamStats.closed += 1;
+  // A deliberate stop is not an error, but it IS the moment the process
+  // stopped invalidating, so it anchors `degradedForMs` as a failure does.
+  billingStreamStats.stoppedAt = new Date().toISOString();
   try { await current.close(); } catch { /* already closed */ }
   return true;
 }
