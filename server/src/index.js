@@ -6,7 +6,7 @@ import subscriptionsRouter from './routes/subscriptions.js';
 import brandingRouter from './routes/branding.js';
 import onboardingRouter from './routes/onboarding.js';
 import ingredientsRouter from './routes/ingredients.js';
-import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {mongoConnectionOptions,poolStats} from './services/dbConnection.js';import {loadFileBackedSecrets} from './services/secrets.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
+import recipesRouter from './routes/recipes.js';import customersRouter from './routes/customers.js';import deliveriesRouter from './routes/deliveries.js';import authRouter from './routes/auth.js';import accountsRouter from './routes/accounts.js';import {audit} from './services/engine.js';import http from 'http';import operations from './routes/operations.js';import exportsRouter from './routes/exports.js';import rbacRouter from './routes/rbac.js';import auditRouter from './routes/audit.js';import notificationsRouter from './routes/notifications.js';import supplierCatalog from './routes/supplierCatalog.js';import {attachRealtime,closeRealtime} from './services/realtime.js';import {ensureOperationalIndexes,validateRuntimeEnvironment,verifyTransactionCapableDatabase} from './services/startup.js';import {startReorderScheduler,stopReorderScheduler} from './services/reorderScheduler.js';import {startRoleChangeStream,stopRoleChangeStream} from './services/roleChangeStream.js';import {startBillingChangeStream,stopBillingChangeStream} from './services/billingChangeStream.js';import {describeDeployment,resolveCorsOptions,resolveEnvironment,resolveTrustProxy} from './services/deployment.js';import {rateLimitScope} from './services/rateLimiting.js';import {describeError} from './services/httpErrors.js';import {mongoConnectionOptions,poolStats} from './services/dbConnection.js';import {loadFileBackedSecrets} from './services/secrets.js';import {securityHeaders} from './middleware/securityHeaders.js';import {describePayments} from './services/paymentConfig.js';
 // Deployment posture is resolved once, at load, so a misconfigured staging or
 // production process fails immediately instead of serving traffic with
 // development-grade CORS. See services/deployment.js for the topology notes.
@@ -93,6 +93,7 @@ async function shutdown(signal){
   try{
     await stopReorderScheduler();
     await stopRoleChangeStream();
+    await stopBillingChangeStream();
     await closeRealtime();
     if(httpServer.listening)await new Promise((resolve,reject)=>httpServer.close(error=>error?reject(error):resolve()));
     if(mongoose.connection.readyState)await mongoose.disconnect();
@@ -122,6 +123,10 @@ async function start(){
   // Cross-instance role-cache invalidation. Optional: losing it degrades to
   // the 5s TTL, so a failure must never stop the API booting.
   try{await startRoleChangeStream();}catch(error){console.error('Role change stream failed to start',error);}
+  // P2G.6: cross-instance entitlement invalidation. Same contract as the role
+  // stream -- optional, and a failure degrades to the 30s TTL rather than
+  // stopping the API booting.
+  try{await startBillingChangeStream();}catch(error){console.error('Billing change stream failed to start',error);}
   startupReady=true;
   const port=Number(process.env.PORT||4000);
   await new Promise((resolve,reject)=>{httpServer.once('error',reject);httpServer.listen(port,'0.0.0.0',()=>{httpServer.off('error',reject);resolve()})});
