@@ -328,13 +328,32 @@ export async function reconcileMonthlyOrderQuota({
   restaurantId, timezone, now = new Date(), session = null
 }) {
   const zone = normalizeTimezone(timezone);
-  const [overall, online] = await Promise.all([
-    getOrderUsage(restaurantId, {now, timezone: zone}),
-    getOnlineOrderUsage(restaurantId, {now, timezone: zone})
-  ]);
+  /**
+   * P2G.8 — counted INSIDE the caller's session when there is one.
+   *
+   * Cancellation reconciliation runs in the same transaction that flips the
+   * status, so the count must observe that uncommitted change or it would
+   * correct the counter to the pre-cancellation figure and achieve nothing.
+   * Verified: a session-scoped count sees the in-transaction cancellation
+   * (2), a sessionless one does not (3).
+   *
+   * Sequential rather than `Promise.all` — a MongoDB session must not have
+   * two operations in flight at once, which is exactly what a parallel pair
+   * on the same session would do.
+   */
+  const overall = await getOrderUsage(restaurantId, {now, timezone: zone, session});
+  const online = await getOnlineOrderUsage(restaurantId, {now, timezone: zone, session});
+
   await syncQuotaCounter({
     restaurantId, resource: monthlyOrderResource(now, zone), actual: overall, session
   });
+  /**
+   * The online counter is corrected on EVERY cancellation, not only for
+   * online orders. It is a no-op for a POS cancellation — `syncQuotaCounter`
+   * only writes when the counter is strictly above reality, and cancelling a
+   * POS order does not move the online count — so this is cheap, and it means
+   * a caller never has to know which kind of order it just cancelled.
+   */
   await syncQuotaCounter({
     restaurantId, resource: monthlyOnlineOrderResource(now, zone), actual: online, session
   });

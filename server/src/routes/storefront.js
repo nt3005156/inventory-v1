@@ -7,6 +7,8 @@ import {Audit} from '../models/index.js';
 import {Order} from '../models/operations.js';
 import {assertTenantBranchAccess} from '../services/kitchen.js';
 import {assertNoStrandedMoney} from '../services/refunds.js';
+import {reconcileMonthlyOrderQuota} from '../services/orderQuota.js';
+import {resolveEntitlement} from '../services/entitlements.js';
 import {publishKitchenOrder, publishInventoryEvent} from '../services/realtime.js';
 import {moveStock} from '../services/inventoryLedger.js';
 import {
@@ -510,6 +512,17 @@ r.post('/online-orders/:id/reject', requirePermission('onlineorders.manage'), as
       order.rejectedOnlineAt = new Date();
       order.rejectionReason = body.reason;
       await order.save({session});
+      /**
+       * P2G.8 — a rejected online order stops being quota-countable, so BOTH
+       * monthly counters are corrected inside this transaction. The guard
+       * above already refuses anything that is not `pending`, so this cannot
+       * run twice for one order.
+       */
+      await reconcileMonthlyOrderQuota({
+        restaurantId: order.restaurant,
+        timezone: (await resolveEntitlement(order.restaurant)).timezone,
+        session
+      });
       await Audit.create([{
         entity: 'order', entityId: order._id, branch: order.branch,
         action: 'online_order_rejected', after: {status: 'cancelled'},

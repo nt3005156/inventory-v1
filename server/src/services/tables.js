@@ -3,6 +3,8 @@ import {Branch, Order, Payment, RestaurantTable} from '../models/operations.js';
 import {assertBranchAccess, assertTenantBranchAccess} from './kitchen.js';
 import {money} from './billing.js';
 import {userRestaurantContext} from './supplierCatalog.js';
+import {reconcileMonthlyOrderQuota} from './orderQuota.js';
+import {resolveEntitlement} from './entitlements.js';
 
 function httpError(message, status) {
   const err = new Error(message);
@@ -348,6 +350,26 @@ export async function mergeTableOrders({fromTableId, intoTableId, user, session}
   source.inventoryReversed = true;
   source.dueAmount = 0;
   await source.save({session: session || undefined});
+
+  /**
+   * P2G.8 — a merged-away check is cancelled, so it stops being
+   * quota-countable and the monthly counters must follow.
+   *
+   * This path is easy to overlook: it is a table operation, not an order
+   * operation, but it is one of only three places that write
+   * `Order.status = 'cancelled'`. Missing it would let a busy dining room
+   * silently erode its own monthly allowance by merging checks.
+   *
+   * Guarded on the previous status so re-merging an already-cancelled source
+   * cannot adjust anything twice.
+   */
+  if (sourceStatus !== 'cancelled' && source.restaurant) {
+    await reconcileMonthlyOrderQuota({
+      restaurantId: source.restaurant,
+      timezone: (await resolveEntitlement(source.restaurant)).timezone,
+      session: session || null
+    });
+  }
 
   await releaseTable({tableId: from._id, userId: user.id, session, exceptOrderId: source._id});
   await Audit.create([{

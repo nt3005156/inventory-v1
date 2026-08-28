@@ -181,14 +181,25 @@ const countableStatusFilter = {status: {$nin: QUOTA_EXCLUDED_ORDER_STATUSES}};
  * `now` and `timezone` stay injectable so the boundary can be tested without
  * waiting for a month to turn over.
  */
-export async function getOrderUsage(restaurantId, {now = new Date(), timezone} = {}) {
+export async function getOrderUsage(restaurantId, {now = new Date(), timezone, session} = {}) {
   const zone = timezone || await restaurantTimezone(restaurantId);
   const {start, end} = monthWindow(now, zone);
+  /**
+   * P2G.8 — `session` is optional and defaults to no session, so every
+   * existing caller is unchanged.
+   *
+   * It exists so cancellation reconciliation can count INSIDE the transaction
+   * that is cancelling the order. Verified that a session-scoped count sees
+   * the uncommitted status change (3 orders, one cancelled in-transaction:
+   * inside the session the count is 2, outside it is still 3). Without the
+   * session the reconciliation would read the pre-cancellation figure and
+   * correct the counter to the wrong number.
+   */
   return Order.countDocuments({
     restaurant: asId(restaurantId),
     createdAt: {$gte: start, $lt: end},
     ...countableStatusFilter
-  });
+  }).session(session || null);
 }
 
 /**
@@ -200,7 +211,9 @@ export async function getOrderUsage(restaurantId, {now = new Date(), timezone} =
  * filter would have been silently dropped and this would have counted every
  * order as online. Checked against the schema rather than assumed.
  */
-export async function getOnlineOrderUsage(restaurantId, {now = new Date(), timezone} = {}) {
+export async function getOnlineOrderUsage(
+  restaurantId, {now = new Date(), timezone, session} = {}
+) {
   const zone = timezone || await restaurantTimezone(restaurantId);
   const {start, end} = monthWindow(now, zone);
   return Order.countDocuments({
@@ -210,7 +223,9 @@ export async function getOnlineOrderUsage(restaurantId, {now = new Date(), timez
     // P2G.4 — the same exclusion as the overall count. A cancelled storefront
     // order must not consume the online allowance either.
     ...countableStatusFilter
-  });
+    // P2G.8 — optional session, so a cancellation can count its own
+    // uncommitted change. See `getOrderUsage`.
+  }).session(session || null);
 }
 
 export const DEFAULT_TIMEZONE = 'Asia/Kathmandu';

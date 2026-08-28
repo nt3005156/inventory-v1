@@ -241,6 +241,26 @@ export async function syncQuotaCounter({restaurantId, resource, actual, session 
     );
     return (result?.modifiedCount ?? 0) > 0;
   } catch (error) {
+    /**
+     * P2G.8 — INSIDE A TRANSACTION THE ERROR MUST PROPAGATE.
+     *
+     * Swallowing is right for a sessionless call: reconciliation is
+     * best-effort, and a failure leaves the counter high, which refuses a
+     * little too much rather than admitting too much.
+     *
+     * It is WRONG inside a session. Two concurrent cancellations contend on
+     * the same counter document and MongoDB raises a write conflict; the
+     * transaction is already doomed at that point. Swallowing it lets the
+     * caller carry on issuing operations against a dead session, which
+     * surfaces as "Transaction has been aborted" from somewhere else entirely
+     * — measured as 30 unhandled rejections across the cancellation tests.
+     *
+     * Rethrowing hands the conflict to `session.withTransaction()`, which
+     * retries the whole cancellation. That is exactly the mechanism the
+     * driver provides for this, and it is why concurrent cancellations now
+     * settle correctly instead of leaking async failures.
+     */
+    if (session) throw error;
     console.error('Quota sync failed', {resource, message: error?.message});
     return false;
   }
