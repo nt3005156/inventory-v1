@@ -207,14 +207,24 @@ describe('P2G.5 · maxMonthlyOrders is enforced', () => {
     assert.equal(await countableOrders(), 3, 'a refused order must not be written');
   });
 
-  it(`holds a ceiling of 2 across ${TRIALS} bursts of 6 concurrent creates`, async () => {
+  it(`holds a ceiling of 2 across ${TRIALS} bursts of 8 concurrent creates`, async () => {
+    /**
+     * EIGHT, not six. P2G.7 found that a six-way burst was too narrow to
+     * expose a real race in the reconciliation this quota used: at eight
+     * concurrent creates a ceiling of 2 admitted up to 4
+     * (4,4,2,3,3,3,4,3,2,4). Widening the burst is what makes this test able
+     * to fail.
+     */
     await planWith({maxMonthlyOrders: 2});
+    // Warm the entitlement caches, as any running server is after one request.
+    await restock();
+    await placeOrder();
 
     const perTrial = [];
     for (let trial = 0; trial < TRIALS; trial += 1) {
       await resetOrders();
       const responses = await Promise.all(
-        Array.from({length: 6}, () => placeOrder())
+        Array.from({length: 8}, () => placeOrder())
       );
       const created = await countableOrders();
       perTrial.push(created);
@@ -662,15 +672,39 @@ describe('P2G.5 · P2G.4 counting semantics are unchanged', () => {
     assert.equal((await placeOrder()).status, 201);
     assert.equal((await placeOrder()).status, 402);
 
-    // Void one. The allowance must come back, because the count excludes it.
+    // Void one. The metered usage falls immediately, because the count
+    // excludes cancellations.
     const first = await Order.findOne({restaurant: world.restaurant._id});
     await Order.collection.updateOne({_id: first._id}, {$set: {status: 'cancelled'}});
 
     assert.equal(
       await getOrderUsage(world.restaurant._id, {timezone: 'Asia/Kathmandu'}), 1
     );
+
+    /**
+     * P2G.7 CORRECTION. This test previously asserted that the next order was
+     * admitted immediately, which passed because `reserveQuota` reconciled
+     * with an unconditional `$set`. That `$set` was itself a race: it discards
+     * increments made by concurrent reservations, and it was measured breaking
+     * this very quota — limit 2, 8 concurrent, ten trials gave
+     * 4,4,2,3,3,3,4,3,2,4. My P2G.5 concurrency tests used six-way bursts,
+     * which were too narrow to expose it, and I reported the quota as holding
+     * when it did not.
+     *
+     * Reservations now only ever RAISE the counter, so the slot is returned by
+     * an explicit reconciliation rather than as a side effect of the next
+     * reservation. Until that runs the counter errs HIGH — refusing one order
+     * too many, never admitting one too many.
+     */
+    assert.equal((await placeOrder()).status, 402, 'the counter should still hold at 2');
+
+    const {reconcileMonthlyOrderQuota} = await import('../src/services/orderQuota.js');
+    await reconcileMonthlyOrderQuota({
+      restaurantId: world.restaurant._id, timezone: 'Asia/Kathmandu'
+    });
     assert.equal(
-      (await placeOrder()).status, 201, 'cancelling did not return the allowance'
+      (await placeOrder()).status, 201,
+      'reconciling after a cancellation did not return the allowance'
     );
   });
 

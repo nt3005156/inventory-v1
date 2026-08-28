@@ -139,11 +139,47 @@ export async function reserveQuota({
    * conditional write; the risk is bounded to briefly under-counting during a
    * burst, never over-admitting beyond `limit` at the moment of the write.
    */
-  const reconciliation = reconcile === 'sync'
-    ? {$set: {count: actual, reconciledAt: new Date()}, $setOnInsert: scope}
-    : {$max: {count: actual}, $setOnInsert: scope, $set: {reconciledAt: new Date()}};
+  /**
+   * SETTLE THE DOCUMENT FIRST, then reconcile with `$max` ONLY.
+   *
+   * TWO RACES WERE MEASURED HERE, and the second corrects a defect I shipped
+   * in P2G.5.
+   *
+   * 1. DOCUMENT CREATION. With no counter row yet — the first reservation of a
+   *    new month — concurrent upserts each concluded the count was 0 and each
+   *    passed the ceiling. A bare `$setOnInsert` settles the row once, before
+   *    any arithmetic, so contenders meet a document that already exists.
+   *
+   * 2. `$set` RECONCILIATION. P2G.5 introduced a `sync` mode that wrote
+   *    `{$set: {count: actual}}` so a cancelled order could return its slot.
+   *    That is correct sequentially and WRONG under load: between reading
+   *    `actual` and writing it, concurrent reservations have already
+   *    incremented the counter and the `$set` discards their increments.
+   *    Measured on the overall monthly quota, `limit = 2`, 8 concurrent, ten
+   *    trials: 4,4,2,3,3,3,4,3,2,4. My P2G.5 tests used six-way bursts, which
+   *    were not wide enough to expose it, and I reported that quota as holding.
+   *    It did not.
+   *
+   * So the reservation path now reconciles UPWARD ONLY, for every resource.
+   * `$max` can never discard a concurrent increment, which is precisely the
+   * property the ceiling depends on.
+   *
+   * Downward reconciliation still has to happen — a monthly allowance is a
+   * flow and a cancelled order must give its slot back — but it cannot happen
+   * here, racing against live increments. `syncQuotaCounter()` below does it
+   * as a separate, deliberate step off the reservation path.
+   */
+  await ResourceCounter.updateOne(
+    scope, {$setOnInsert: {...scope, count: 0}}, {upsert: true, session}
+  );
 
-  await ResourceCounter.updateOne(scope, reconciliation, {upsert: true, session});
+  await ResourceCounter.updateOne(
+    scope,
+    // `$max` so a concurrent reservation that has already incremented past
+    // the observed count is never rolled backwards by this reconciliation.
+    {$max: {count: actual}, $setOnInsert: scope, $set: {reconciledAt: new Date()}},
+    {upsert: true, session}
+  );
 
   /**
    * THE ATOMIC STEP. `count: {$lt: limit}` is evaluated by MongoDB in the same
@@ -169,6 +205,45 @@ export async function reserveQuota({
     );
   }
   return {reserved: true, count: updated.count};
+}
+
+/**
+ * Pull a counter DOWN to reality, when reality has genuinely fallen.
+ *
+ * Separate from `reserveQuota()` on purpose. Downward reconciliation and a
+ * live ceiling check cannot share a code path: a `$set` issued next to a
+ * conditional `$inc` discards concurrent increments and breaks the ceiling
+ * (measured — see the header of `reserveQuota`). So the reservation path only
+ * ever raises, and lowering is an explicit act performed when something has
+ * actually reduced usage.
+ *
+ * Guarded by `count: {$gt: actual}`, so it can only ever lower and never
+ * resurrect a slot a concurrent reservation just took. Best-effort: a failure
+ * leaves the counter high, which refuses a little too much rather than
+ * admitting too much, and the next call repairs it.
+ *
+ * Used for FLOW quotas (monthly orders), where cancelling an order must return
+ * its allowance. Stock quotas do not call it — a deactivated station releases
+ * explicitly and a deleted row is handled by its own path.
+ */
+export async function syncQuotaCounter({restaurantId, resource, actual, session = null}) {
+  const settled = Number(actual);
+  if (!Number.isFinite(settled) || settled < 0) return false;
+  try {
+    const result = await ResourceCounter.updateOne(
+      {
+        restaurant: new mongoose.Types.ObjectId(String(restaurantId)),
+        resource,
+        count: {$gt: settled}
+      },
+      {$set: {count: settled, reconciledAt: new Date()}},
+      {session}
+    );
+    return (result?.modifiedCount ?? 0) > 0;
+  } catch (error) {
+    console.error('Quota sync failed', {resource, message: error?.message});
+    return false;
+  }
 }
 
 /**

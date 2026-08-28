@@ -5,7 +5,7 @@ import {money} from './billing.js';
 import {priceOrder} from './pos.js';
 import {applyModifierPricing, resolveModifiers, toOrderModifiers, normalizeInstructions} from './modifiers.js';
 import {listStations, routeItemToStation} from './stations.js';
-import {withMonthlyOrderQuota} from './orderQuota.js';
+import {withMonthlyOnlineOrderQuota} from './orderQuota.js';
 import {resolveEntitlement} from './entitlements.js';
 import {recordRedemption, resolveOrderDiscount, validateCoupon} from './discounts.js';
 import {availablePaymentMethods} from './paymentConfig.js';
@@ -399,18 +399,19 @@ export async function placePublicOrder({input, requestKey, session}) {
   });
 
   /**
-   * P2G.5 — a storefront order consumes the SAME monthly allowance as a POS
-   * order. `maxMonthlyOrders` is the overall ceiling; `maxMonthlyOnlineOrders`
-   * is a separate sub-limit and is not enforced here (out of scope).
+   * P2G.7 — a storefront order consumes BOTH monthly ceilings: the overall
+   * `maxMonthlyOrders` and the online sub-allowance `maxMonthlyOnlineOrders`.
+   * Both must hold, and the overall one is checked first so a globally
+   * exhausted tenant gets the message about their plan rather than a
+   * storefront-specific one.
    *
    * The tenant's timezone comes from the cached entitlement, so this adds no
    * `Restaurant` query to the guest checkout path.
    */
-  const order = await withMonthlyOrderQuota({
+  const order = await withMonthlyOnlineOrderQuota({
     restaurantId: branch.restaurant,
     timezone: (await resolveEntitlement(branch.restaurant)).timezone,
-    session: session || null,
-    source: 'online'
+    session: session || null
   }, async () => {
     const [created] = await Order.create([{
       orderNo: `WEB-${Date.now().toString().slice(-7)}`,
