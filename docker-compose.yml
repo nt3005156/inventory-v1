@@ -2,7 +2,24 @@ services:
   mongo:
     image: mongo:7
     restart: unless-stopped
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    # P2H.4 — AUTHENTICATION ENABLED.
+    #
+    # `--auth` alone is not enough for a replica set: members must also
+    # authenticate to EACH OTHER, which needs a shared keyfile. Supplying
+    # `--keyFile` implies `--auth`, and MongoDB refuses to start if the file is
+    # group- or world-readable, which is why the bootstrap script chmods it 400
+    # and chowns it to uid 999.
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --keyFile
+      - /run/secrets/mongo_keyfile
+    secrets:
+      - mongo_keyfile
+      - mongo_root_password
+      - mongo_app_password
     volumes:
       - mongo_data:/data/db
     # Phase 28 — network isolation. Mongo sits on the BACKEND network only, so
@@ -19,6 +36,9 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
+      # `ping` is one of the few commands allowed WITHOUT authentication, so
+      # this still reports liveness once auth is on — and deliberately does not
+      # embed a credential in the healthcheck.
       test: ["CMD", "mongosh", "--host", "localhost", "--quiet", "--eval", "quit(db.adminCommand({ping:1}).ok ? 0 : 2)"]
       interval: 5s
       timeout: 5s
@@ -33,12 +53,23 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+    # P2H.4 — the localhost exception only works from INSIDE the mongo
+    # container, so the bootstrap is executed there rather than from here.
+    # This service now just waits for that to have happened.
+    secrets:
+      - mongo_root_password
     command:
       - bash
       - -ec
       - |
-        mongosh --host mongo --quiet --eval 'try { rs.status() } catch (error) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongo:27017"}]}) }'
-        until mongosh --host mongo --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 2)'; do sleep 2; done
+        until mongosh --host mongo --quiet \
+          -u "${MONGO_ROOT_USERNAME:-mittho_root}" \
+          -p "$$(cat /run/secrets/mongo_root_password)" \
+          --authenticationDatabase admin \
+          --eval 'quit(db.hello().isWritablePrimary ? 0 : 2)'; do
+          echo "waiting for an authenticated writable primary..."
+          sleep 2
+        done
 
   api:
     build:
@@ -49,7 +80,11 @@ services:
     env_file: .env
     environment:
       PORT: 4000
-      MONGODB_URI: ${COMPOSE_MONGODB_URI:-mongodb://mongo:27017/mittho_ops?replicaSet=rs0}
+      # P2H.4 — the connection string now contains a PASSWORD, so it is read
+      # from a mounted file rather than an environment variable. An env var is
+      # printed in full by `docker inspect` to anyone with socket access on the
+      # host; `services/secrets.js` already supports the `*_FILE` convention.
+      MONGODB_URI_FILE: ${MONGODB_URI_FILE:-/run/secrets/mongodb_uri}
       CLIENT_URL: ${CLIENT_URL:-http://localhost:5173,http://localhost:8080}
       # Deployment class. Compose defaults to development; set APP_ENV=staging
       # or production on the real host so CORS refuses to fall back to
@@ -77,6 +112,8 @@ services:
       JWT_SECRET_FILE: ${JWT_SECRET_FILE:-}
       ESEWA_SECRET_KEY_FILE: ${ESEWA_SECRET_KEY_FILE:-}
       KHALTI_SECRET_KEY_FILE: ${KHALTI_SECRET_KEY_FILE:-}
+    secrets:
+      - mongodb_uri
     depends_on:
       mongo-init:
         condition: service_completed_successfully
@@ -150,6 +187,21 @@ networks:
   backend:
     driver: bridge
     internal: true
+
+# P2H.4 — file-mounted credentials.
+#
+# Generated per deployment by `scripts/mongo-bootstrap-auth.sh` into a
+# git-ignored `secrets/` directory, so no password is ever committed and no two
+# deployments share one.
+secrets:
+  mongo_keyfile:
+    file: ./secrets/mongo_keyfile
+  mongo_root_password:
+    file: ./secrets/mongo_root_password
+  mongo_app_password:
+    file: ./secrets/mongo_app_password
+  mongodb_uri:
+    file: ./secrets/mongodb_uri
 
 volumes:
   mongo_data:

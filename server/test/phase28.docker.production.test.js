@@ -253,9 +253,35 @@ describe('Phase 28 · the Compose stack encodes its guarantees', () => {
     assert.match(compose, /volumes:\s*\n\s*mongo_data:/, 'the volume must be declared');
   });
 
-  it('runs a replica set, because the application requires transactions', () => {
-    assert.match(compose, /--replSet["\s,]+rs0/, 'mongod must run as a replica set');
-    assert.match(compose, /rs\.initiate/, 'the set must be initiated on first boot');
+  it('runs a replica set, because the application requires transactions', async () => {
+    /**
+     * P2H.4: `command:` became a YAML LIST when the keyfile flags were added,
+     * so `--replSet` and `rs0` are now on separate lines. The original regex
+     * required them adjacent — it was matching the formatting, not the
+     * guarantee. Both forms are accepted here.
+     */
+    assert.match(
+      compose, /--replSet[\s"',\n-]+rs0/,
+      'mongod must run as a replica set'
+    );
+    /**
+     * P2H.4 UPDATE: `rs.initiate()` moved out of compose and into
+     * `scripts/mongo-init-auth.sh`.
+     *
+     * It had to. Enabling authentication makes initiation part of a fixed
+     * sequence that can only run INSIDE the mongo container, via MongoDB's
+     * localhost exception: initiate, wait for PRIMARY, create the first user
+     * (which closes the exception), then create the application user. A bare
+     * `rs.initiate` from a sidecar cannot do that.
+     *
+     * The GUARANTEE is unchanged — the set is still initiated on first boot —
+     * so the assertion follows it rather than being deleted.
+     */
+    const bootstrap = await fs.readFile(
+      new URL('../../scripts/mongo-init-auth.sh', import.meta.url), 'utf8'
+    );
+    assert.match(bootstrap, /rs\.initiate/, 'the set must be initiated on first boot');
+    assert.match(bootstrap, /isWritablePrimary/, 'boot must wait for a writable primary');
   });
 
   it('supports file-mounted secrets without breaking plain .env use', () => {

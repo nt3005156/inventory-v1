@@ -41,6 +41,7 @@
  *   2  the run itself failed
  */
 import mongoose from 'mongoose';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import 'dotenv/config';
 import {Restaurant} from '../src/models/operations.js';
 import {Plan, Subscription} from '../src/models/billing.js';
@@ -246,7 +247,7 @@ export function render(report, {onlyAffected = false} = {}) {
 
 async function main() {
   const args = new Set(process.argv.slice(2));
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/mittho_ops';
+  const uri = resolveCliMongoUri();
   await mongoose.connect(uri);
   try {
     const report = await buildOrderQuotaReport();

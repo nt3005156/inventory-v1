@@ -16,6 +16,7 @@
 // It is idempotent: a second --apply reports 0 changes. Nothing is deleted.
 // See README.md — "Alert lifecycle migration (runbook)".
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {Notification} from '../src/models/operations.js';
 import {ensureAlertIndexes, planAlertMigration} from '../src/services/alertMigration.js';
@@ -23,7 +24,7 @@ import {ensureAlertIndexes, planAlertMigration} from '../src/services/alertMigra
 const apply = process.argv.includes('--apply');
 const verifyOnly = process.argv.includes('--verify');
 
-const uri = process.env.MONGODB_URI;
+const uri = resolveCliMongoUri();
 if (!uri) {
   console.error('MONGODB_URI is required');
   process.exit(1);

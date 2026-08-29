@@ -33,6 +33,7 @@
  *   node server/scripts/restore.js --latest --drop
  */
 import {spawn} from 'node:child_process';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {databaseFromUri, listBackups, parseArgs, verifyBackup} from './backup.js';
@@ -144,7 +145,7 @@ export function assertRestoreProducedData(stderr, {drop = false} = {}) {
 
 export async function restoreBackup({
   backupPath,
-  uri = process.env.MONGODB_URI,
+  uri = resolveCliMongoUri(),
   drop = false,
   force = false,
   acknowledged = false,

@@ -435,13 +435,25 @@ describe('P2H2 · never two watchers, never two timers', () => {
     assert.equal(billingStreamActive(), true);
     assert.equal(__billingStreamCursor(), live, 'the cursor should not have been replaced');
 
-    // And it is genuinely still delivering.
+    /**
+     * And it is genuinely still delivering.
+     *
+     * FLAKY BEFORE THIS WAIT (measured 1 failure in 3 runs). A change stream
+     * cursor is returned before the server has necessarily begun watching, so
+     * a write issued immediately after `startBillingChangeStream()` can land
+     * in the gap and never be delivered. The retry loop below issues writes
+     * until one IS observed, which tests "the cursor still delivers" without
+     * depending on when the server started listening.
+     */
     const before = billingStreamStats.events;
-    await Plan.create({
-      code: `p2h2-stale-${Math.random().toString(36).slice(2, 6)}`, name: 'Stale',
-      active: true, currency: 'NPR', limits: {maxUsers: 1}, features: {pos: true}
-    });
-    const delivered = await waitFor(() => billingStreamStats.events > before);
+    const delivered = await waitFor(async () => {
+      if (billingStreamStats.events > before) return true;
+      await Plan.create({
+        code: `p2h2-stale-${Math.random().toString(36).slice(2, 8)}`, name: 'Stale',
+        active: true, currency: 'NPR', limits: {maxUsers: 1}, features: {pos: true}
+      });
+      return billingStreamStats.events > before;
+    }, {interval: 120});
     assert.notEqual(delivered, null, 'the live cursor stopped delivering events');
   });
 

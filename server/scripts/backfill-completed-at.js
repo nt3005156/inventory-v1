@@ -9,11 +9,12 @@
 // Safe to re-run: existing completedAt values are never overwritten, and
 // orders with no audit evidence are left null rather than given a guess.
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {backfillCompletedAt} from '../src/services/completedAtBackfill.js';
 
 const apply = process.argv.includes('--apply');
-const uri = process.env.MONGODB_URI;
+const uri = resolveCliMongoUri();
 if (!uri) {
   console.error('MONGODB_URI is required');
   process.exit(1);

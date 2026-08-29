@@ -41,6 +41,7 @@
  *   node scripts/seed-plans.js --dry-run  report only
  */
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {Plan} from '../src/models/billing.js';
 
@@ -178,7 +179,7 @@ const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}
 if (isMain) {
   const force = process.argv.includes('--force');
   const dryRun = process.argv.includes('--dry-run');
-  const uri = process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/mittho';
+  const uri = resolveCliMongoUri();
 
   await mongoose.connect(uri);
   try {

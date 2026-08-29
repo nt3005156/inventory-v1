@@ -9,3 +9,12 @@ coverage
 /backups/
 backups/
 *.bson.gz
+
+# P2H.4: generated MongoDB credentials and the replica-set keyfile. These are
+# per-deployment secrets produced by scripts/mongo-bootstrap-auth.sh -- a
+# committed database password is a password every reader of the repository
+# knows. Back them up OUT of band; losing the keyfile means the replica set
+# cannot restart.
+/secrets/
+secrets/
+*.keyfile

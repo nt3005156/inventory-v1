@@ -45,12 +45,13 @@
  * script — an out-of-band grant must not be invisible in the audit trail.
  */
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {Audit, User} from '../src/models/index.js';
 import {PLATFORM_ROLES, PLATFORM_ROLE_KEYS} from '../src/services/platformAccess.js';
 import {installAuditChain} from '../src/services/auditTrail.js';
 
-const MONGO = process.env.MONGO_URL || process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/mittho';
+const MONGO = resolveCliMongoUri();
 
 function usage(message) {
   if (message) console.error(`\n${message}`);

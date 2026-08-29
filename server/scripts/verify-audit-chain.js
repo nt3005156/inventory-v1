@@ -27,6 +27,7 @@
  *   npm run audit:verify -- --limit 100000
  */
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {Audit} from '../src/models/index.js';
 import {classifyAuditRow} from '../src/services/auditTrail.js';
@@ -114,8 +115,7 @@ function verifyChain(rows) {
 }
 
 async function main() {
-  const uri = process.env.MONGODB_URI || process.env.MONGO_URL
-    || 'mongodb://127.0.0.1:27017/mittho';
+  const uri = resolveCliMongoUri();
   await mongoose.connect(uri);
 
   const filter = {};

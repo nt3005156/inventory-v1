@@ -25,6 +25,7 @@
  *   npm run seed -- --keep       # seed only if the demo tenant is absent
  */
 import 'dotenv/config';
+import {resolveCliMongoUri} from './services/cliDatabase.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import {Ingredient, MenuItem, Supplier, User} from './models/index.js';
@@ -576,7 +577,7 @@ export async function seedDemoData({log = console.log} = {}) {
 const invokedDirectly = process.argv[1] && process.argv[1].endsWith('seed.js');
 if (invokedDirectly) {
   assertNotProduction();
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(resolveCliMongoUri());
 
   if (process.argv.includes('--keep') && await Restaurant.countDocuments({})) {
     console.log('Existing data found and --keep was passed. Nothing was changed.');

@@ -14,6 +14,7 @@
 //
 // See README.md — "Stock count lock recovery (runbook)".
 import 'dotenv/config';
+import {resolveCliMongoUri} from '../src/services/cliDatabase.js';
 import mongoose from 'mongoose';
 import {recoverLockedSessions, DEFAULT_MIN_AGE_MINUTES} from '../src/services/stockCountRecovery.js';
 
@@ -28,7 +29,7 @@ const branchId = arg('branch');
 const minAgeMinutes = Number(arg('min-age', DEFAULT_MIN_AGE_MINUTES));
 const reason = arg('reason', '');
 
-const uri = process.env.MONGODB_URI;
+const uri = resolveCliMongoUri();
 if (!uri) {
   console.error('MONGODB_URI is required');
   process.exit(1);
