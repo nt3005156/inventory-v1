@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import {Plan, Subscription} from '../models/billing.js';
 import {invalidateEntitlements} from './entitlements.js';
+import {createReArm, parseBackoff} from './streamReArm.js';
 
 /**
  * P2G.6 — cross-instance entitlement invalidation via MongoDB change streams.
@@ -61,171 +62,36 @@ let stream = null;
 let starting = false;
 
 /**
- * P2H.2 — AUTOMATIC RE-ARMING.
+ * P2H.2 — AUTOMATIC RE-ARMING, on the shared controller.
  *
  * THE GAP THIS CLOSES, MEASURED LIVE. P2H.1 stopped MongoDB under a running
- * API container and watched the health endpoint: the stream reported
- * `healthy=false, errors=1, MongoServerSelectionError` and then stayed dead —
- * still down 68 seconds after MongoDB returned. The driver resumes
- * transparently across brief blips, but a server-selection failure kills the
- * cursor for good, and only a process restart brought it back.
+ * API container: the stream reported `healthy=false, errors=1,
+ * MongoServerSelectionError` and then stayed dead — still down 68 seconds
+ * after MongoDB returned. The driver resumes transparently across brief blips,
+ * but a server-selection failure kills the cursor for good.
  *
- * So a failure now schedules its own recovery.
- *
- * THE BACKOFF, and why these numbers. The repository has no shared retry
- * helper to reuse — `reorderScheduler` and `subscriptionScheduler` both use a
- * fixed `setInterval`, which is wrong here: a tight fixed retry against a
- * database that is down is how you turn an outage into a log flood. So this
- * is an explicit bounded ladder, capped so it never becomes a busy loop and
- * never stops trying:
- *
- *     1s, 2s, 5s, 10s, 30s, then 30s forever
- *
- * The first two steps recover from a momentary blip almost invisibly; the cap
- * means a long outage costs two attempts a minute, which is negligible and
- * keeps the logs readable. Overridable for tests and for operators who know
- * their environment.
- *
- * WHY NOT INFINITE ESCALATION. A ladder that keeps doubling would eventually
- * wait hours, which is indistinguishable from staying dead — the very defect
- * being fixed. The cap is the point.
+ * P2H.3 moved the machinery into `services/streamReArm.js` so the role stream
+ * shares it rather than carrying a second copy of the same retry loop. The
+ * bounded ladder, the single-flight guarantee and the `unref`'d timer are
+ * unchanged — that module explains why the backoff is capped rather than
+ * doubling forever.
  */
-const DEFAULT_BACKOFF_MS = Object.freeze([1_000, 2_000, 5_000, 10_000, 30_000]);
-
-function configuredBackoff() {
-  const raw = String(process.env.BILLING_STREAM_BACKOFF_MS || '').trim();
-  if (!raw) return DEFAULT_BACKOFF_MS;
-  const steps = raw.split(',')
-    .map(value => Number(value.trim()))
-    .filter(value => Number.isFinite(value) && value >= 0);
-  return steps.length ? Object.freeze(steps) : DEFAULT_BACKOFF_MS;
-}
-
-/**
- * Recovery state, deliberately module-level and singular.
- *
- * `timer` being non-null is the ONE thing that says "a recovery is already
- * scheduled". Every scheduling path checks it, which is what makes duplicate
- * retry loops impossible — see `scheduleReArm`.
- */
-const reArm = {
-  enabled: true,
-  timer: null,
-  attempt: 0,
-  nextAt: null
-};
+const reArm = createReArm({
+  backoff: () => parseBackoff(process.env.BILLING_STREAM_BACKOFF_MS),
+  isHealthy: () => Boolean(stream),
+  start: () => startBillingChangeStream(),
+  onScheduled: () => { billingStreamStats.reArmScheduled += 1; },
+  onAttempt: () => { billingStreamStats.reArmAttempts += 1; },
+  onRecovered: () => { billingStreamStats.reArmRecoveries += 1; }
+});
 
 /** Test/ops seam: turn automatic recovery off without touching the stream. */
 export function __setBillingReArmEnabled(value) {
-  reArm.enabled = Boolean(value);
-  if (!reArm.enabled) cancelReArm();
-  return reArm.enabled;
+  return reArm.setEnabled(value);
 }
 
-function cancelReArm() {
-  if (reArm.timer) {
-    clearTimeout(reArm.timer);
-    reArm.timer = null;
-  }
-  reArm.nextAt = null;
-}
+const scheduleReArm = () => reArm.schedule();
 
-/**
- * Forget the retry history after a successful start.
- *
- * Without this a stream that recovers, runs for a week and then fails once
- * would wait the maximum delay instead of retrying in a second.
- */
-function resetReArm() {
-  cancelReArm();
-  reArm.attempt = 0;
-}
-
-/**
- * Schedule ONE recovery attempt.
- *
- * THE DUPLICATE-STREAM GUARD, and the reason it lives here rather than in the
- * caller: MongoDB flapping produces a burst of errors, and every one of them
- * reaches a failure handler. If each scheduled its own timer, a ten-error
- * burst would arm ten timers, all of which would later call
- * `startBillingChangeStream()` — and while `starting` serialises them, the
- * result is still a pile of redundant work and a confusing attempt count.
- *
- * A single `reArm.timer` slot means the second and subsequent failures in a
- * burst are no-ops. A test drives twenty consecutive failures and asserts one
- * timer and one cursor.
- */
-function scheduleReArm() {
-  if (!reArm.enabled) return false;
-  /**
-   * Already scheduled, or already healthy — nothing to do.
-   *
-   * This guard also makes two mutants EQUIVALENT rather than dangerous, which
-   * is worth recording so a future reader does not mistake them for coverage
-   * gaps: calling `scheduleReArm()` unconditionally on a stale-handle error,
-   * or while the stream is healthy, both hit this early return because
-   * `stream` is still set. Verified by probe — the scheduled count does not
-   * move in either case.
-   */
-  if (reArm.timer || stream) return false;
-
-  const ladder = configuredBackoff();
-  const delay = ladder[Math.min(reArm.attempt, ladder.length - 1)];
-  reArm.attempt += 1;
-  reArm.nextAt = new Date(Date.now() + delay).toISOString();
-  billingStreamStats.reArmScheduled += 1;
-
-  reArm.timer = setTimeout(() => {
-    reArm.timer = null;
-    reArm.nextAt = null;
-    /**
-     * `void` because a timer callback cannot await, and an unhandled rejection
-     * from a recovery attempt must never reach the process. `attemptReArm`
-     * swallows everything itself; this is belt and braces.
-     */
-    void attemptReArm();
-  }, delay);
-
-  // Never hold the process open during shutdown — the convention
-  // `subscriptionScheduler` already follows.
-  if (typeof reArm.timer.unref === 'function') reArm.timer.unref();
-  return true;
-}
-
-/**
- * One recovery attempt. Never throws, never blocks a request path.
- *
- * If it fails, it schedules the next attempt at the next rung of the ladder,
- * so a long outage keeps being retried without ever spinning.
- */
-async function attemptReArm() {
-  if (!reArm.enabled || stream) return false;
-  billingStreamStats.reArmAttempts += 1;
-  let started = false;
-  try {
-    started = await startBillingChangeStream();
-  } catch {
-    // `startBillingChangeStream` already swallows and records; this is the
-    // last line of defence so a timer can never crash the process.
-    started = false;
-  }
-  if (started) {
-    billingStreamStats.reArmRecoveries += 1;
-    return true;
-  }
-  // Still down. Queue the next rung.
-  scheduleReArm();
-  return false;
-}
-
-/**
- * P2H.1 — how much of an error message is worth keeping.
- *
- * Enough to tell "not a replica set" from "connection reset" from "resume
- * token no longer in the oplog", and no more. The message is truncated and
- * the stack is never retained: this is surfaced on an operational endpoint,
- * and an unbounded driver string is how internal detail leaks out of one.
- */
 const MAX_ERROR_LENGTH = 200;
 
 function describeStreamError(error) {
@@ -294,9 +160,8 @@ export function __resetBillingStreamStats() {
   }
   // P2H.2 — a leftover retry timer from one test firing inside another is
   // exactly the kind of thing that produces an unreproducible red build.
-  cancelReArm();
-  reArm.attempt = 0;
-  reArm.enabled = true;
+  reArm.reset();
+  reArm.setEnabled(true);
 }
 
 /**
@@ -344,9 +209,9 @@ export function billingStreamHealth({now = Date.now()} = {}) {
      * and giving up", which is the difference between an operator watching and
      * an operator intervening.
      */
-    recovering: Boolean(reArm.timer),
+    recovering: reArm.pending,
     nextRetryAt: reArm.nextAt,
-    retryAttempt: reArm.attempt,
+    retryAttempt: reArm.attempts,
     reArmEnabled: reArm.enabled,
     reArmScheduled: billingStreamStats.reArmScheduled,
     reArmAttempts: billingStreamStats.reArmAttempts,
@@ -524,9 +389,22 @@ export async function startBillingChangeStream() {
     // P2H.2 — recovery succeeded, so the ladder starts from the bottom next
     // time. Without this a stream that recovers and later fails once would
     // wait the maximum delay instead of one second.
-    resetReArm();
+    reArm.reset();
 
     const watched = stream;
+    /**
+     * P2H.3 — the cursor's construction can reject ASYNCHRONOUSLY.
+     *
+     * Measured on the role stream while building automatic recovery: when the
+     * driver cannot reach MongoDB the failure does not throw out of `watch()`,
+     * it surfaces later as an unhandled rejection the surrounding try/catch
+     * never sees — one per retry under re-arming, and an unhandled rejection
+     * can terminate a production process. The billing stream had the same
+     * latent flaw; attaching a catch routes it into the normal failure path.
+     */
+    if (typeof watched?.catch === 'function') {
+      watched.catch(error => __handleStreamFailure(watched, error));
+    }
     stream.on('change', __handleStreamEvent);
 
     // RECOVERY. See `__handleStreamFailure` — the handle is surrendered so a
@@ -569,8 +447,7 @@ export async function stopBillingChangeStream() {
    * Done BEFORE the `!stream` early return, so a stop issued while degraded
    * (no cursor, retry pending) still cancels the retry.
    */
-  cancelReArm();
-  reArm.attempt = 0;
+  reArm.reset();
 
   if (!stream) return false;
   const current = stream;

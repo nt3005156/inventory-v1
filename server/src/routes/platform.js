@@ -19,7 +19,7 @@ import {Router} from 'express';
 import {z} from 'zod';
 import {fail as safeFail} from '../services/httpErrors.js';
 import {billingStreamHealth} from '../services/billingChangeStream.js';
-import {roleStreamActive, roleStreamStats} from '../services/roleChangeStream.js';
+import {roleStreamHealth} from '../services/roleChangeStream.js';
 import {authenticated, requirePlatformPermission} from '../middleware/auth.js';
 import {PLATFORM_ROLE_KEYS} from '../services/platformAccess.js';
 import {
@@ -177,6 +177,7 @@ r.get('/platform/health/streams',
   (req, res) => {
     try {
       const billing = billingStreamHealth();
+      const roles = roleStreamHealth();
       res.json({
         checkedAt: new Date().toISOString(),
         /**
@@ -192,8 +193,12 @@ r.get('/platform/health/streams',
          * the other. Its module keeps counters only, so no health verdict is
          * fabricated for it beyond whether the cursor is open.
          */
-        roles: {running: roleStreamActive(), ...roleStreamStats},
-        healthy: billing.healthy
+        /**
+         * P2H.3 — the role stream now reports the same shape as billing,
+         * including its own recovery state, so an operator sees both.
+         */
+        roles,
+        healthy: billing.healthy && roles.healthy
       });
     } catch (e) { fail(res, e); }
   });

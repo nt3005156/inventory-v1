@@ -8,6 +8,7 @@ import {Plan, Subscription} from '../src/models/billing.js';
 import {
   __resetBillingEnforcementProbe, invalidateEntitlements, resolveEntitlement
 } from '../src/services/entitlements.js';
+import {startRoleChangeStream, stopRoleChangeStream} from '../src/services/roleChangeStream.js';
 import {
   __billingStreamCursor,
   __handleStreamEvent,
@@ -41,11 +42,13 @@ let world;
 before(async () => { await startTestApp(); });
 after(async () => {
   await stopBillingChangeStream();
+  await stopRoleChangeStream();
   await stopTestApp();
 });
 
 beforeEach(async () => {
   await stopBillingChangeStream();
+  await stopRoleChangeStream();
   await clearDb();
   invalidateEntitlements();
   __resetBillingStreamStats();
@@ -429,11 +432,19 @@ describe('P2H1 · recovery is visible', () => {
 describe('P2H1 · the operational endpoint', () => {
   it('serves the health snapshot to a platform administrator', async () => {
     await startBillingChangeStream();
+    await startRoleChangeStream();
     const res = await streamHealth(await platformToken());
 
     assert.equal(res.status, 200, res.body?.message);
     assert.equal(res.body.billing.running, true);
     assert.equal(res.body.billing.healthy, true);
+    /**
+     * P2H.3 UPDATE: the top-level `healthy` now covers BOTH streams, so this
+     * test starts the role stream too. Asserting `true` while only the billing
+     * stream was running encoded the old single-stream assumption — a dead
+     * role stream must not be hidden behind a healthy billing one.
+     */
+    assert.equal(res.body.roles.healthy, true);
     assert.equal(res.body.healthy, true);
     assert.ok(res.body.checkedAt);
     // Per-process, and says so rather than implying a cluster-wide verdict.
@@ -444,6 +455,8 @@ describe('P2H1 · the operational endpoint', () => {
   it('reflects a failure and then a recovery', async () => {
     const token = await platformToken();
     await startBillingChangeStream();
+    // P2H.3: overall health covers both streams.
+    await startRoleChangeStream();
     assert.equal((await streamHealth(token)).body.healthy, true);
 
     __handleStreamFailure(null, Object.assign(new Error('cursor killed'), {
