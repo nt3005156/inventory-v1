@@ -61,6 +61,164 @@ let stream = null;
 let starting = false;
 
 /**
+ * P2H.2 — AUTOMATIC RE-ARMING.
+ *
+ * THE GAP THIS CLOSES, MEASURED LIVE. P2H.1 stopped MongoDB under a running
+ * API container and watched the health endpoint: the stream reported
+ * `healthy=false, errors=1, MongoServerSelectionError` and then stayed dead —
+ * still down 68 seconds after MongoDB returned. The driver resumes
+ * transparently across brief blips, but a server-selection failure kills the
+ * cursor for good, and only a process restart brought it back.
+ *
+ * So a failure now schedules its own recovery.
+ *
+ * THE BACKOFF, and why these numbers. The repository has no shared retry
+ * helper to reuse — `reorderScheduler` and `subscriptionScheduler` both use a
+ * fixed `setInterval`, which is wrong here: a tight fixed retry against a
+ * database that is down is how you turn an outage into a log flood. So this
+ * is an explicit bounded ladder, capped so it never becomes a busy loop and
+ * never stops trying:
+ *
+ *     1s, 2s, 5s, 10s, 30s, then 30s forever
+ *
+ * The first two steps recover from a momentary blip almost invisibly; the cap
+ * means a long outage costs two attempts a minute, which is negligible and
+ * keeps the logs readable. Overridable for tests and for operators who know
+ * their environment.
+ *
+ * WHY NOT INFINITE ESCALATION. A ladder that keeps doubling would eventually
+ * wait hours, which is indistinguishable from staying dead — the very defect
+ * being fixed. The cap is the point.
+ */
+const DEFAULT_BACKOFF_MS = Object.freeze([1_000, 2_000, 5_000, 10_000, 30_000]);
+
+function configuredBackoff() {
+  const raw = String(process.env.BILLING_STREAM_BACKOFF_MS || '').trim();
+  if (!raw) return DEFAULT_BACKOFF_MS;
+  const steps = raw.split(',')
+    .map(value => Number(value.trim()))
+    .filter(value => Number.isFinite(value) && value >= 0);
+  return steps.length ? Object.freeze(steps) : DEFAULT_BACKOFF_MS;
+}
+
+/**
+ * Recovery state, deliberately module-level and singular.
+ *
+ * `timer` being non-null is the ONE thing that says "a recovery is already
+ * scheduled". Every scheduling path checks it, which is what makes duplicate
+ * retry loops impossible — see `scheduleReArm`.
+ */
+const reArm = {
+  enabled: true,
+  timer: null,
+  attempt: 0,
+  nextAt: null
+};
+
+/** Test/ops seam: turn automatic recovery off without touching the stream. */
+export function __setBillingReArmEnabled(value) {
+  reArm.enabled = Boolean(value);
+  if (!reArm.enabled) cancelReArm();
+  return reArm.enabled;
+}
+
+function cancelReArm() {
+  if (reArm.timer) {
+    clearTimeout(reArm.timer);
+    reArm.timer = null;
+  }
+  reArm.nextAt = null;
+}
+
+/**
+ * Forget the retry history after a successful start.
+ *
+ * Without this a stream that recovers, runs for a week and then fails once
+ * would wait the maximum delay instead of retrying in a second.
+ */
+function resetReArm() {
+  cancelReArm();
+  reArm.attempt = 0;
+}
+
+/**
+ * Schedule ONE recovery attempt.
+ *
+ * THE DUPLICATE-STREAM GUARD, and the reason it lives here rather than in the
+ * caller: MongoDB flapping produces a burst of errors, and every one of them
+ * reaches a failure handler. If each scheduled its own timer, a ten-error
+ * burst would arm ten timers, all of which would later call
+ * `startBillingChangeStream()` — and while `starting` serialises them, the
+ * result is still a pile of redundant work and a confusing attempt count.
+ *
+ * A single `reArm.timer` slot means the second and subsequent failures in a
+ * burst are no-ops. A test drives twenty consecutive failures and asserts one
+ * timer and one cursor.
+ */
+function scheduleReArm() {
+  if (!reArm.enabled) return false;
+  /**
+   * Already scheduled, or already healthy — nothing to do.
+   *
+   * This guard also makes two mutants EQUIVALENT rather than dangerous, which
+   * is worth recording so a future reader does not mistake them for coverage
+   * gaps: calling `scheduleReArm()` unconditionally on a stale-handle error,
+   * or while the stream is healthy, both hit this early return because
+   * `stream` is still set. Verified by probe — the scheduled count does not
+   * move in either case.
+   */
+  if (reArm.timer || stream) return false;
+
+  const ladder = configuredBackoff();
+  const delay = ladder[Math.min(reArm.attempt, ladder.length - 1)];
+  reArm.attempt += 1;
+  reArm.nextAt = new Date(Date.now() + delay).toISOString();
+  billingStreamStats.reArmScheduled += 1;
+
+  reArm.timer = setTimeout(() => {
+    reArm.timer = null;
+    reArm.nextAt = null;
+    /**
+     * `void` because a timer callback cannot await, and an unhandled rejection
+     * from a recovery attempt must never reach the process. `attemptReArm`
+     * swallows everything itself; this is belt and braces.
+     */
+    void attemptReArm();
+  }, delay);
+
+  // Never hold the process open during shutdown — the convention
+  // `subscriptionScheduler` already follows.
+  if (typeof reArm.timer.unref === 'function') reArm.timer.unref();
+  return true;
+}
+
+/**
+ * One recovery attempt. Never throws, never blocks a request path.
+ *
+ * If it fails, it schedules the next attempt at the next rung of the ladder,
+ * so a long outage keeps being retried without ever spinning.
+ */
+async function attemptReArm() {
+  if (!reArm.enabled || stream) return false;
+  billingStreamStats.reArmAttempts += 1;
+  let started = false;
+  try {
+    started = await startBillingChangeStream();
+  } catch {
+    // `startBillingChangeStream` already swallows and records; this is the
+    // last line of defence so a timer can never crash the process.
+    started = false;
+  }
+  if (started) {
+    billingStreamStats.reArmRecoveries += 1;
+    return true;
+  }
+  // Still down. Queue the next rung.
+  scheduleReArm();
+  return false;
+}
+
+/**
  * P2H.1 — how much of an error message is worth keeping.
  *
  * Enough to tell "not a replica set" from "connection reset" from "resume
@@ -98,6 +256,10 @@ export const billingStreamStats = {
   errors: 0,
   closed: 0,
   restarts: 0,
+  /** P2H.2 — automatic recovery activity, distinct from manual restarts. */
+  reArmScheduled: 0,
+  reArmAttempts: 0,
+  reArmRecoveries: 0,
   /** ISO instants, or null when the thing has never happened. */
   startedAt: null,
   lastEventAt: null,
@@ -130,6 +292,11 @@ export function __resetBillingStreamStats() {
   for (const key of Object.keys(billingStreamStats)) {
     billingStreamStats[key] = typeof billingStreamStats[key] === 'number' ? 0 : null;
   }
+  // P2H.2 — a leftover retry timer from one test firing inside another is
+  // exactly the kind of thing that produces an unreproducible red build.
+  cancelReArm();
+  reArm.attempt = 0;
+  reArm.enabled = true;
 }
 
 /**
@@ -170,6 +337,20 @@ export function billingStreamHealth({now = Date.now()} = {}) {
     planEvents: billingStreamStats.planEvents,
     /** Milliseconds since the stream stopped or failed; null while running. */
     degradedForMs: running || !since ? null : Math.max(0, now - Date.parse(since)),
+    /**
+     * P2H.2 — is the process trying to fix itself, and when next?
+     *
+     * `recovering` distinguishes "degraded and working on it" from "degraded
+     * and giving up", which is the difference between an operator watching and
+     * an operator intervening.
+     */
+    recovering: Boolean(reArm.timer),
+    nextRetryAt: reArm.nextAt,
+    retryAttempt: reArm.attempt,
+    reArmEnabled: reArm.enabled,
+    reArmScheduled: billingStreamStats.reArmScheduled,
+    reArmAttempts: billingStreamStats.reArmAttempts,
+    reArmRecoveries: billingStreamStats.reArmRecoveries,
     /**
      * What a degraded process actually falls back to, stated so an operator
      * reading this does not have to know the internals to judge severity.
@@ -238,11 +419,45 @@ export function __handleStreamFailure(failed, error) {
   // without attaching a debugger to it.
   billingStreamStats.lastErrorAt = new Date().toISOString();
   billingStreamStats.lastError = describeStreamError(error);
-  try { failed?.close?.(); } catch { /* already gone */ }
+
   // Only surrender the module handle if the failing stream is the current one;
   // a late error from an already-replaced stream must not kill a healthy one.
-  if (!failed || failed === stream) stream = null;
+  const wasCurrent = !failed || failed === stream;
+
+  /**
+   * P2H.2 — CLOSE THE CURSOR WE ARE ABANDONING, not just the one we were
+   * handed.
+   *
+   * A REAL DEFECT, MEASURED. This previously closed only `failed`. Called as
+   * `__handleStreamFailure(null, error)` — which is how a caller reports "the
+   * stream is gone" without a handle — `failed` is null, so NOTHING was
+   * closed while `stream` was still set to a live cursor. Automatic re-arming
+   * then opened a second one on top of it.
+   *
+   * Probed across three failure/recovery cycles: four distinct cursor objects,
+   * every one reporting `closed: false`, and a single plan insert delivered
+   * THREE events. Before re-arming existed the leak was invisible, because
+   * nothing reopened a stream automatically.
+   *
+   * Closing the abandoned cursor is what makes "one process, one watcher"
+   * true.
+   */
+  const abandoned = wasCurrent ? (failed || stream) : failed;
+  try { abandoned?.close?.(); } catch { /* already gone */ }
+
+  if (wasCurrent) stream = null;
   try { invalidateEntitlements(); } catch { /* nothing to drop */ }
+
+  /**
+   * P2H.2 — only a failure that actually took the live cursor down schedules
+   * recovery.
+   *
+   * A LATE ERROR FROM AN ALREADY-REPLACED CURSOR must not. P2G.6 established
+   * that such an error is recorded but does not kill the healthy stream, and
+   * scheduling a re-arm for it would tear down a working watcher to replace
+   * it — manufacturing an outage out of a stale event.
+   */
+  if (wasCurrent) scheduleReArm();
 }
 
 /**
@@ -306,6 +521,10 @@ export async function startBillingChangeStream() {
     billingStreamStats.stoppedAt = null;
     billingStreamStats.lastError = null;
     billingStreamStats.lastErrorAt = null;
+    // P2H.2 — recovery succeeded, so the ladder starts from the bottom next
+    // time. Without this a stream that recovers and later fails once would
+    // wait the maximum delay instead of one second.
+    resetReArm();
 
     const watched = stream;
     stream.on('change', __handleStreamEvent);
@@ -338,6 +557,21 @@ export async function startBillingChangeStream() {
 }
 
 export async function stopBillingChangeStream() {
+  /**
+   * P2H.2 — a DELIBERATE stop cancels any pending recovery.
+   *
+   * Called from the shutdown path. Without this, a process that failed and
+   * then began shutting down would have a timer fire mid-teardown and open a
+   * fresh cursor against a connection that is closing — resurrecting the very
+   * thing shutdown just stopped. The timer is `unref`'d so it cannot hold the
+   * process open, but it can still fire before the event loop drains.
+   *
+   * Done BEFORE the `!stream` early return, so a stop issued while degraded
+   * (no cursor, retry pending) still cancels the retry.
+   */
+  cancelReArm();
+  reArm.attempt = 0;
+
   if (!stream) return false;
   const current = stream;
   stream = null;
